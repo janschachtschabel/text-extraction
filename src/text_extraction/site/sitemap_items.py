@@ -8,8 +8,15 @@ not the other way round:
 - **robots**: robots.txt's ``Sitemap:`` lines through ``Pipeline.robots_sitemaps`` (cached, or
   loaded in the host's turn, in every compliance mode), within ``EXTRACT_TIMEOUT_SECONDS``. Its
   sitemaps (at most ``SITE_MAX_SITEMAP_FILES``, else ``sitemap_files_truncated``) become items at
-  depth 0, on any host (the fetch checks the address); none listed means one guess,
-  ``<origin>/sitemap.xml``. ``unavailable`` fails ``target_http_error``, retryable, no guess.
+  depth 0, on any host (the fetch checks the address); none listed means a guess,
+  ``<origin>/sitemap.xml``, and a guess that answers 404, 410 or 2xx without a sitemap (an HTML
+  page, ``looks_like_sitemap``) appends the next one of ``GUESSED_SITEMAP_PATHS`` (through its
+  own ``_extend``, so a rerun stores the same answer); a
+  guess that is blocked or fails ends the chain, a listed sitemap never guesses.
+  ``unavailable`` fails ``target_http_error``, retryable, no guess.
+- **sitemap_first**: ``_sitemap_exists`` answers, for the start page of a ``discovery:
+  sitemap_first`` crawl, whether the site has a sitemap (robots.txt lists one, or a guessed
+  address answers 2xx with a sitemap to a probe read to ``SITEMAP_PROBE_MAX_BYTES``).
 - **sitemap**: ``Pipeline.fetch_raw`` (at most ``SITE_SITEMAP_MAX_BYTES``, cut there), then the
   inflate and the parse on the runner's own pool (one thread per pod, so sitemap parses never
   hold the threads that convert pages). The parse has a deadline (the item's budget,
@@ -40,7 +47,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
@@ -50,12 +57,19 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.jobs import JobRecord, job_principal
+from text_extraction.page_types import PageType, guess_type, sitemap_type_hint
 from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
 from text_extraction.site.follow import unique_candidates
-from text_extraction.site.sitemaps import ParsedSitemap, inflate_bounded, pack_parts, parse_sitemap
+from text_extraction.site.sitemaps import (
+    ParsedSitemap,
+    inflate_bounded,
+    looks_like_sitemap,
+    pack_parts,
+    parse_sitemap,
+)
 from text_extraction.site.store import Candidate, Finished, SiteContext, SiteStore
 from text_extraction.site.types import (
     Crawl,
@@ -69,9 +83,11 @@ from text_extraction.site.types import (
 from text_extraction.site.urls import normalize_url, seen_key, site_host
 
 __all__ = [
+    "GUESSED_SITEMAP_PATHS",
     "MAX_SITEMAP_NESTING",
     "SITEMAP_FILES_TRUNCATED_WARNING",
     "SITEMAP_NOT_FOUND_WARNING",
+    "SITEMAP_PROBE_MAX_BYTES",
     "SITEMAP_TRUNCATED_WARNING",
     "SITEMAP_URLS_TRUNCATED_WARNING",
     "SITE_MEMORY_GUARD_WARNING",
@@ -81,6 +97,12 @@ __all__ = [
 
 # The deepest sitemap a crawl reads: robots.txt lists depth 0, an index's children are one deeper.
 MAX_SITEMAP_NESTING = 3
+
+# How much of a guessed sitemap ``_sitemap_exists`` reads: its answer's status is what counts.
+SITEMAP_PROBE_MAX_BYTES: Final = 65_536
+
+# The addresses tried in turn when robots.txt lists no sitemap.
+GUESSED_SITEMAP_PATHS: Final = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 SITEMAP_NOT_FOUND_WARNING = "sitemap_not_found"
 SITEMAP_TRUNCATED_WARNING = "sitemap_truncated"
@@ -293,14 +315,20 @@ class SitemapItems:
                 warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
                 caps.add("files")
         else:
-            guess = _origin(url) + "/sitemap.xml"
+            guess = _origin(url) + GUESSED_SITEMAP_PATHS[0]
             urls, guessed = [normalize_url(guess) or guess], True
         guard_high = self._guard is not None and self._guard.high
         candidates = unique_candidates(
             Candidate(
                 key=seen_key(sitemap),
                 url=sitemap,
-                node=SiteNode(role="sitemap", depth=0, parent=item.index, guessed=guessed),
+                node=SiteNode(
+                    role="sitemap",
+                    depth=0,
+                    parent=item.index,
+                    guessed=guessed,
+                    guess=0 if guessed else None,
+                ),
                 add=not guard_high,
             )
             for sitemap in urls
@@ -369,10 +397,18 @@ class SitemapItems:
             error = ErrorInfo(code=code, message=message, retryable=retryable)
             return Envelope(status="failed", data=result(None), error=error)
 
-        if fetched.status in (404, 410) and node.guessed:
+        # A guessed address that is no sitemap moves on: a 404 or 410, and a 2xx whose first bytes
+        # are none (a CMS that answers every path with its page). ``_sitemap_exists`` reads the
+        # same, so a probe's yes always meets a sitemap that is read.
+        not_there = fetched.status in (404, 410) or (
+            200 <= fetched.status < 300
+            and not looks_like_sitemap(fetched.content[:SITEMAP_PROBE_MAX_BYTES])
+        )
+        if not_there and node.guessed:
             info = SitemapInfo(format="absent", guessed=True)
-            envelope = Envelope(status="success", data=result(info, [SITEMAP_NOT_FOUND_WARNING]))
-            return envelope, _Outcome(links=[])
+            more, outcome = await self._guess_next(job, item, url, node)
+            absent = [SITEMAP_NOT_FOUND_WARNING, *more]
+            return Envelope(status="success", data=result(info, absent)), outcome
         if not 200 <= fetched.status < 300:
             retryable = fetched.status >= 500 or fetched.status == 429
             message = f"The sitemap answered with HTTP status {fetched.status}."
@@ -383,6 +419,7 @@ class SitemapItems:
         # What this item may keep: its grant on a rerun, else what is left of the crawl's. With
         # nothing left a file is read only to its first entry (an index is read whole).
         left = await self._sites.entries_left(job.id, item.index)
+        type_hint = sitemap_type_hint(url)
         deadline = started + self._item_budget
         try:
             # The parse stops itself at the deadline and answers what it read; this timeout,
@@ -396,6 +433,7 @@ class SitemapItems:
                     settings.site_sitemap_max_bytes,
                     left,
                     deadline,
+                    type_hint,
                 )
         except TimeoutError:
             return failed(ErrorCode.TIMEOUT, _SITEMAP_SLOT_MESSAGE, retryable=True), _Outcome(
@@ -456,6 +494,7 @@ class SitemapItems:
                             sitemap=SitemapInfo(
                                 format=sitemap_format,
                                 guessed=node.guessed,
+                                type_hint=type_hint,
                                 entries=part,
                                 entry_count=parsed.entry_count,
                                 part=number,
@@ -476,6 +515,7 @@ class SitemapItems:
         info = SitemapInfo(
             format=sitemap_format,
             guessed=node.guessed,
+            type_hint=type_hint,
             entries=parts[0],
             entry_count=parsed.entry_count,
             part=1,
@@ -516,6 +556,101 @@ class SitemapItems:
             envelope = Envelope(status="success", data=data)
         outcome = _Outcome(links=[], entries=len(entries), appended=len(extended.new), caps=caps)
         return envelope, outcome
+
+    async def _sitemap_verdict(
+        self,
+        job: JobRecord,
+        url: str,
+        gate_refusals: Literal["fail", "raise"],
+        started: float,
+    ) -> bool:
+        """The ``sitemap_first`` verdict of item 0: the one kept by an earlier run, else the
+        probe's, kept for reruns (so a rerun labels its links as the first run did). The probe
+        gets what is left of the item's budget (``started`` + ``_item_budget``, inside the lease)
+        and is skipped with none; a probe that outlasts it is no, so the crawl goes on as
+        ``crawl``."""
+        kept = await self._sites.probe_verdict(job.id)
+        if kept is not None:
+            return kept
+        remaining = self._item_budget - (time.monotonic() - started)
+        verdict = False
+        if remaining > 0:
+            try:
+                async with asyncio.timeout(remaining):
+                    verdict = await self._sitemap_exists(job, url, gate_refusals)
+            except TimeoutError:
+                verdict = False
+        return await self._sites.keep_probe_verdict(job.id, verdict)
+
+    async def _sitemap_exists(
+        self, job: JobRecord, url: str, gate_refusals: Literal["fail", "raise"]
+    ) -> bool:
+        """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: its
+        robots.txt lists one, or one of ``GUESSED_SITEMAP_PATHS``, tried in turn, answers 2xx
+        with a sitemap (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the
+        pipeline (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the
+        guess chain read, so a yes always leads to a sitemap item that is read: an unavailable
+        robots.txt is no (the robots item fails without a guess); a guess answering 2xx with
+        something that looks like a sitemap (``looks_like_sitemap``) is yes; a 404, a 410 or a
+        2xx that is no sitemap (an HTML page) moves on to the next address; a failure or any
+        other status is no."""
+        listed = await self._pipeline.robots_sitemaps(url, gate_refusals=gate_refusals)
+        if listed.state == "unavailable":
+            return False
+        if listed.state == "found" and listed.urls:
+            return True
+        for path in GUESSED_SITEMAP_PATHS:
+            guess = _origin(url) + path
+            raw = await self._pipeline.fetch_raw(
+                normalize_url(guess) or guess,
+                job_principal(job),
+                job.options.compliance,
+                max_bytes=SITEMAP_PROBE_MAX_BYTES,
+                truncate=True,
+                gate_refusals=gate_refusals,
+            )
+            if raw.fetched is None:
+                return False
+            status = raw.fetched.status
+            if 200 <= status < 300 and looks_like_sitemap(raw.fetched.content):
+                return True
+            if status not in (404, 410) and not 200 <= status < 300:
+                return False
+        return False
+
+    async def _guess_next(
+        self, job: JobRecord, item: QueueItem, url: str, node: SiteNode
+    ) -> tuple[list[str], _Outcome]:
+        """Append the next guessed sitemap after a guess that answered 404, 410 or 2xx without a
+        sitemap, while one is left; the warnings it adds to the absent item and the item's
+        outcome. Like ``_robots`` it always calls ``_extend`` (``add`` off under the memory
+        guard), so a rerun finds the stored answer and re-queues the child, and nothing is
+        appended twice."""
+        following = (node.guess if node.guess is not None else 0) + 1
+        if following >= len(GUESSED_SITEMAP_PATHS):
+            return [], _Outcome(links=[])
+        address = _origin(url) + GUESSED_SITEMAP_PATHS[following]
+        target = normalize_url(address) or address
+        guard_high = self._guard is not None and self._guard.high
+        candidate = Candidate(
+            key=seen_key(target),
+            url=target,
+            node=SiteNode(
+                role="sitemap", depth=0, parent=item.index, guessed=True, guess=following
+            ),
+            add=not guard_high,
+        )
+        extended = await self._extend(job, item, [candidate], max_pages=0)
+        warnings: list[str] = []
+        caps: set[str] = set()
+        if extended.answer(0) == (None, True):
+            if extended.capped:
+                warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
+                caps.add("files")
+            else:
+                warnings.append(SITE_MEMORY_GUARD_WARNING)
+                caps.add("memory")
+        return warnings, _Outcome(links=[], appended=len(extended.new), caps=caps)
 
     def _fit_children(self, shell: ExtractResult, parsed: ParsedSitemap) -> list[SitemapChild]:
         """The leading children of an index that let its item fit ``JOB_ITEM_MAX_BYTES``."""
@@ -586,10 +721,17 @@ def _with_site(
 
 
 def _read_sitemap(
-    body: bytes, base_url: str, max_bytes: int, max_entries: int, deadline: float
+    body: bytes,
+    base_url: str,
+    max_bytes: int,
+    max_entries: int,
+    deadline: float,
+    type_hint: PageType | None,
 ) -> tuple[ParsedSitemap, bool]:
     """Inflate (a gzip body) and parse one sitemap file, on a pool thread: at most
-    ``max_entries`` kept, and none left stops the parse at its first entry."""
+    ``max_entries`` kept, and none left stops the parse at its first entry. Each entry gets its
+    ``type_guess`` here too (about 15 microseconds each, so 13,500 entries cost 0.2 s, off the
+    event loop)."""
     inflated, cut = inflate_bounded(body, max_bytes)
     parsed = parse_sitemap(
         inflated,
@@ -598,4 +740,8 @@ def _read_sitemap(
         deadline=deadline,
         stop_at_cap=max_entries <= 0,
     )
+    for position, entry in enumerate(parsed.entries):
+        guess = guess_type(entry.loc, sitemap_hint=type_hint)
+        if guess is not None:
+            parsed.entries[position] = entry.model_copy(update={"type_guess": guess.type})
     return parsed, cut

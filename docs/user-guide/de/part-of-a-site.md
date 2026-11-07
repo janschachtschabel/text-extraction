@@ -79,18 +79,48 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   extrahieren“: Die markierten URLs werden zu Batches, mit dem Format, dem Browser-Fallback, den
   Metadaten und den Optionen, die Sie unter dem Baum setzen.
 
-  Jede URL des Baums zeigt ihren Seitentyp, etwa „Inhalt“, „Übersicht“ oder „Impressum“ (siehe
+  Der Baum hat ausgerichtete Spalten: Seite, Typ, Gefunden, Status und Tiefe, unter einem Kopf,
+  der beim Scrollen sichtbar bleibt. Bei einem schmalen Baum sind die Zeilen kompakt (über die
+  eigene Breite des Baums entscheidet, nicht die des Fensters). Ein Abschnitt zeigt, wie viele
+  Seiten er enthält, und seinen eigenen Typ. Eine gecrawlte Seite zeigt
+  ihren eigenen Titel ohne Anführungszeichen hinter dem Pfad; eine URL, die nicht gelesen wurde,
+  aber von einer gecrawlten Seite verlinkt ist, zeigt den Linktext in Anführungszeichen (ein
+  Sitemap-Eintrag hat keinen eigenen Titel). Eine Zusammenfassung über dem Baum zählt die
+  URLs (gecrawlt, aus der Sitemap, nur verlinkt) und bei einem beendeten Crawl, wie lange er
+  dauerte; die Schaltflächen unter „Nach Typ filtern“ zeigen nur die URLs eines Typs („Alle“
+  zeigt jede URL; mehrere Schaltflächen zeigen die Vereinigung). Mit JavaScript ersetzen die
+  Schaltflächen, jede mit ihrer Anzahl, die Zeile „Typen:“; ohne JavaScript bleibt die Zeile
+  stehen, und nichts filtert. Solange ein Typ gefiltert ist, wirken „Alle auswählen“,
+  „Inhaltsseiten auswählen“ und das Häkchen eines Abschnitts nur auf die angezeigten URLs, und
+  „Keine auswählen“ entfernt jedes Häkchen, auch die verborgenen.
+
+  Der Baum erscheint von selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange
+  der Job läuft, alle paar Sekunden (das Intervall wird länger, wenn das Lesen des Jobs langsam
+  ist, und eine fehlgeschlagene Aktualisierung wird wiederholt). Eine Aktualisierung behält Ihre
+  Häkchen, die Faltung, den Filter, die Batch-Optionen, die Scrollposition und den Fokus und
+  wartet, solange Sie in ein Feld tippen. Der Batch unter dem Baum bleibt bei der Aktualisierung
+  bestehen.
+
+  Jede URL des Baums zeigt ihren Seitentyp, etwa „Inhalt“, „Übersicht“, „Veranstaltung“,
+  „Lernmaterial“ oder „Impressum“ (siehe
   [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien)),
-  und „Typen:“ über dem Baum zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
-  eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Ein Sitemap-Eintrag oder
-  eine nur verlinkte URL wurde nicht gelesen; deshalb wird ihr Typ allein aus ihrer URL geschätzt
-  und als „aus der URL geschätzt“ markiert. Die URL-Regeln kennen unter anderem Autorenseiten
-  (`author`, `autor`: „Übersicht“), weitere Namen für Kontaktseiten sowie datierte Pfade wie
-  `/2021/05/oer-camp/` oder WordPress-Adressen wie `?p=12` und `?page_id=12` („Inhalt“; Sprach-
-  und Tracking-Parameter wie `?lang=en` zählen nicht). Eine URL, die keine Regel kennt, zeigt
-  das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen;
-  der Typ zeigt sich beim Extrahieren“ (als Tooltip und für Screenreader), und die Zeile „Typen:“
-  zählt „Typ offen“ mit. „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+  und die Zeile „Typen:“ über dem Baum (mit JavaScript die Schaltflächen) zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
+  eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Jede andere URL wurde nicht
+  gelesen; deshalb wird ihr Typ geschätzt und als „geschätzt“ markiert, mit dem Grund: „aus der
+  URL“ (die URL-Regeln, unter anderem Autorenseiten (`author`, `autor`: „Übersicht“), weitere
+  Namen für Kontaktseiten sowie datierte Pfade wie `/2021/05/oer-camp/` oder WordPress-Adressen
+  wie `?p=12` und `?page_id=12`: „Inhalt“; Sprach- und Tracking-Parameter wie `?lang=en` zählen
+  nicht), „aus der Sitemap“ (der Dateiname der Sitemap, die sie nannte, etwa `post-sitemap.xml`
+  oder `wp-sitemap-posts-event-1.xml`), „aus dem Linktext“ (ein Link, der wie ein Typ heißt,
+  etwa „Kontakt“, oder in einer Seitennummerierung), „aus Schlüsselwörtern“ (ein Wort des Pfads
+  oder des Linktexts, etwa `veranstaltung` für „Veranstaltung“ oder `arbeitsblatt` für
+  „Lernmaterial“) oder „Seite mit Namen, nicht abgerufen“ („Inhalt“, die Vorgabe für eine URL mit
+  lesbarem Namen). Eine Schätzung aus der Vorgabe weicht jedem anderen Grund. Nur eine URL, die
+  keine Regel schätzen kann (eine Zahl, eine Hex-Zeichenfolge oder eine UUID als letzter Teil,
+  ein letzter Teil ohne Wort aus drei Buchstaben oder eine Abfrage, die kein Sprach- oder
+  Tracking-Parameter ist), zeigt das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen; der Typ zeigt sich beim Extrahieren“
+  (als Tooltip und für Screenreader), und die Zeile „Typen:“ und die Schaltflächen zählen „Typ offen“ mit.
+  „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
   Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite
   das Häkchen; eine URL ohne Typ wird markiert, außer ihre Seite ist gescheitert.
 

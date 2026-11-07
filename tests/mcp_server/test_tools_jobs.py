@@ -133,6 +133,9 @@ def test_tools_list_job_tools(client: TestClient) -> None:
         assert schema["required"] == ["job_id"], name
         assert schema.get("additionalProperties") is False, name
     assert tools["get_job"]["annotations"]["readOnlyHint"] is True
+    discovery = tools["site_structure"]["inputSchema"]["properties"]["discovery"]
+    assert discovery["enum"] == ["crawl", "sitemap_first"]
+    assert discovery["default"] == "crawl"
     assert tools["get_job_screenshot"]["annotations"]["readOnlyHint"] is True
     assert tools["cancel_job"]["annotations"]["destructiveHint"] is True
     assert tools["cancel_job"]["annotations"]["readOnlyHint"] is False
@@ -568,6 +571,25 @@ def test_site_structure_tool(client: TestClient) -> None:
         client, "site_structure", {"url": PAGE, "options": {"sitemaps": False}}, headers=AUTH
     )
     assert scoped["isError"] is False, scoped
+
+    first = call_tool(
+        client, "site_structure", {"url": PAGE, "discovery": "sitemap_first"}, headers=AUTH
+    )
+    assert first["isError"] is False, first
+    job_id = envelope_of(first)["data"]["id"]
+    record = portal(client).call(store_of(client).get, job_id)
+    assert record is not None
+    assert record.options.site is not None
+    assert record.options.site.discovery == "sitemap_first"
+    clash = refusal(
+        call_tool(
+            client,
+            "site_structure",
+            {"url": PAGE, "discovery": "sitemap_first", "options": {"sitemaps": False}},
+            headers=AUTH,
+        )
+    )
+    assert clash["code"] == "invalid_request"
 
 
 def test_get_job_screenshot(client: TestClient) -> None:

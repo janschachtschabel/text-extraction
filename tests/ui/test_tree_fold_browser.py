@@ -31,9 +31,9 @@ SOCIAL: Final = "https://www.youtube.com/@a-rather-long-channel-name-that-has-to
 SITE: Final = {
     **PAGES,
     "/": ("Start page", [*PAGES["/"][1], SOCIAL]),
-    "/docs/a.html": ("Docs A", ["/docs/deeper.html"]),
+    "/docs/a.html": ("Docs A", ["/docs/12345"]),
 }
-URLS: Final = 6  # the five pages and /docs/deeper.html, linked only
+URLS: Final = 6  # the five pages and /docs/12345, linked only
 
 
 @pytest.fixture
@@ -71,7 +71,9 @@ def _open_tree(page: Page, origin: str) -> Locator:
 
 
 def _section(view: Locator, label: str) -> Locator:
-    name = view.page.locator(":scope > label > span.label", has_text=re.compile(f"^{label}$"))
+    name = view.page.locator(
+        ":scope > .cell-name > label > span.label", has_text=re.compile(f"^{label}$")
+    )
     return view.locator("li.node-section", has=name)
 
 
@@ -84,21 +86,21 @@ def test_top_level_open_sections_folded(ui: tuple[str, str]) -> None:
     with browsing(url) as (page, console):
         view = _open_tree(page, origin)
         host = view.locator("ul.tree > li")
-        host_button = host.locator(":scope > button.fold")
+        host_button = host.locator(":scope > .cell-name > button.fold")
         expect(host_button).to_be_visible()
         expect(host_button).to_have_attribute("aria-expanded", "true")
         expect(host.locator(":scope > ul")).to_be_visible()
         expect(_box(view, origin, "/about.html")).to_be_visible()
 
         docs = _section(view, "docs/")
-        button = docs.locator(":scope > button.fold")
+        button = docs.locator(":scope > .cell-name > button.fold")
         expect(button).to_have_attribute("aria-expanded", "false")
         expect(button).to_have_accessible_name("Pages under docs/")
         controlled = button.get_attribute("aria-controls")
         assert controlled == docs.locator(":scope > ul").get_attribute("id")
         expect(docs.locator(":scope > ul")).to_be_hidden()
         expect(_box(view, origin, "/docs/a.html")).to_be_hidden()
-        expect(docs.locator(":scope > label > input")).to_be_visible()
+        expect(docs.locator(":scope > .cell-name > label > input")).to_be_visible()
 
         for action in ("tree-unfold-all", "tree-fold-all"):
             expect(view.locator(f"[data-action={action}]")).to_be_visible()
@@ -117,7 +119,7 @@ def test_fold_button_toggles_with_keyboard(ui: tuple[str, str]) -> None:
     with browsing(url) as (page, console):
         view = _open_tree(page, origin)
         docs = _section(view, "docs/")
-        button = docs.locator(":scope > button.fold")
+        button = docs.locator(":scope > .cell-name > button.fold")
         # The fold button is the next tab stop after the row before it.
         _box(view, origin, "/about.html").focus()
         page.keyboard.press("Tab")
@@ -125,7 +127,7 @@ def test_fold_button_toggles_with_keyboard(ui: tuple[str, str]) -> None:
         page.keyboard.press("Space")
         expect(button).to_have_attribute("aria-expanded", "true")
         expect(docs.locator(":scope > ul")).to_be_visible()
-        expect(_box(view, origin, "/docs/deeper.html")).to_be_visible()
+        expect(_box(view, origin, "/docs/12345")).to_be_visible()
         page.keyboard.press("Enter")
         expect(button).to_have_attribute("aria-expanded", "false")
         expect(docs.locator(":scope > ul")).to_be_hidden()
@@ -150,13 +152,13 @@ def test_unfold_all_and_fold_all(ui: tuple[str, str]) -> None:
         for index in range(count):
             expect(buttons.nth(index)).to_have_attribute("aria-expanded", "true")
             expect(lists.nth(index)).to_be_visible()
-        expect(_box(view, origin, "/docs/deeper.html")).to_be_visible()
+        expect(_box(view, origin, "/docs/12345")).to_be_visible()
 
         view.locator("[data-action=tree-fold-all]").click()
         for index in range(count):
             expect(buttons.nth(index)).to_have_attribute("aria-expanded", "false")
             expect(lists.nth(index)).to_be_hidden()
-        expect(view.locator("ul.tree > li > label > input")).to_be_visible()
+        expect(view.locator("ul.tree > li > .cell-name > label > input")).to_be_visible()
         expect(_box(view, origin, "/about.html")).to_be_hidden()
     assert console == []
 
@@ -167,17 +169,17 @@ def test_ticking_a_folded_section_ticks_its_pages(ui: tuple[str, str]) -> None:
         view = _open_tree(page, origin)
         docs = _section(view, "docs/")
         expect(docs.locator(":scope > ul")).to_be_hidden()
-        docs.locator(":scope > label > input").check()
-        # a.html and deeper.html; b.html is blocked under "Respect the site's rules".
+        docs.locator(":scope > .cell-name > label > input").check()
+        # a.html and 12345; b.html is blocked under "Respect the site's rules".
         expect(view.locator(".tree-counter")).to_have_text("2 selected")
         assert _box(view, origin, "/docs/a.html").is_checked()
-        assert _box(view, origin, "/docs/deeper.html").is_checked()
+        assert _box(view, origin, "/docs/12345").is_checked()
         assert not _box(view, origin, "/docs/b.html").is_checked()
         expect(docs.locator(":scope > ul")).to_be_hidden()  # ticking does not unfold
-        host = view.locator("ul.tree > li > label > input")
+        host = view.locator("ul.tree > li > .cell-name > label > input")
         assert host.evaluate("box => box.indeterminate") is True
 
-        docs.locator(":scope > label > input").uncheck()
+        docs.locator(":scope > .cell-name > label > input").uncheck()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
         assert not _box(view, origin, "/docs/a.html").is_checked()
     assert console == []
@@ -196,15 +198,15 @@ def test_select_all_reaches_folded_pages_but_not_blocked_under_enforce(
         view.locator("[data-action=tree-all]").click()
         expect(view.locator(".tree-counter")).to_have_text(f"{URLS - 1} selected")
         assert _box(view, origin, "/docs/a.html").is_checked()
-        assert _box(view, origin, "/docs/deeper.html").is_checked()
+        assert _box(view, origin, "/docs/12345").is_checked()
         assert not blocked.is_checked()
         docs = _section(view, "docs/")
-        assert docs.locator(":scope > label > input").is_checked()
+        assert docs.locator(":scope > .cell-name > label > input").is_checked()
         expect(docs.locator(":scope > ul")).to_be_hidden()
 
         view.locator("[data-action=tree-none]").click()
         view.locator("[data-action=tree-content]").click()  # the imprint is left out
         expect(view.locator(".tree-counter")).to_have_text(f"{URLS - 2} selected")
-        assert _box(view, origin, "/docs/deeper.html").is_checked()
+        assert _box(view, origin, "/docs/12345").is_checked()
         assert not blocked.is_checked()
     assert console == []

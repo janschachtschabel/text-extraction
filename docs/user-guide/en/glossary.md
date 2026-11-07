@@ -37,7 +37,11 @@ The labels of the playground, as the English and the German playground show them
 | Site tree | Website-Baum | The pages of a site structure, by host and path. |
 | crawled | gecrawlt | A page of the tree that the crawl fetched. |
 | linked only | nur verlinkt | A URL of the tree that a page links but the crawl did not fetch. |
-| guessed from the URL | aus der URL geschätzt | A page type of the tree read from a URL alone, for a URL the crawl did not fetch. |
+| guessed | geschätzt | The mark on a page type of the tree for a URL the crawl did not fetch; the reason says what the guess rests on: the URL, the sitemap file name, the link text, keywords, or the default "Content". |
+| Type open | Typ offen | The badge of a URL whose type cannot be guessed, because its last part is an opaque id; the type shows when it is extracted. |
+| Event | Veranstaltung | The page type `event`: an event page (schema.org `Event` and its subtypes, or event words in the URL). |
+| Learning material | Lernmaterial | The page type `learning_material`: a worksheet, quiz or course (schema.org `LearningResource`, `Quiz`, `Course`, or material words in the URL). |
+| How to read the site | So wird die Website gelesen | The `discovery` field of a site structure: "Fast: sitemap first" (`sitemap_first`) or "Thorough: follow links" (`crawl`). |
 | Select content pages | Inhaltsseiten auswählen | Checks every URL of the tree but imprint, privacy, legal, contact, login, search and error pages and pages that failed. |
 | Capture | Aufnahme | The choice of size and image format on the Screenshot tab. |
 | Principal | Konto | The key's name and role in a result. |

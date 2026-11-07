@@ -4,7 +4,7 @@ No parser and no Valkey here: the request models, the job models and ``ExtractRe
 it."""
 
 import math
-from typing import Literal, get_args
+from typing import Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -13,12 +13,13 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert.links import LINK_CATEGORY_DESCRIPTION
 from text_extraction.netguard import MAX_URL_LENGTH
-from text_extraction.page_types import LinkCategory
+from text_extraction.page_types import LinkCategory, PageType
 
 __all__ = [
     "LASTMOD_MAX_CHARS",
@@ -57,7 +58,9 @@ LinkRegion = Literal["nav", "header", "footer", "aside", "main", "breadcrumb", "
 # followed), ``file``, ``out_of_scope``, ``nofollow``, ``blocked`` (robots.txt or TDM under
 # ``enforce``), ``depth`` (deeper than asked), ``queued`` (a new item), ``seen`` (an existing
 # item), ``max_pages`` (the page cap was reached), ``max_files`` (a sitemap index's child: the
-# crawl's ``SITE_MAX_SITEMAP_FILES`` was reached), ``memory_guard`` (Valkey was nearly full).
+# crawl's ``SITE_MAX_SITEMAP_FILES`` was reached), ``memory_guard`` (Valkey was nearly full),
+# ``sitemap_first`` (a would-be ``queued`` link of a ``discovery: sitemap_first`` crawl whose site
+# has a sitemap: not followed, the site has a sitemap).
 Crawl = Literal[
     "listed",
     "file",
@@ -70,6 +73,7 @@ Crawl = Literal[
     "max_pages",
     "max_files",
     "memory_guard",
+    "sitemap_first",
 ]
 SitemapFormat = Literal["urlset", "index", "text", "rss", "atom", "absent"]
 ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly", "never"]
@@ -107,13 +111,21 @@ class SiteOptions(BaseModel, strict=True):
     )
     sitemaps: bool = Field(
         default=True,
-        description="Read robots.txt and every sitemap it lists (or `/sitemap.xml` when it lists "
-        "none), with sitemap indexes, gzip, text, RSS and Atom sitemaps.",
+        description="Read robots.txt and every sitemap it lists (when it lists none, the "
+        "addresses `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml` in turn, until "
+        "one exists), with sitemap indexes, gzip, text, RSS and Atom sitemaps.",
     )
     scope: Literal["host", "path"] = Field(
         default="host",
         description="Which links are followed. `host`: the start page's host (a leading `www.` "
         "ignored). `path`: also only URLs under the start URL's directory.",
+    )
+    discovery: Literal["crawl", "sitemap_first"] = Field(
+        default="crawl",
+        description="`crawl`: follow links up to `depth` and `max_pages`. `sitemap_first`: when "
+        "robots.txt lists a sitemap or a guessed sitemap address answers, only the start page is "
+        "crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs "
+        "`sitemaps: true` (422 otherwise).",
     )
     metadata: bool = Field(default=True, description="Include each page's DOM metadata.")
     cache: bool = Field(
@@ -135,6 +147,12 @@ class SiteStructureRequest(SiteOptions):
         "reserved, is not fetched (its link says `blocked`).",
     )
 
+    @model_validator(mode="after")
+    def _sitemap_first_needs_sitemaps(self) -> Self:
+        if self.discovery == "sitemap_first" and not self.sitemaps:
+            raise ValueError("discovery sitemap_first needs sitemaps to be true.")
+        return self
+
     def options(self) -> SiteOptions:
         """The options the job stores."""
         return SiteOptions.model_validate(self.model_dump(include=set(SiteOptions.model_fields)))
@@ -146,7 +164,8 @@ class SiteNode(BaseModel):
     role: SiteRole
     depth: int  # page: link distance from the start; sitemap: nesting (robots-listed = 0)
     parent: int | None  # the item that found it; None for the start page
-    guessed: bool = False  # a sitemap at /sitemap.xml that robots.txt did not list
+    guessed: bool = False  # a sitemap at a guessed address that robots.txt did not list
+    guess: int | None = None  # guessed: its position in GUESSED_SITEMAP_PATHS
     part: int | None = None  # sitemap_part: which part (2 and up) of its sitemap
 
 
@@ -180,7 +199,8 @@ class SiteLink(BaseModel):
     crawl: Crawl = Field(
         description="What the crawl did with it: `listed`, `file`, `out_of_scope`, `nofollow`, "
         "`blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files` (a sitemap index's "
-        "child over `SITE_MAX_SITEMAP_FILES`) or `memory_guard`."
+        "child over `SITE_MAX_SITEMAP_FILES`), `memory_guard` or `sitemap_first` (not followed: "
+        "the site has a sitemap)."
     )
     target: int | None = Field(
         default=None, description="The index of the item of the linked page, when it has one."
@@ -198,6 +218,12 @@ class SitemapEntry(BaseModel):
     lastmod: str | None = None  # as given
     changefreq: ChangeFreq | None = None
     priority: float | None = None  # 0 to 1
+    type_guess: PageType | None = Field(
+        default=None,
+        description="The page type guessed from the URL and the sitemap's `type_hint` "
+        "(`page_types.guess_type`), without fetching the page; null for a URL that says nothing "
+        "(and for sitemaps read before this field existed).",
+    )
 
     @field_validator("lastmod", mode="before")
     @classmethod
@@ -252,10 +278,17 @@ class SitemapInfo(BaseModel):
 
     format: SitemapFormat = Field(
         description="`urlset`, `index`, `text`, `rss`, `atom`, or `absent` (a guessed "
-        "`/sitemap.xml` that does not exist)."
+        "address that does not exist)."
     )
     guessed: bool = Field(
-        default=False, description="`/sitemap.xml` was tried because robots.txt listed none."
+        default=False,
+        description="The address (`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`) "
+        "was tried because robots.txt listed no sitemap.",
+    )
+    type_hint: PageType | None = Field(
+        default=None,
+        description="The page type the sitemap's file name suggests for its entries "
+        "(WordPress, Yoast, Rank Math), else null.",
     )
     entries: list[SitemapEntry] = Field(
         default=[], description="The URLs of this part of the sitemap, in the file's order."
@@ -287,6 +320,7 @@ class SiteInfo(BaseModel):
         default=False, description="The page said `nofollow` (meta robots or X-Robots-Tag)."
     )
     sitemaps: list[str] | None = Field(
-        default=None, description="robots.txt: the sitemap URLs it listed, or the one guessed."
+        default=None,
+        description="robots.txt: the sitemap URLs it listed, or the first one guessed.",
     )
     sitemap: SitemapInfo | None = None

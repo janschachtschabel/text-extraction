@@ -37,7 +37,11 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Site tree | Website-Baum | Die Seiten einer Website-Struktur, nach Host und Pfad. |
 | crawled | gecrawlt | Eine Seite des Baums, die der Crawl geholt hat. |
 | linked only | nur verlinkt | Eine URL des Baums, die eine Seite verlinkt, die der Crawl aber nicht geholt hat. |
-| guessed from the URL | aus der URL geschätzt | Ein Seitentyp im Baum, allein aus der URL gelesen, für eine URL, die der Crawl nicht geholt hat. |
+| guessed | geschätzt | Die Markierung an einem Seitentyp im Baum für eine URL, die der Crawl nicht geholt hat; der Grund sagt, worauf die Schätzung beruht: die URL, der Name der Sitemap-Datei, der Linktext, Schlüsselwörter oder die Vorgabe „Inhalt“. |
+| Type open | Typ offen | Das Kennzeichen einer URL, deren Typ sich nicht schätzen lässt, weil ihr letzter Teil eine undurchsichtige Kennung ist; der Typ zeigt sich beim Extrahieren. |
+| Event | Veranstaltung | Der Seitentyp `event`: eine Veranstaltungsseite (schema.org `Event` und seine Untertypen oder Veranstaltungswörter in der URL). |
+| Learning material | Lernmaterial | Der Seitentyp `learning_material`: ein Arbeitsblatt, ein Quiz oder ein Kurs (schema.org `LearningResource`, `Quiz`, `Course` oder Materialwörter in der URL). |
+| How to read the site | So wird die Website gelesen | Das Feld `discovery` einer Website-Struktur: „Schnell: Sitemap zuerst“ (`sitemap_first`) oder „Gründlich: Links folgen“ (`crawl`). |
 | Select content pages | Inhaltsseiten auswählen | Markiert jede URL des Baums außer Impressum, Datenschutz, Rechtlichem, Kontakt, Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten. |
 | Capture | Aufnahme | Die Wahl von Größe und Bildformat im Tab Screenshot. |
 | Principal | Konto | Name und Rolle des Schlüssels in einem Ergebnis. |

@@ -397,7 +397,8 @@ sagt die Seite das und verweist auf den `curl`-Befehl. Die Tabs:
 - **Batch**: URLs, eine pro Zeile. **Batch-Datei**: eine CSV- oder JSON-Datei mit URLs, zuerst auf
   dem Server geprüft, mit einer Vorschau vor „Batch starten“.
 - **Website-Struktur**: startet einen Crawl; wenn er abgeschlossen ist, listet „Als Baum
-  anzeigen“ seine Seiten nach Host und Pfad (während er läuft, zeigt „Baum jetzt anzeigen“ eine
+  anzeigen“ seine Seiten nach Host und Pfad (der Baum erscheint auch von selbst, sobald der Job ein
+  Ergebnis hat, und aktualisiert sich, solange er läuft; „Baum jetzt anzeigen“ zeigt eine
   Momentaufnahme), mit einem Kontrollkästchen pro Seite und pro Abschnitt, und „Auswahl
   extrahieren“ startet Batches der markierten URLs.
 

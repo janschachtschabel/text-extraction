@@ -352,7 +352,9 @@ def result_context(
         "status": envelope.get("status"),
         "error": error if isinstance(error, Mapping) else None,
         "error_text": (
-            error_text(error.get("code"), http_status) if isinstance(error, Mapping) else None
+            error_text(error.get("code"), http_status, error.get("message"))
+            if isinstance(error, Mapping)
+            else None
         ),
         "details": _details(error) if isinstance(error, Mapping) else [],
         "error_for": (

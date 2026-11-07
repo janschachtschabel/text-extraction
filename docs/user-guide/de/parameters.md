@@ -150,7 +150,8 @@ nur über HTTP gelesen, ohne ihren Text.
 | `url` | String | Pflicht | Die Startseite. |
 | `depth` | Ganzzahl, 0 bis `SITE_MAX_DEPTH` | `2` | Wie viele Links weit der Crawl von der Startseite aus geht; `0`: nur die Startseite und die Sitemaps. |
 | `max_pages` | Ganzzahl, 1 bis `SITE_MAX_PAGES` | `100` | Höchstens so viele Seiten, die Startseite mitgezählt. |
-| `sitemaps` | Boolean | `true` | robots.txt und die Sitemaps lesen, die sie nennt (oder `/sitemap.xml`). |
+| `sitemaps` | Boolean | `true` | robots.txt und die Sitemaps lesen, die sie nennt (sonst nacheinander `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml`). |
+| `discovery` | `crawl` oder `sitemap_first` | `crawl` | `crawl` folgt Links bis `depth` und `max_pages`. `sitemap_first`: Nennt robots.txt eine Sitemap oder antwortet eine erratene Sitemap-Adresse, wird nur die Startseite gecrawlt und ihre Links haben `crawl: sitemap_first`; sonst wie `crawl`. Setzt `sitemaps: true` voraus (sonst 422). |
 | `scope` | `host` oder `path` | `host` | Welchen Links gefolgt wird: `host` dem Host der Startseite, `path` nur URLs unter dem Verzeichnis der Start-URL. |
 | `metadata` | Boolean | `true` | Die Metadaten jeder Seite mitliefern. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache für Seiten nutzen. |

@@ -20,6 +20,7 @@ SITES = [
     "https://klexikon.zum.de/",
     "https://www.leifiphysik.de/",
     "https://de.serlo.org/",
+    "https://wirlernenonline.de/",
 ]
 START = "https://lernen.example.org/"
 
@@ -30,6 +31,7 @@ def page(
     *,
     depth: int = 0,
     page_type: str | None = None,
+    convert_ms: int | None = None,
     **result: Any,
 ) -> Any:
     """A page item with links of the given (region, crawl) and, if given, a page type."""
@@ -43,6 +45,7 @@ def page(
             "data": {
                 "warnings": result.get("warnings", []),
                 "page_type": {"type": page_type, "signals": ["x"]} if page_type else None,
+                "timings": None if convert_ms is None else {"convert_ms": convert_ms},
                 "site": {
                     "role": "page",
                     "depth": depth,
@@ -56,7 +59,15 @@ def page(
     }
 
 
-def sitemap(index: int, entries: int, *, role: str = "sitemap", **result: Any) -> Any:
+def sitemap(
+    index: int,
+    entries: int,
+    *,
+    role: str = "sitemap",
+    format: str = "urlset",
+    guessed: bool = False,
+    **result: Any,
+) -> Any:
     return {
         "index": index,
         "url": f"{START}sitemap.xml",
@@ -70,14 +81,18 @@ def sitemap(index: int, entries: int, *, role: str = "sitemap", **result: Any) -
                     "role": role,
                     "depth": 0,
                     "links": None,
-                    "sitemap": {"entries": [{"loc": f"{START}e{n}"} for n in range(entries)]},
+                    "sitemap": {
+                        "format": format,
+                        "guessed": guessed,
+                        "entries": [{"loc": f"{START}e{n}"} for n in range(entries)],
+                    },
                 },
             },
         },
     }
 
 
-def robots(index: int) -> Any:
+def robots(index: int, sitemaps: list[str] | None = None) -> Any:
     return {
         "index": index,
         "url": f"{START}robots.txt",
@@ -85,7 +100,10 @@ def robots(index: int) -> Any:
         "result": {
             "status": "success",
             "error": None,
-            "data": {"warnings": [], "site": {"role": "robots", "depth": 0, "links": None}},
+            "data": {
+                "warnings": [],
+                "site": {"role": "robots", "depth": 0, "links": None, "sitemaps": sitemaps},
+            },
         },
     }
 
@@ -95,9 +113,10 @@ ITEMS = [
         0,
         [("nav", "queued"), ("nav", "queued"), (None, "listed"), ("footer", "out_of_scope")],
         page_type="home",
+        convert_ms=100,
     ),
-    robots(1),
-    page(2, [("nav", "seen"), ("main", "depth")], depth=1, page_type="content"),
+    robots(1, [f"{START}sitemap.xml"]),
+    page(2, [("nav", "seen"), ("main", "depth")], depth=1, page_type="content", convert_ms=300),
     sitemap(3, 4, warnings=["sitemap_urls_truncated"]),
     sitemap(4, 2, role="sitemap_part"),
     page(
@@ -118,7 +137,7 @@ JOB = {
 }
 
 
-def test_the_shipped_site_list_has_the_five_sites() -> None:
+def test_the_shipped_site_list_has_the_five_sites_and_wlo() -> None:
     assert read_urls(Path(run_site.__file__).parent / "urls" / "sites.csv") == SITES
 
 
@@ -142,6 +161,12 @@ def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:
         sitemap_files=1,
         sitemap_parts=1,
         entries=6,
+        sitemap="listed",
+        tree_urls=8,
+        type_open=5,
+        type_open_pct=62.5,
+        median_convert_ms=200,
+        crawl_seconds=65.5,
         regions={"nav": 3, "main": 1, "footer": 1, "none": 1},
         crawls={"queued": 2, "seen": 1, "depth": 1, "listed": 1, "out_of_scope": 1},
         page_types={"home": 1, "content": 1, "none": 1},
@@ -159,13 +184,22 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     summary = summarize(reports, depth=1, max_pages=25, compliance="report")
 
     lines = summary.splitlines()
-    assert lines[0] == "## Site structure: 2 sites, depth 1, max_pages 25, compliance report"
+    assert lines[0] == (
+        "## Site structure: 2 sites, depth 1, max_pages 25, compliance report, discovery crawl"
+    )
     assert (
         "| Site | State | Duration | Items | Pages | Pages ok | Failed | Sitemap files "
-        "| Parts | Entries |"
+        "| Parts | Entries | sitemap | tree URLs | type open | type open % "
+        "| median convert ms | crawl s |"
     ) in lines
-    assert "| lernen.example.org | completed | 65.5 s | 6 | 3 | 2 | 1 | 1 | 1 | 6 |" in lines
-    refused = "| down.example | refused: HTTP 503 internal_error | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 |"
+    assert (
+        "| lernen.example.org | completed | 65.5 s | 6 | 3 | 2 | 1 | 1 | 1 | 6 "
+        "| listed | 8 | 5 | 62.5 | 200 | 65.5 |"
+    ) in lines
+    refused = (
+        "| down.example | refused: HTTP 503 internal_error | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 "
+        "| none | 0 | 0 | - | - | - |"
+    )
     assert refused in lines
     # The histograms: a column per value that occurs, in the API's order, `none` last.
     assert "### Links by region" in lines
@@ -184,6 +218,34 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     assert "### Warnings and error codes" in lines
     assert "| lernen.example.org | sitemap_urls_truncated 1 | target_http_error 1 |" in lines
     assert summary.endswith("\n")
+
+
+def test_tally_measures_a_site_without_a_sitemap_and_one_with_a_guessed_sitemap() -> None:
+    bare = [
+        robots(0),
+        sitemap(1, 0, format="absent", guessed=True),
+        page(2, [("main", "max_pages")], page_type="home", convert_ms=50),
+        page(3, [], depth=1, page_type="content", convert_ms=70),
+    ]
+    guessed = [robots(0), sitemap(1, 3, guessed=True), page(2, [], page_type="home")]
+
+    none_report = tally(START, JOB, bare)
+    guessed_report = tally(START, JOB, guessed)
+
+    # The page links one URL it did not fetch (`max_pages`), which has no type.
+    assert (none_report.sitemap, none_report.tree_urls) == ("none", 3)
+    assert (none_report.type_open, none_report.type_open_pct) == (1, 33.3)
+    assert none_report.median_convert_ms == 60
+    assert guessed_report.sitemap == "guessed"
+    assert (guessed_report.tree_urls, guessed_report.type_open) == (4, 3)
+    assert guessed_report.median_convert_ms is None
+
+
+def test_an_older_services_items_without_the_new_fields_are_tallied() -> None:
+    report = tally(START, {"state": "completed"}, [robots(0), page(1, [])])
+
+    assert (report.sitemap, report.crawl_seconds, report.median_convert_ms) == ("none", None, None)
+    assert report.tree_urls == 1
 
 
 def fake_service(
@@ -222,6 +284,7 @@ def crawl_with(transport: httpx.MockTransport, **options: Any) -> SiteReport:
                 depth=options.get("depth", 1),
                 max_pages=options.get("max_pages", 25),
                 compliance=options.get("compliance", "enforce"),
+                discovery=options.get("discovery", "crawl"),
                 poll_seconds=0,
                 job_timeout=options.get("job_timeout", 5),
                 page_size=options.get("page_size", 2),
@@ -251,6 +314,122 @@ def test_crawl_sends_the_documented_request_and_pages_the_items() -> None:
         ("2", "2"),
         ("4", "2"),
     ]
+
+
+def test_the_sitemap_first_discovery_is_sent_as_a_site_option() -> None:
+    transport, seen = fake_service(ITEMS)
+
+    crawl_with(transport, discovery="sitemap_first")
+
+    assert json.loads(seen[0].content)["discovery"] == "sitemap_first"
+
+
+def test_the_default_discovery_is_not_sent() -> None:
+    """``crawl`` is the API's default, and an older service without the option still accepts the
+    request."""
+    transport, seen = fake_service(ITEMS)
+
+    crawl_with(transport)
+
+    assert "discovery" not in json.loads(seen[0].content)
+
+
+def test_the_heading_names_the_discovery() -> None:
+    summary = summarize([], depth=1, max_pages=25, compliance="enforce", discovery="sitemap_first")
+
+    assert summary.splitlines()[0] == (
+        "## Site structure: 0 sites, depth 1, max_pages 25, compliance enforce, "
+        "discovery sitemap_first"
+    )
+
+
+def test_main_takes_the_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    urls = tmp_path / "sites.csv"
+    urls.write_text(f"url\n{START}\n")
+    transport, seen = fake_service(ITEMS)
+    monkeypatch.setattr(run_site, "_transport", lambda: transport)
+    summary_out = tmp_path / "summary.md"
+
+    run_site.main(
+        [
+            "--urls",
+            str(urls),
+            "--discovery",
+            "sitemap_first",
+            "--out",
+            str(tmp_path / "out.jsonl"),
+            "--summary-out",
+            str(summary_out),
+            "--poll-seconds",
+            "0",
+        ]
+    )
+
+    assert json.loads(seen[0].content)["discovery"] == "sitemap_first"
+    assert (
+        summary_out.read_text(encoding="utf-8").splitlines()[0].endswith("discovery sitemap_first")
+    )
+
+
+def limited_then(
+    transport: httpx.MockTransport, times: int, *, method: str = "POST"
+) -> tuple[httpx.MockTransport, list[int]]:
+    """``transport``, but its first ``times`` requests of ``method`` get the service's own 429."""
+    left = times
+    answered: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal left
+        if request.method == method and left > 0:
+            left -= 1
+            answered.append(429)
+            error = {"code": "rate_limited", "message": "x", "retryable": True}
+            return httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"status": "failed", "error": error}
+            )
+        return transport.handle_request(request)
+
+    return httpx.MockTransport(handler), answered
+
+
+def test_the_services_own_429_is_waited_out() -> None:
+    transport, _ = fake_service(ITEMS)
+    limited, answered = limited_then(transport, 1)
+
+    report = crawl_with(limited)
+
+    assert answered == [429]
+    assert report == tally(START, JOB, ITEMS)
+
+
+def test_a_429_on_a_poll_is_waited_out_too() -> None:
+    transport, _ = fake_service(ITEMS, states=["running", "completed"])
+    limited, answered = limited_then(transport, 2, method="GET")
+
+    report = crawl_with(limited)
+
+    assert answered == [429, 429]
+    assert report == tally(START, JOB, ITEMS)
+
+
+def test_a_429_that_does_not_end_is_reported_as_a_refusal() -> None:
+    transport, _ = fake_service(ITEMS)
+    limited, answered = limited_then(transport, 6)
+
+    report = crawl_with(limited)
+
+    assert len(answered) == 6  # the first send and five retries
+    assert report == SiteReport.refused(START, "HTTP 429 rate_limited")
+
+
+def test_retry_after_is_capped_and_has_a_fallback() -> None:
+    def answer(headers: dict[str, str]) -> httpx.Response:
+        return httpx.Response(429, headers=headers)
+
+    assert run_site._retry_after(answer({"Retry-After": "3"})) == 3
+    assert run_site._retry_after(answer({"Retry-After": "600"})) == 60
+    assert run_site._retry_after(answer({})) == 10
+    assert run_site._retry_after(answer({"Retry-After": "soon"})) == 10
 
 
 def test_a_refused_request_is_reported_not_raised() -> None:

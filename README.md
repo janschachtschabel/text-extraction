@@ -10,12 +10,12 @@ and a playground in English and German.
 
 ## Status
 
-Prototype `v0.1.5`: packages 0-17 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.6`: packages 0-18 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,
 robots marks in the site tree with a per-run site rules switch, playground fixes after the v0.1.4
-test).
+test, site tree with types, columns and a fast sitemap reading).
 See [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract
@@ -37,8 +37,9 @@ the page needs it (`auto`, the default), never (`fast`) or always (`browser`). S
 
 ## Quick start with Docker
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker and a
-Valkey (with a password) for the shared state.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, an ASR
+worker (its first start downloads the Whisper model, about 1.6 GB) and a Valkey (with a password)
+for the shared state.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it

@@ -1,8 +1,8 @@
 /*
  * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8, P12-S9 and P15-R1),
- * the only one besides htmx: the keys, the language, the tabs, the site tree's selection and
- * folding, the result's "Copy" button, the page's status line and the status line of an answer
- * htmx does not swap.
+ * the only one besides htmx: the keys, the language, the tabs, the site tree's selection,
+ * folding and type filter, the result's "Copy" button, the page's status line and the status
+ * line of an answer htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -238,6 +238,11 @@
       setFold(fold, fold.getAttribute("aria-expanded") !== "true");
       return;
     }
+    var chip = target ? target.closest(".tree-filter button.chip") : null;
+    if (chip) {
+      toggleFilter(chip);
+      return;
+    }
     var button = target ? target.closest("[data-action], [data-tab]") : null;
     if (!button) {
       return;
@@ -304,7 +309,7 @@
   // The site tree (P10-S20): checking a node checks its subtree, a node shows indeterminate
   // while part of its subtree is checked, and the counter shows how many URLs are selected.
   function nodeBox(item) {
-    var label = item.querySelector(":scope > label");
+    var label = item.querySelector(":scope > .cell-name > label");
     return label ? label.querySelector("input[type=checkbox]") : null;
   }
 
@@ -358,11 +363,13 @@
 
   // "Select content pages" (package 14): ticks every URL whose page type is not one of
   // ``excluded`` (a space-separated list), a URL without a type too, and unticks the others
-  // and every crawled page that failed (``data-failed``, ruling P14-R9).
+  // and every crawled page that failed (``data-failed``, ruling P14-R9). While a type filter
+  // (package 18) hides URLs, it acts on the visible ones only.
   function selectContent(form, excluded) {
     var skip = excluded.split(/\s+/).filter(Boolean);
     form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
-      if (box.disabled) {
+      // A box the filter hides keeps its state: only what the user sees is ticked.
+      if (box.disabled || box.closest("li[hidden]")) {
         return;
       }
       box.checked =
@@ -374,9 +381,12 @@
     countSelected(form);
   }
 
+  // "Select all" ticks what the user sees: while a type filter (package 18) hides URLs it skips
+  // them, like a section tick and "Select content pages". "Select none" clears everything,
+  // hidden boxes included, so no invisible tick stays behind.
   function selectAll(form, value) {
     form.querySelectorAll(".tree input[type=checkbox]").forEach(function (box) {
-      if (box.disabled) {
+      if (box.disabled || (value && box.closest("li[hidden]"))) {
         return;
       }
       box.checked = value;
@@ -418,7 +428,7 @@
   // button's aria-controls, its sibling) is hidden; its boxes still take part in the selection.
   function setFold(button, open) {
     button.setAttribute("aria-expanded", open ? "true" : "false");
-    var list = button.parentElement.querySelector(":scope > ul");
+    var list = button.closest("li").querySelector(":scope > ul");
     if (list) {
       list.hidden = !open;
     }
@@ -433,13 +443,75 @@
     }
     fresh.forEach(function (button) {
       button.hidden = false;
-      setFold(button, button.parentElement.parentElement.classList.contains("tree"));
+      setFold(button, button.closest("li").parentElement.classList.contains("tree"));
     });
     form.querySelectorAll("[data-action=tree-unfold-all], [data-action=tree-fold-all]").forEach(
       function (button) {
         button.hidden = false;
       }
     );
+  }
+
+  // The type filter (package 18): a chip per type, rendered hidden, so without this script the
+  // tree shows every node and the text line of the counts stays. A type chip toggles; several
+  // make a union; "All" clears them. A leaf stays when its type is chosen, a section when a
+  // leaf below it does, and the sections of the leaves left are unfolded. A hidden node is the
+  // `hidden` attribute, so its box keeps its state.
+  function press(chip, on) {
+    chip.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  function chosenTypes(form) {
+    return Array.prototype.map.call(
+      form.querySelectorAll(".tree-filter button.chip[aria-pressed=true]"),
+      function (chip) { return chip.getAttribute("data-filter-type"); }
+    ).filter(function (type) { return type !== "all"; });
+  }
+
+  function applyFilter(form) {
+    var types = chosenTypes(form);
+    var items = form.querySelectorAll(".tree li");
+    // Children come after their parent: walking backwards judges them first.
+    for (var index = items.length - 1; index >= 0; index -= 1) {
+      var item = items[index];
+      var below = item.querySelector(":scope > ul > li:not([hidden])") !== null;
+      var own = types.indexOf(item.getAttribute("data-type")) >= 0;
+      item.hidden = types.length > 0 && !own && !below;
+      var fold = item.querySelector(":scope > .cell-name > button.fold");
+      if (types.length > 0 && below && fold) {
+        setFold(fold, true);
+      }
+    }
+  }
+
+  function toggleFilter(chip) {
+    var form = chip.closest("form");
+    var chips = form.querySelectorAll(".tree-filter button.chip");
+    var all = form.querySelector(".tree-filter button.chip[data-filter-type=all]");
+    if (chip === all) {
+      chips.forEach(function (each) { press(each, each === all); });
+    } else {
+      press(chip, chip.getAttribute("aria-pressed") !== "true");
+      press(all, chosenTypes(form).length === 0);
+    }
+    applyFilter(form);
+  }
+
+  function initFilter(form) {
+    var chips = form.querySelectorAll(".tree-filter button.chip[hidden]");
+    if (chips.length === 0) {
+      return;
+    }
+    chips.forEach(function (chip) { chip.hidden = false; });
+    var group = form.querySelector(".tree-filter");
+    if (group) {
+      group.hidden = false;
+    }
+    var view = form.closest(".tree-view");
+    var line = view ? view.querySelector(".tree-types") : null;
+    if (line) {
+      line.hidden = true;
+    }
   }
 
   document.addEventListener("htmx:load", function (event) {
@@ -450,7 +522,349 @@
     var forms = root.matches("form.tree-form") ? [root] : root.querySelectorAll("form.tree-form");
     Array.prototype.forEach.call(forms, function (form) {
       initFolding(form);
+      initFilter(form);
       applyTreeMode(form);
+    });
+  });
+
+  // The live tree (package 18): while its job runs, the tree is wrapped in an element
+  // ([data-tree-live], its value the refresh interval in seconds) that htmx replaces every few
+  // seconds. What the user did in the old tree is kept: the ticked URLs, the folds (keyed by the
+  // section's path, not by the list's generated id), the type filter, the batch options, the
+  // scroll position and the focus. A refresh says nothing and moves the focus nowhere; while a
+  // text field, select or textarea of the form has the focus it waits.
+  var treeSaved = null;
+  var autoLoaded = {};
+
+  // A node's key across refreshes: a page by its URL, a section by the labels of its path.
+  function nodeKey(item) {
+    var box = nodeBox(item);
+    if (box && box.name === "url") {
+      return "u:" + box.value;
+    }
+    var labels = [];
+    for (var up = item; up; up = up.parentElement ? up.parentElement.closest("li") : null) {
+      var label = up.querySelector(":scope > .cell-name .label");
+      labels.unshift(label ? label.textContent : "");
+    }
+    return "s:" + labels.join("\u0000");
+  }
+
+  function takesText(element) {
+    if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+      return true;
+    }
+    return element instanceof HTMLInputElement &&
+      ["checkbox", "radio", "button", "submit", "reset", "image", "hidden"].indexOf(element.type) < 0;
+  }
+
+  // The controls of the form outside the tree: the batch options.
+  function optionFields(form) {
+    return Array.prototype.filter.call(form.elements, function (field) {
+      return field.name && !field.closest(".tree") && field.type !== "hidden" &&
+        field.type !== "button" && field.type !== "submit";
+    });
+  }
+
+  function fieldKey(field) {
+    return field.name + (field.type === "radio" || field.type === "checkbox" ? "=" + field.value : "");
+  }
+
+  // Where the focus is in the tree, as something to find again in the new one.
+  function focusPlace(wrapper) {
+    var active = document.activeElement;
+    if (!(active instanceof Element) || !wrapper.contains(active)) {
+      return null;
+    }
+    var item = active.closest(".tree li");
+    if (active.matches(".tree button.fold") && item) {
+      return { kind: "fold", key: nodeKey(item) };
+    }
+    if (active.matches(".tree input[type=checkbox]") && item) {
+      return { kind: "box", key: nodeKey(item) };
+    }
+    if (active.matches(".tree-filter button.chip")) {
+      return { kind: "chip", key: active.getAttribute("data-filter-type") };
+    }
+    // Anything else that can be named again: a control of the batch options by its name and
+    // value, a link by its address, the options' summary, a button of the tools, the skip link,
+    // the submit button, any element with an id.
+    var form = wrapper.querySelector("form.tree-form");
+    if (form && optionFields(form).indexOf(active) >= 0) {
+      return { kind: "field", key: fieldKey(active) };
+    }
+    if (active.matches("a[href]:not(.skip-to-actions)")) {
+      return { kind: "href", key: active.getAttribute("href") };
+    }
+    var selector = null;
+    if (active.matches("[data-action]")) {
+      selector = "[data-action=\"" + active.getAttribute("data-action") + "\"]";
+    } else if (active.matches("a.skip-to-actions")) {
+      selector = "a.skip-to-actions";
+    } else if (active.matches("details.advanced > summary")) {
+      selector = "details.advanced > summary";
+    } else if (active.matches("button[type=submit]")) {
+      selector = "button[type=submit]";
+    } else if (active.id) {
+      selector = "#" + CSS.escape(active.id);
+    }
+    return selector ? { kind: "sel", key: selector } : null;
+  }
+
+  function findPlace(form, place) {
+    if (place.kind === "sel") {
+      return (form.closest(".tree-view") || form).querySelector(place.key);
+    }
+    if (place.kind === "field") {
+      return optionFields(form).filter(function (field) { return fieldKey(field) === place.key; })[0];
+    }
+    if (place.kind === "href") {
+      return Array.prototype.filter.call(
+        (form.closest(".tree-view") || form).querySelectorAll("a[href]"),
+        function (link) { return link.getAttribute("href") === place.key; }
+      )[0];
+    }
+    var found = null;
+    var candidates = place.kind === "chip"
+      ? form.querySelectorAll(".tree-filter button.chip")
+      : place.kind === "fold"
+        ? form.querySelectorAll(".tree button.fold")
+        : form.querySelectorAll(".tree input[type=checkbox]");
+    Array.prototype.forEach.call(candidates, function (candidate) {
+      var item = candidate.closest(".tree li");
+      var key = place.kind === "chip" ? candidate.getAttribute("data-filter-type")
+        : item ? nodeKey(item) : null;
+      if (!found && key === place.key) {
+        found = candidate;
+      }
+    });
+    return found;
+  }
+
+  function saveTree(wrapper) {
+    var form = wrapper.querySelector("form.tree-form");
+    var saved = { wrapper: wrapper, form: null };
+    if (!form) {
+      return saved;
+    }
+    saved.form = {
+      ticked: Array.prototype.map.call(
+        form.querySelectorAll(".tree input[name=url]:checked"),
+        function (box) { return box.value; }
+      ),
+      folds: {},
+      types: chosenTypes(form),
+      fields: optionFields(form).map(function (field) {
+        return { key: fieldKey(field), value: field.value, checked: field.checked };
+      }),
+      options_open: Boolean(form.querySelector("details.advanced[open]")),
+      scroll: form.querySelector(".tree-box") ? form.querySelector(".tree-box").scrollTop : 0,
+      focus: focusPlace(wrapper)
+    };
+    form.querySelectorAll(".tree button.fold").forEach(function (button) {
+      saved.form.folds[nodeKey(button.closest("li"))] = button.getAttribute("aria-expanded") === "true";
+    });
+    return saved;
+  }
+
+  function restoreTree(form, saved) {
+    // htmx sets a new tree up (htmx:load) only after this swap: do it now, so the controls to
+    // restore are shown. What is shown already is left as it is, so the later setup is a no-op.
+    initFolding(form);
+    initFilter(form);
+    var fields = {};
+    saved.fields.forEach(function (field) { fields[field.key] = field; });
+    optionFields(form).forEach(function (field) {
+      var before = fields[fieldKey(field)];
+      if (!before) {
+        return;
+      }
+      if (field.type === "radio" || field.type === "checkbox") {
+        field.checked = before.checked;
+      } else {
+        field.value = before.value;
+      }
+    });
+    var advanced = form.querySelector("details.advanced");
+    if (advanced) {
+      advanced.open = saved.options_open;
+    }
+    applyTreeMode(form);  // the restored "Site rules" decide which boxes are disabled
+    var ticked = {};
+    saved.ticked.forEach(function (value) { ticked[value] = true; });
+    form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
+      if (ticked[box.value] && !box.disabled) {
+        box.checked = true;
+      }
+    });
+    settleAll(form);
+    countSelected(form);
+    form.querySelectorAll(".tree-filter button.chip").forEach(function (chip) {
+      var type = chip.getAttribute("data-filter-type");
+      press(chip, saved.types.length === 0 ? type === "all" : saved.types.indexOf(type) >= 0);
+    });
+    applyFilter(form);  // before the folds: the user's fold of a section beats the filter's unfold
+    form.querySelectorAll(".tree button.fold").forEach(function (button) {
+      var open = saved.folds[nodeKey(button.closest("li"))];
+      if (open !== undefined) {
+        setFold(button, open);
+      }
+    });
+    var box = form.querySelector(".tree-box");
+    if (box) {
+      box.scrollTop = saved.scroll;
+    }
+    var target = saved.focus ? findPlace(form, saved.focus) : null;
+    if (target) {
+      target.focus({ preventScroll: true });
+    }
+  }
+
+  // A refresh that did not happen (the focus was in a text field, the answer was a 204 or an
+  // error, the network failed) is asked for again after the interval, or the Retry-After when
+  // that is longer: the one-shot "load" trigger of the wrapper is spent.
+  function refreshLater(wrapper, seconds) {
+    window.clearTimeout(wrapper.treeTimer);
+    var wait = Math.max(Number(wrapper.getAttribute("data-tree-live")) || 4, seconds || 0);
+    wrapper.treeTimer = window.setTimeout(function () {
+      if (wrapper.isConnected) {
+        window.htmx.ajax("GET", wrapper.getAttribute("hx-get"), {
+          source: wrapper, target: wrapper, swap: "outerHTML"
+        });
+      }
+    }, wait * 1000);
+  }
+
+  function typing(wrapper) {
+    var active = document.activeElement;
+    return active instanceof Element && wrapper.contains(active) && takesText(active);
+  }
+
+  function isLive(element) {
+    return element instanceof Element && element.hasAttribute("data-tree-live");
+  }
+
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var wrapper = event.detail.elt;
+    if (isLive(wrapper) && typing(wrapper)) {
+      event.preventDefault();
+      refreshLater(wrapper, 0);
+    }
+  });
+
+  // The answer arrived while the user started typing: it is dropped (afterRequest asks again).
+  document.addEventListener("htmx:beforeSwap", function (event) {
+    var wrapper = event.detail.elt;
+    if (!isLive(wrapper) || !event.detail.shouldSwap) {
+      return;
+    }
+    if (typing(wrapper)) {
+      event.detail.shouldSwap = false;
+    } else {
+      treeSaved = saveTree(wrapper);
+    }
+  });
+
+  document.addEventListener("htmx:afterRequest", function (event) {
+    var wrapper = event.detail.elt;
+    if (isLive(wrapper) && wrapper.isConnected) {  // not swapped out: nothing new arrived
+      var after = event.detail.xhr ? Number(event.detail.xhr.getResponseHeader("Retry-After")) : 0;
+      refreshLater(wrapper, after || 0);
+    }
+  });
+
+  // The note that the tree updates is shown only here: without this script nothing does, and
+  // it would contradict the snapshot note, which this hides in turn.
+  function showLiveNote(root) {
+    var notes = root.matches(".tree-live[hidden]") ? [root] : root.querySelectorAll(".tree-live[hidden]");
+    Array.prototype.forEach.call(notes, function (note) {
+      note.hidden = false;
+      var view = note.closest(".tree-view");
+      var snapshot = view ? view.querySelector(".tree-snapshot") : null;
+      if (snapshot) {
+        snapshot.hidden = true;
+      }
+    });
+  }
+
+  document.addEventListener("htmx:load", function (event) {
+    if (event.target instanceof Element) {
+      showLiveNote(event.target);
+    }
+  });
+
+  document.addEventListener("htmx:afterSwap", function (event) {
+    var saved = treeSaved;
+    treeSaved = null;
+    var root = event.target instanceof Element ? event.target : null;
+    // The swap that follows the beforeSwap above: its new content is no more the old wrapper.
+    if (!saved || !saved.form || !root || root === saved.wrapper) {
+      return;
+    }
+    var form = root.matches("form.tree-form") ? root : root.querySelector("form.tree-form");
+    if (form) {
+      restoreTree(form, saved.form);
+    }
+    showLiveNote(root);
+  });
+
+  // A site job's tree shows itself once the job has a result: the progress view marks the
+  // button (data-tree-auto), and the script presses it once per job unless the tree was asked
+  // for already (a click, a request in flight) or something is shown below the jobs. Marked
+  // data-refresh, the request is no request of the user's: nothing is announced. A click while
+  // the script's own request is in flight is dropped (the tree is on its way), any other click
+  // counts as the user's request, so the script never loads the tree a second time. Without
+  // this script the "Show tree now" button stays as it is. The progress view replaces the
+  // button every few seconds, so the state is kept by the job's button id.
+  var autoPending = {};
+  var pressing = false;
+
+  document.addEventListener("click", function (event) {
+    var target = event.target instanceof Element ? event.target : null;
+    var button = target ? target.closest("button.tree-button") : null;
+    if (!button || pressing) {
+      return;
+    }
+    if (autoPending[button.id]) {
+      event.stopImmediatePropagation();  // htmx listens on the button itself, later
+      return;
+    }
+    autoLoaded[button.id] = true;
+  }, true);
+
+  document.addEventListener("htmx:load", function (event) {
+    var root = event.target instanceof Element ? event.target : null;
+    var buttons = root ? root.querySelectorAll("button.tree-button[data-tree-auto]") : [];
+    Array.prototype.forEach.call(buttons, function (button) {
+      window.setTimeout(function () {
+        var view = button.closest(".jobs-view");
+        var detail = view ? view.querySelector(".job-detail") : null;
+        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild ||
+            button.classList.contains("htmx-request")) {
+          return;
+        }
+        autoLoaded[button.id] = true;
+        autoPending[button.id] = true;
+        button.setAttribute("data-refresh", "");
+        // Once the answer is in, the button is the user's again.
+        var done = function (settled) {
+          // A swap is over at afterSettle; a request that swapped nothing ends at afterRequest.
+          var over = settled.type === "htmx:afterSettle" || !settled.detail.successful;
+          if (settled.detail.elt === button && over) {
+            autoPending[button.id] = false;
+            button.removeAttribute("data-refresh");
+            document.removeEventListener("htmx:afterSettle", done);
+            document.removeEventListener("htmx:afterRequest", done);
+          }
+        };
+        document.addEventListener("htmx:afterSettle", done);
+        document.addEventListener("htmx:afterRequest", done);
+        // A request that never ends (its button gone) must not drop the user's clicks for good.
+        window.setTimeout(function () { autoPending[button.id] = false; }, 10000);
+        pressing = true;
+        button.click();
+        pressing = false;
+      }, 0);
     });
   });
 
@@ -463,6 +877,26 @@
     }
   });
 
+  // "Fast: sitemap first" needs the sitemaps: without them it is disabled and "Thorough" is chosen.
+  // Reading them again enables it, but leaves the choice as it is.
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (!(box instanceof HTMLInputElement) || box.name !== "sitemaps" || !box.form) {
+      return;
+    }
+    var fast = box.form.querySelector("input[name=discovery][value=sitemap_first]");
+    if (!fast) {
+      return;
+    }
+    fast.disabled = !box.checked;
+    if (!box.checked && fast.checked) {
+      var thorough = box.form.querySelector("input[name=discovery][value=crawl]");
+      if (thorough) {
+        thorough.checked = true;
+      }
+    }
+  });
+
   document.addEventListener("change", function (event) {
     var box = event.target;
     if (!(box instanceof HTMLInputElement) || !box.closest(".tree")) {
@@ -470,7 +904,8 @@
     }
     var item = box.closest("li");
     item.querySelectorAll("ul input[type=checkbox]").forEach(function (inner) {
-      if (inner.disabled) {
+      // A type filter's hidden boxes keep their state (package 18).
+      if (inner.disabled || inner.closest("li[hidden]")) {
         return;
       }
       inner.checked = box.checked;
@@ -771,6 +1206,9 @@
       return;
     }
     var box = target.querySelector(":scope > .request-status");
+    if (box && isLive(target)) {
+      return;  // a live tree's retried refresh keeps its first alert: a refresh announces nothing
+    }
     if (!box) {
       box = document.createElement("div");
       box.className = "request-status";

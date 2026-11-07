@@ -376,7 +376,8 @@ which saves the whole envelope. An answer too large for the download says so and
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
 - **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by
-  host and path (while it runs, "Show tree now" shows a snapshot), with a checkbox per page and
+  host and path (the tree also appears by itself once the job has a result and refreshes while it
+  runs; "Show tree now" shows a snapshot), with a checkbox per page and
   per section, and "Extract selected" starts batches of the checked URLs.
 
 Every job started from the playground shows its state, a progress bar and its items, refreshes

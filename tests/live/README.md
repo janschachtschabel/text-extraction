@@ -17,7 +17,7 @@ kept; a row without a URL is skipped with a warning.
 | `wlo_200.csv` | 200 | Sample of the corpus. **The gate:** in `auto` mode at or above 80 % ok (the browser baseline). Also reported in `browser` mode. |
 | `wlo_50.csv` | 50 | Quicker sample for local runs. |
 | `smoke.csv` | 24 | Curated watchlist of known-hard pages and expected failures, with `category`, `expected_lang` and `notes`. Reported in `auto` mode, never a gate: its ok rate is not comparable to the baseline. |
-| `sites.csv` | 5 | Five WLO-type sites (lehrer-online, planet-schule, Klexikon, LEIFIphysik, serlo) for the site structure run (`run_site.py`, package 9). Reported, never a gate. See "The site run" below. |
+| `sites.csv` | 6 | Six WLO-type sites (lehrer-online, planet-schule, Klexikon, LEIFIphysik, serlo, and WLO itself, a WordPress site) for the site structure run (`run_site.py`, package 9). Reported, never a gate. See "The site run" below. |
 | `media.csv` | 28 | The media set (package 6): YouTube, Vimeo, ARD, ZDF, arte and 3sat videos, two media files and two pages with HTML5 tracks, with `platform`, `expected_source` (the `transcript_source` the row should get), `expected_lang`, `transcribe` (`true` for the media files, which only ASR can answer) and `notes`. Reported, never a gate. See "The media set" below. |
 
 ## Run it
@@ -97,7 +97,7 @@ Its rows count as `ok` like any other (50 words or more); what matters is the Me
 ```bash
 # Subtitles and metadata only (no ASR worker), as the live workflow runs it:
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv --no-transcribe
-# With transcription (docker compose --profile asr up, ASR_ENABLED=true): the media files are
+# With transcription (docker compose up, which starts the ASR worker): the media files are
 # transcribed as jobs, and an upload of the corpus clip with them.
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv \
   --upload tests/media/corpus/speech_de.ogg --timeout 120
@@ -135,10 +135,16 @@ the job every `--poll-seconds` until it is `completed` (a read that ends in a tr
 sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
-sitemap entries; a histogram of the pages' links by `region` and one by `crawl` decision; and the
-warnings and error codes of the items. A request the service refuses (a 4xx or 5xx) or a job that
-does not complete within `--job-timeout` is reported in the State column, with what the job had
-so far. The exit code is always 0: the run is a report.
+sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at
+`/sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no
+page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and
+`crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and
+one by `crawl` decision; and the warnings and error codes of the items. A request the service
+refuses (a 4xx or 5xx) or a job that does not complete within `--job-timeout` is reported in the
+State column, with what the job had so far. The service's own per-client rate limit (429
+`rate_limited`, on the request or a read of the job) is waited out: the harness waits `Retry-After`
+seconds (10 without a usable one, at most 60 per wait) and sends again, at most 5 times per
+request, then reports the refusal. The exit code is always 0: the run is a report.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -155,7 +161,7 @@ so far. The exit code is always 0: the run is a report.
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 
 The summary's formatting and paging are unit-tested against a fake service in
-`tests/test_live_site.py`. The build sandbox of package 9 had no route to the five sites, so the
+`tests/test_live_site.py`. The build sandbox of package 9 had no route to the sites, so the
 run is a report-only step of the live workflow (below); its summary goes into the pull request.
 
 ## Buckets
@@ -203,9 +209,12 @@ and worker logs as the `live-results` artifact.
 - **Every run** also reports the site run (`run_site.py` on `sites.csv`, depth 1, 25 pages per
   site, `compliance: enforce`), last and never as a gate: it starts an extract worker (internal
   port 9092; the runs before it measure the rig without one), the step may fail without failing
-  the job (`continue-on-error`, at most 20 minutes, `--job-timeout 900`; skipped once the run
+  the job (`continue-on-error`, at most 35 minutes, `--job-timeout 900`; skipped once the run
   is cancelled), and its summary goes to the job log and the job summary; the worker's log is in
-  the artifact.
+  the artifact. It runs once per discovery: the dispatch input `site_discovery` (`crawl`,
+  `sitemap_first` or `both`, the default also for pull requests and the weekly run) sets
+  `--discovery`, and each run has its own summary and result file
+  (`site_structure_<discovery>.jsonl`). Compare the two tables to see what `sitemap_first` saves.
 
 ## The full WLO regression
 
@@ -214,7 +223,7 @@ with the baselines of 2026-09-28, which were measured on the same 4,000 URLs: fa
 mode 80 % ok. Run three manual dispatches of the live workflow, each with `url_set: wlo_4000`,
 one with `mode: auto`, one with `fast` and one with `browser`, **one after another, never
 together**. Each run is a service of its own with its own Valkey, so its per-host outbound limits
-(`OUTBOUND_MIN_DELAY_MS` 1,000 ms between request starts, `OUTBOUND_MAX_CONCURRENCY_PER_HOST` 2)
+(`OUTBOUND_MIN_DELAY_MS` 500 ms between request starts, `OUTBOUND_MAX_CONCURRENCY_PER_HOST` 2)
 know nothing of the others: three runs at once would send three times the normal rate to each
 WLO host, for hours. Start the next run when the previous one finished, for example:
 

@@ -15,6 +15,13 @@
     <option value="path">{{ t("form.scope_path") }}</option>
   </select>
   <p class="hint" id="site-scope-hint">{{ t("hint.scope") }}</p>
+  <fieldset class="choice" id="site-discovery">
+    <legend>{{ t("form.discovery") }}</legend>
+    <label class="inline"><input type="radio" name="discovery" value="sitemap_first" checked aria-describedby="site-discovery-fast-hint"> {{ t("form.discovery_fast") }}</label>
+    <p class="hint" id="site-discovery-fast-hint">{{ t("hint.discovery_fast") }}</p>
+    <label class="inline"><input type="radio" name="discovery" value="crawl" aria-describedby="site-discovery-thorough-hint"> {{ t("form.discovery_thorough") }}</label>
+    <p class="hint" id="site-discovery-thorough-hint">{{ t("hint.discovery_thorough") }}</p>
+  </fieldset>
   <fieldset class="choice">
     <legend>{{ t("form.also") }}</legend>
     <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked aria-describedby="site-sitemaps-hint"> {{ t("form.sitemaps") }}</label>

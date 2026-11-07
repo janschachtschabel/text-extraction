@@ -40,8 +40,9 @@ uv run pre-commit install    # install the git hooks
 
 ## Docker Compose
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker and a
-Valkey with a password. It switches on browser mode, the MCP server and the playground.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, an ASR
+worker and a Valkey with a password. It switches on browser mode, transcription, the MCP server and
+the playground.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
@@ -70,7 +71,7 @@ swaps every build for the published image; `.env` stays the same, and the profil
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 ```
 
-`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.5`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.6`; `0.1`
 follows the newest `0.1.x` after `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
 since an image already on the machine is not pulled again). The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).
@@ -85,7 +86,12 @@ profile and a switch in `.env`:
 | Docling | `DOCLING_ENABLED=true` | `docling` | OCR for scans and images, OpenDocument files (an image of about 2 GB, models of about 335 MiB) |
 | NLP | `PII_ENABLED=true` | `nlp` | Personal data handling with Presidio and spaCy (models of about 1 GB for `lg`, 115 MB for `md`) |
 | LLM | `LLM_ENABLED=true` | `llm` | Structured output with an LLM, semantic chunking and image descriptions |
-| ASR | `ASR_ENABLED=true` | `asr` | Speech recognition for audio and video without subtitles (the Whisper model, about 1.6 GB) |
+
+Speech recognition for audio and video (the ASR worker) is on by default: `docker compose up`
+starts it, and its first start downloads the Whisper model (about 1.6 GB; `ASR_MODEL=small`,
+about 0.5 GB). To run without it, set `ASR_ENABLED=false` in `.env` and start with
+`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`. An `.env` copied from an
+older `.env.example` still says `ASR_ENABLED=false`: set it to `true`.
 
 Start a profile with `docker compose --profile docling up --build` (several: one
 `--profile` each). The first start downloads the models into a volume. The LLM worker needs
@@ -130,7 +136,7 @@ operator touches most; the [configuration reference](../../configuration.md#envi
 | `FETCH_TIMEOUT_SECONDS` | `20` | Time for one fetch of a page. |
 | `FETCH_MAX_BYTES` | `20000000` | Most bytes of one page or file. |
 | `OUTBOUND_MAX_CONCURRENCY_PER_HOST` | `2` | Most requests at the same time to one host. |
-| `OUTBOUND_MIN_DELAY_MS` | `1000` | Least time between two requests to one host. |
+| `OUTBOUND_MIN_DELAY_MS` | `500` | Least time between two requests to one host. |
 | `OUTBOUND_BACKOFF_SECONDS` | `30` | The pause after a 429 or 503 of a host without `Retry-After`. |
 | `JOBS_ENABLED` | `true` | Jobs: batches, site structures, `wait_seconds` and screenshots. |
 | `JOB_TTL_SECONDS` | `86400` | How long a job and its results are kept. |

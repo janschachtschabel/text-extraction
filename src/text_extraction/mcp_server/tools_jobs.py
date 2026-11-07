@@ -108,6 +108,11 @@ class SiteStructureArguments(_JobArguments):
         default="host",
         description="host: the start page's host; path: also only under the start URL's directory.",
     )
+    discovery: Literal["crawl", "sitemap_first"] = Field(
+        default="crawl",
+        description="crawl: follow links. sitemap_first: when the site has a sitemap, crawl only "
+        "the start page and take the other pages from the sitemap (needs sitemaps: true).",
+    )
     options: Annotated[dict[str, Any] | None, options_argument("POST /v1/site-structure")] = None
 
 

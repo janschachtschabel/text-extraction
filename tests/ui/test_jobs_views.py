@@ -8,7 +8,7 @@ import hashlib
 import json
 import weakref
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import lxml.html
@@ -27,7 +27,7 @@ from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem, JobProgress, JobView
 from text_extraction.jobs import JobStore
-from text_extraction.ui.forms import OPERATIONS
+from text_extraction.ui.forms import OPERATIONS, build_body
 from text_extraction.ui.forward import forward
 from text_extraction.ui.i18n import LANGUAGE_HEADER
 from text_extraction.ui.results import render_result
@@ -595,12 +595,13 @@ def fake_reads(
         reads.append((offset, limit))
         items = items_of(offset, min(limit, total - offset))
         held[:] = [weakref.ref(item) for item in items]
+        created = datetime(2026, 10, 30, tzinfo=UTC)
         view = JobView(
             id=job_id,
             kind="site",
             state=state,  # type: ignore[arg-type]
-            created_at=datetime(2026, 10, 30, tzinfo=UTC),
-            finished_at=None,
+            created_at=created,
+            finished_at=created + timedelta(seconds=58) if state == "completed" else None,
             progress=JobProgress(total=total, done=total, success=total, partial=0, failed=0),
             items=items,
             next_offset=offset + limit if offset + limit < total else None,
@@ -643,14 +644,16 @@ def test_tree_checkboxes_named_only_for_urls(
         f"{ORIGIN}/docs/intro",
         f"{ORIGIN}/docs/more",
     }
-    sections = root.xpath("//li[contains(@class, 'node-section')]/label/input")
+    sections = root.xpath("//li[contains(@class, 'node-section')]/div/label/input")
     assert len(sections) == 2  # example.org and docs/
     assert all(box.get("name") is None and box.get("value") is None for box in sections)
     assert "<script>alert" not in html
-    assert texts(root, "//li[contains(@class, 'node-linked')]/span[contains(@class, 'found')]") == [
-        "linked only"
+    assert texts(root, "//li[contains(@class, 'node-linked')]/div/div[@class='cell-found']") == [
+        "Found: linked only"
     ]
-    assert texts(root, "//p[@class='tree-counts']") == ["4 URLs"]
+    assert texts(root, "//p[@class='tree-counts']") == [
+        "4 URLs · 2 crawled · 1 from the sitemap · 1 only linked · finished in 58 s"
+    ]
     assert texts(root, "//span[@class='tree-counter']") == ["0 selected"]
     assert {button.get("data-action") for button in root.xpath("//button[@data-action]")} == {
         "tree-all",
@@ -670,7 +673,7 @@ TYPED_SITE = [
         links=(
             (f"{ORIGIN}/agb", "depth", "legal"),
             (f"{ORIGIN}/start", "depth", "nav"),
-            (f"{ORIGIN}/docs/c", "depth", "content"),  # the URL says nothing: no type
+            (f"{ORIGIN}/docs/12345", "depth", "content"),  # an id shape: no guess
         ),
     ),
     page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
@@ -685,9 +688,10 @@ TYPE_TEXTS = {
             "/docs/a": "Content",
             "/docs/b": "Content",
             "/impressum": "Imprint",
-            "/agb": "Legal (guessed from the URL)",
+            "/agb": "Legal ~, guessed, from the URL",
+            "/start": "Content ~, guessed, a page with a name, not fetched",
         },
-        "types": "Types: Content 2, Home 1, Imprint 1, Legal 1, Type open 2",
+        "types": "Types: Content 3, Home 1, Imprint 1, Legal 1, Type open 1",
         "button": "Select content pages",
     },
     "de": {
@@ -696,9 +700,10 @@ TYPE_TEXTS = {
             "/docs/a": "Inhalt",
             "/docs/b": "Inhalt",
             "/impressum": "Impressum",
-            "/agb": "Rechtliches (aus der URL geschätzt)",
+            "/agb": "Rechtliches ~, geschätzt, aus der URL",
+            "/start": "Inhalt ~, geschätzt, Seite mit Namen, nicht abgerufen",
         },
-        "types": "Typen: Inhalt 2, Startseite 1, Impressum 1, Rechtliches 1, Typ offen 2",
+        "types": "Typen: Inhalt 3, Startseite 1, Impressum 1, Rechtliches 1, Typ offen 1",
         "button": "Inhaltsseiten auswählen",
     },
 }
@@ -715,18 +720,23 @@ def test_tree_shows_page_types(
 
     root = tree(show_tree(client, language=language))
 
-    typed = "./label/span[contains(@class, 'page-type') and not(contains(@class, 'type-open'))]"
+    typed = (
+        "./div[@class='cell-type']/span"
+        "[contains(@class, 'page-type') and not(contains(@class, 'type-open'))]"
+    )
     badges = {
-        leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): " ".join(
+        leaf.xpath("./div/label/input")[0].get("value").removeprefix(ORIGIN): " ".join(
             leaf.xpath(typed)[0].text_content().split()
         )
-        for leaf in root.xpath("//li[./label/input[@name='url']]")
+        for leaf in root.xpath("//li[./div/label/input[@name='url']]")
         if leaf.xpath(typed)
     }
-    assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
-    # The linked-only URLs whose URL says nothing are marked "type open" (package 17).
-    untyped = root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]/label/input")
-    assert {box.get("value").removeprefix(ORIGIN) for box in untyped} == {"/start", "/docs/c"}
+    assert badges == expected["badges"]  # none for /kaputt (failed) and /docs/12345
+    # The linked-only URLs that no rule can type are marked "type open" (package 17).
+    untyped = root.xpath(
+        "//li[./div[@class='cell-type']/span[contains(@class, 'type-open')]]/div/label/input"
+    )
+    assert {box.get("value").removeprefix(ORIGIN) for box in untyped} == {"/docs/12345"}
     boxes = {
         box.get("value").removeprefix(ORIGIN): box.get("data-page-type")
         for box in root.xpath("//input[@name='url']")
@@ -738,14 +748,14 @@ def test_tree_shows_page_types(
         "/impressum": "imprint",
         "/kaputt": None,
         "/agb": "legal",
-        "/start": None,
-        "/docs/c": None,
+        "/start": "content",
+        "/docs/12345": None,
     }
     # A failed page is left out by "Select content pages" (ruling P14-R9).
     failed = root.xpath("//input[@name='url'][@data-failed]")
     assert [box.get("value").removeprefix(ORIGIN) for box in failed] == ["/kaputt"]
-    # The badge is part of the checkbox's label, so a screen reader names it.
-    assert root.xpath("//li/span[contains(@class, 'page-type')]") == []
+    # The pill is a cell of its own, read with the column's name ("Type: ...").
+    assert root.xpath("//label//span[contains(@class, 'page-type')]") == []
     assert texts(root, "//p[@class='tree-types']") == [expected["types"]]
     [button] = root.xpath("//button[@data-action='tree-content']")
     assert " ".join(button.text_content().split()) == expected["button"]
@@ -779,11 +789,11 @@ FOLD_SITE = [
         f"{ORIGIN}/",
         depth=0,
         page_type="home",
-        links=((f"{ORIGIN}/docs/deep/linked", "depth"),),
+        links=((f"{ORIGIN}/docs/deep/1234", "depth"),),
         external=((SOCIAL_URL, "social"), ("https://example.com/elsewhere", "content")),
     ),
     page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
-    sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/docs/deep/listed"}]),
+    sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/docs/deep/5678"}]),
 ]
 
 
@@ -810,7 +820,7 @@ def test_tree_has_fold_buttons_for_sections(
     every_id = [str(value) for value in root.xpath("//@id")]
     assert len(set(every_id)) == len(every_id)  # unique in the whole view
     for item, list_id in zip(parents, ids, strict=True):
-        [button] = item.xpath("./button[contains(@class, 'fold')]")
+        [button] = item.xpath("./div/button[contains(@class, 'fold')]")
         assert button.get("type") == "button"
         assert button.get("hidden") is not None  # shown by ui.js only
         assert button.get("aria-expanded") == "true"
@@ -819,10 +829,12 @@ def test_tree_has_fold_buttons_for_sections(
         assert button.getnext().tag == "label"
         assert button.xpath(".//*[@aria-hidden='true']")  # the indicator is not read
     # A leaf has no fold button.
-    assert root.xpath("//li[not(./ul)]/button") == []
-    [docs] = [item for item in parents if texts(item, "./label/span[@class='label']") == ["docs/"]]
-    assert texts(docs, "./button") == [name]
-    assert texts(docs, "./label") == ["docs/"]
+    assert root.xpath("//li[not(./ul)]//button[contains(@class, 'fold')]") == []
+    [docs] = [
+        item for item in parents if texts(item, "./div/label/span[@class='label']") == ["docs/"]
+    ]
+    assert texts(docs, "./div/button") == [name]
+    assert texts(docs, "./div/label") == ["docs/"]
     tools = {
         button.get("data-action"): button
         for button in root.xpath("//p[@class='tree-tools']/button")
@@ -856,17 +868,19 @@ def test_tree_marks_type_open(
     root = tree(show_tree(client, language=language))
 
     open_ = {
-        leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): leaf
-        for leaf in root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]")
+        leaf.xpath("./div/label/input")[0].get("value").removeprefix(ORIGIN): leaf
+        for leaf in root.xpath(
+            "//li[./div[@class='cell-type']/span[contains(@class, 'type-open')]]"
+        )
     }
-    assert set(open_) == {"/docs/deep/linked", "/docs/deep/listed"}  # crawled pages are typed
+    assert set(open_) == {"/docs/deep/1234", "/docs/deep/5678"}  # crawled pages are typed
     for leaf in open_.values():
-        [badge] = leaf.xpath("./label/span[contains(@class, 'page-type-open')]")
+        [badge] = leaf.xpath("./div[@class='cell-type']/span[contains(@class, 'type-open')]")
         assert "page-type" in badge.get("class").split()
         assert " ".join(badge.text_content().split()) == pill
         assert badge.xpath("./span[@class='visually-hidden']")
         assert badge.get("title") == pill.split(": ", 1)[1]
-        assert leaf.xpath("./label/input")[0].get("data-page-type") is None
+        assert leaf.xpath("./div/label/input")[0].get("data-page-type") is None
     assert texts(root, "//p[@class='tree-types']") == [types]
 
 
@@ -877,7 +891,7 @@ def test_tree_lists_social_links(client: TestClient, monkeypatch: pytest.MonkeyP
 
     [social] = root.xpath("//section[@class='tree-social']")
     # After the tree, before the actions: it is no part of the selection.
-    assert social.getprevious().get("class") == "tree"
+    assert social.getprevious().get("class") == "tree-box"
     assert social.getnext().get("class") == "tree-actions"
     [title] = social.xpath("./h5")
     assert title.get("id")
@@ -1167,8 +1181,12 @@ def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch
         monkeypatch, len(SMALL_SITE), lambda offset, limit: SMALL_SITE[offset : offset + limit]
     )
     shown = client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=german).text
-    found = texts(tree(shown), "//span[contains(@class, 'found')]")
-    assert sorted(set(found)) == ["Sitemap", "gecrawlt", "nur verlinkt"]
+    found = texts(tree(shown), "//div[@class='cell-found']")
+    assert sorted(set(found)) == [
+        "Gefunden: Sitemap",
+        "Gefunden: gecrawlt",
+        "Gefunden: nur verlinkt",
+    ]
 
 
 def test_badges_are_translated(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1451,3 +1469,32 @@ def test_tree_failed_page_that_is_blocked_for_another_reason_stays_failed(
     box = box_of(root, BLOCKED_ONE)
     assert box.get("data-blocked") == "robots"
     assert box.get("data-failed") is not None
+
+
+# --- "Fast" or "Thorough" (package 18) ---------------------------------------------------------
+
+
+def test_site_form_offers_fast_sitemap_first_as_the_preset(client: TestClient) -> None:
+    root = tree(run(client, "login").text)
+
+    form = "//form[@hx-post='/ui/run/site-structure']"
+    (fieldset,) = root.xpath(f"{form}//fieldset[@class='choice'][.//input[@name='discovery']]")
+    assert texts(fieldset, "./legend") == ["How to read the site"]
+    fast, thorough = fieldset.xpath(".//input[@name='discovery']")
+    assert (fast.get("value"), fast.get("checked") is not None) == ("sitemap_first", True)
+    assert (thorough.get("value"), thorough.get("checked") is not None) == ("crawl", False)
+    for radio, label, hint in (
+        (fast, "Fast: sitemap first", "Reads robots.txt, the sitemaps and the start page."),
+        (thorough, "Thorough: follow links", "Follows links up to the depth and page count above."),
+    ):
+        assert texts(radio.getparent(), ".") == [label]
+        (note,) = fieldset.xpath(f".//p[@id='{radio.get('aria-describedby')}']")
+        assert note.text_content().startswith(hint)
+
+
+def test_site_form_sends_the_chosen_discovery() -> None:
+    posted = {"url": PAGE, "sitemaps": "on", "discovery": "sitemap_first"}
+    assert build_body("site-structure", posted)["discovery"] == "sitemap_first"
+    assert build_body("site-structure", {**posted, "discovery": "crawl"})["discovery"] == "crawl"
+    # A post without the choice is not from the form: the API's default.
+    assert build_body("site-structure", {"url": PAGE})["discovery"] == "crawl"
