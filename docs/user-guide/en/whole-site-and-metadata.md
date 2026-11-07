@@ -130,7 +130,9 @@ are checked in this order, and the first that applies wins:
    node, else its JSON-LD nodes, else microdata on the page's `<body>`, `<main>` or `<article>`
    (not in a sidebar, a menu, the header or the footer). So an article with an event in its
    sidebar stays `content`, a page that lists several events stays `listing`, and `/impressum`
-   with a quiz on it stays `imprint`.
+   with a quiz on it stays `imprint`. A type's name as the first part of the address does not
+   beat the main entity when a name of several words follows: `/kontakt/workshop-anmeldung`
+   describing one event is `event`.
 6. The title begins or ends with a type's name, such as "Impressum", "Kontakt", "Login" or
    "Suchergebnisse" ("Impressum | Firma" and "Firma | Impressum"). A colon after the name starts a
    subtitle: "Datenschutz: Was Schulen wissen müssen" is no privacy page ("Impressum:" with

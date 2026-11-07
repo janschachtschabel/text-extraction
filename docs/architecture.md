@@ -2738,19 +2738,22 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   **Ruling AU3-R3 (third audit, A3: a type name above an article):** for such an article (same
   condition) a type name as the *first* path segment does not count when the path, without an
   index file and a leading language code, has two or more segments and the last one is a slug of
-  words (two or more parts joined by `-` or `_` that each hold two letters in a row); the `url`
-  vote is then what the other segments and the query say (`_url_type(url,
-  first_segment=False)`), and dropped when that is nothing or `listing`. So
+  words (parts joined by `-` or `_`, at least two of which hold two letters in a row:
+  `mathe-workshop-2026` is one, `seite-2` is none); the `url` vote is then what the other
+  segments and the query say (`_url_type(url, first_segment=False)`), and dropped when that is
+  nothing or, for the article, `listing` (A26-R5). The same holds against a main event or
+  learning resource, whatever `og:type` says (AU3-R5). So
   `/datenschutz/schuelerfotos-im-unterricht`, `/kontakt/elterngespraech-vorbereiten` and
   `/barrierefreiheit/leichte-sprache-im-unterricht` are `content`, and
   `/datenschutz/cookie-richtlinie` is `legal` by its last segment. A name as the only or the last
   segment still counts (`/datenschutz/`, `/themen/datenschutz`, `/impressum/index.html`), and so
   does a first segment before a single word (`/kontakt/anfahrt` stays `contact`: a short child
   of a contact page is more likely a contact page than an article). Without `og:type` `article`
-  and enough words, A26-R2 is unchanged. JSON-LD is parsed up to a size and a count per page,
-  and nothing raises on bad HTML or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
-  raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
-  `page_type: null` instead of failing.
+  and enough words and without a main entity, A26-R2 is unchanged. JSON-LD is parsed up to a
+  size and a count per page, and nothing raises on bad HTML or a bad URL. The status passed is
+  `upstream_status`. The type is an extra: should the rules raise anyway, `_process` logs
+  `page_type_failed` (host and error type) and the page keeps `page_type: null` instead of
+  failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
   (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
   failed. In results `error` therefore comes from soft 404s (`soft_404`).
@@ -2768,17 +2771,26 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz` and `Course` are
   `learning_material` (signal `schema_org`; the contact, about, search and collection types keep
   their rank 3 and are read from any node and any outermost scope, as before).
-  **The main entity (third audit, A2; revises package 18):** an event or learning-resource type
-  counts only when it is the page's *one main entity*, and that vote ranks below `url` (so
-  `/impressum` with a Quiz node stays `imprint`) and above the title. The main entities are the
-  `mainEntity` values of the JSON-LD nodes typed `*Page` (`WebPage`, `ItemPage` ...; inline, or
-  an `{"@id"}` reference to a node of the page), else every JSON-LD node (top-level and
-  `@graph`); when no JSON-LD entity is an article, an event or a learning resource, the
-  outermost microdata scopes on `<html>`, `<body>`, `<main>` or `<article>` that are not inside
-  `<aside>`, `<nav>`, `<header>` or `<footer>`. Of those, only articles (a type ending in
-  `Article` or `Posting`: `NewsArticle`, `BlogPosting` ...), events and learning resources count,
-  one per `@id` (else per type list and name); a node typed both an article and an event is an
-  article. There must be exactly one, and it must not be an article. So an article with a
+  **Ruling AU3-R5 (third audit, A2: the main entity; revises package 18):** an event or
+  learning-resource type counts only when it is the page's *one main entity*, and that vote
+  ranks below `url` and above the title. Below `url` means: a type name as the only or the last
+  segment, a listing name and the query rules beat it (`/impressum` with a Quiz node stays
+  `imprint`, `/kategorie/mathe` with a Course stays `listing`); a type name as the first segment
+  before a slug of words does not (AU3-R3 applies regardless of `og:type`, so
+  `/kontakt/workshop-anmeldung` and `/ueber-uns/termine/tag-der-offenen-tuer` with a main Event
+  are `event`), nor does one before a single word lose its vote (`/kontakt/anfahrt` with a Quiz
+  stays `contact`). The main entities are the `mainEntity` values of the JSON-LD nodes typed
+  `*Page` (`WebPage`, `ItemPage` ...; inline, or an `{"@id"}` reference whose `@id` is a string
+  naming a node of the page; at most 200 values are read, each node once), else every JSON-LD
+  node (top-level and `@graph`); when no JSON-LD entity is an article, an event or a learning
+  resource, the outermost microdata scopes on `<html>`, `<body>`, `<main>` or `<article>` that
+  are not inside `<aside>`, `<nav>`, `<header>` or `<footer>`. Of those, only articles (a type
+  ending in `Article`, and `BlogPosting`, `SocialMediaPosting`, `DiscussionForumPosting`,
+  `LiveBlogPosting`; a `JobPosting` is none), events and learning resources count, one per
+  `@id`, else per type list, `name`, `startDate` and `url` (a recurring event with one name and
+  several dates is several entities); a node typed both an article and an event is an
+  article. There must be exactly one (the count stops at the second), and it must not be an
+  article. So an article with a
   sidebar Event in microdata, with JSON-LD `[NewsArticle, Event]`, or with a Yoast `@graph`
   `[WebPage, Article, Course]` is `content`; an event page whose only typed entity besides the
   site's `WebPage`, `WebSite`, `Organization` and `BreadcrumbList` is an `Event`, or whose
@@ -2798,8 +2810,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      `pagination` (`link_text`).
      **Ruling AU3-R2 (third audit, A3: link texts):** a link text type word counts only when the
      URL's path, without a trailing index file and a leading language code, has at most one
-     segment, or its last segment is no slug of words (two or more parts joined by `-` or `_`
-     that each hold two letters in a row; `seite-2`, `123`, a UUID or a hex id are none). A
+     segment, or its last segment is no slug of words (parts joined by `-` or `_`, at least two
+     of which hold two letters in a row; `seite-2`, `123`, a UUID or a hex id are none). A
      link names what it does as often as what it points to: "Anmelden" to
      `/fortbildungen/mathe-workshop-2026` (then `event` by keywords), "Datenschutz" to
      `/themen/medienbildung-und-privatsphaere` (then `content` by default) and "Kontakt" to
@@ -2809,7 +2821,9 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      stay `contact`. The pagination region is unchanged. In the site tree a `link_text` reason
      also never replaces a sitemap entry's `default` content guess (`_Found.merge`): a URL listed
      in a plain sitemap and linked as "Datenschutz" stays `content` and ticked by "Select content
-     pages"; between links alone a `link_text` reason still beats a `default` one;
+     pages", also when the sitemap source is full and the entry merges into the held link (the
+     entry's guess then replaces the link's `link_text` guess); between links alone a
+     `link_text` reason still beats a `default` one;
   5. a keyword token in the path (split on `/ - _ .`) or in the link text (`keywords`); event
      words (`veranstaltung`, `termine`, `workshop`, `symposium` ...) before material words
      (`arbeitsblatt`, `quiz`, `lernpfad`, `oer` ...); whole tokens only, so `eventually` is none;
@@ -2854,7 +2868,11 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
-  home unless the page's `lang` names another language (A26-R3).
+  home unless the page's `lang` names another language (A26-R3). A main event or learning
+  resource in microdata on a plain wrapper (`<div itemscope itemtype=".../Event">` around the
+  content, not on `<body>`, `<main>` or `<article>`) no longer types the page (AU3-R5): a
+  sidebar widget looks the same; JSON-LD or `mainEntity` still does. Unnamed events without
+  `@id`, `startDate` and `url` count as one entity, so a list of such events can be `event`.
 - **Crawl speed (package 18).** Measured by the live harness (`tests/live/run_site.py`, depth 1,
   `max_pages` 25, `compliance: enforce`, on GitHub runners): at the old 1 s spacing a crawl took
   26 to 46 s for its 25 pages; at 500 ms it takes 17 to 32 s (wirlernenonline.de 46 -> 26 s,

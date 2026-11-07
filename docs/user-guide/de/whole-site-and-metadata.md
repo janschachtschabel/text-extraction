@@ -136,7 +136,9 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    der Seite (nicht in einer Seitenleiste, einem Menü, der Kopf- oder der Fußzeile). So bleibt ein
    Artikel mit einer Veranstaltung in der Seitenleiste `content`, eine Seite, die mehrere
    Veranstaltungen auflistet, bleibt `listing`, und `/impressum` mit einem Quiz darauf bleibt
-   `imprint`.
+   `imprint`. Der Name eines Typs als erster Teil der Adresse schlägt den Hauptgegenstand nicht,
+   wenn danach ein Name aus mehreren Wörtern folgt: `/kontakt/workshop-anmeldung`, das eine
+   Veranstaltung beschreibt, ist `event`.
 6. Der Titel beginnt oder endet mit dem Namen eines Typs, etwa „Impressum“, „Kontakt“, „Login“
    oder „Suchergebnisse“ („Impressum | Firma“ und „Firma | Impressum“). Ein Doppelpunkt nach dem
    Namen leitet einen Untertitel ein: „Datenschutz: Was Schulen wissen müssen“ ist keine

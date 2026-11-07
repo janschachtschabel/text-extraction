@@ -22,9 +22,8 @@ sitemap's ``type_hint``, a link's text and region, or ``content`` by default), a
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
 strongest, unless that guess is ``content`` by default and a weaker source gives a reason other
 than a link text for a sitemap entry (AU3-R2: a link "Datenschutz" leaves a listed page
-content). The
-first link that names a URL sets its title (``title_from_link``); a crawled page's own title
-wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
+content). The first link that names a URL sets its title (``title_from_link``); a crawled
+page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
 type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
 ``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
@@ -211,7 +210,8 @@ class _Found:
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL; between
             # guesses, a weaker source's reason beats a stronger source's bare default, but a
-            # link text never beats a sitemap entry's (AU3-R2).
+            # link text never beats a sitemap entry's guess (AU3-R2), also when the entry merges
+            # into a link held because the sitemap source is full.
             if (
                 other.status is not None
                 or self.page_type is None
@@ -220,6 +220,9 @@ class _Found:
                     and other.type_reason not in (None, "default")
                     and not (self.from_sitemap and other.type_reason == "link_text")
                 )
+                or (
+                    other.from_sitemap and not self.from_sitemap and self.type_reason == "link_text"
+                )
             ):
                 self.page_type, self.type_guessed = other.page_type, other.type_guessed
                 self.type_reason = other.type_reason
@@ -227,6 +230,7 @@ class _Found:
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
         self.blocked = self.blocked or other.blocked
+        self.from_sitemap = self.from_sitemap or other.from_sitemap
 
 
 class TreeBuilder:

@@ -20,8 +20,10 @@ its signals, strongest first (ruling P14-S4):
    entities are the ``mainEntity`` of a ``*Page`` node, else every JSON-LD node; failing a
    JSON-LD entity, the microdata scopes on ``<html>``, ``<body>``, ``<main>`` or ``<article>``
    outside ``<aside>``, ``<nav>``, ``<header>`` and ``<footer>``. Only entities that are an
-   article (a type ending in ``Article`` or ``Posting``), an event or a learning resource count;
-   there has to be exactly one, and it must not be an article (finding A2 of the third audit).
+   article (a type ending in ``Article``, or ``BlogPosting``, ``SocialMediaPosting``,
+   ``DiscussionForumPosting``, ``LiveBlogPosting``), an event or a learning resource count;
+   there has to be exactly one, and it must not be an article (AU3-R5). Against it, a type name
+   as the first path segment before a slug of words does not count for ``url`` (AU3-R3).
 6. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
    followed by nothing (a trailing colon aside) or a separator other than a colon, or ends with
    one after a separator;
@@ -51,6 +53,7 @@ imported for typing only): ``convert.links`` imports ``LinkCategory`` from here,
 import json
 import re
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, get_args
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -344,9 +347,9 @@ def _without_language(stems: list[str]) -> list[str]:
 
 
 def _is_word_slug(stem: str) -> bool:
-    """Two or more parts joined by ``-`` (``_`` is read as ``-``) that each hold two letters in a
-    row: ``schuelerfotos-im-unterricht``, ``oer-einfuehrung``; not ``seite-2``, ``123`` or a
-    UUID (AU3-R2, AU3-R3)."""
+    """Parts joined by ``-`` (``_`` is read as ``-``), at least two of which hold two letters in a
+    row: ``schuelerfotos-im-unterricht``, ``oer-einfuehrung``, ``mathe-workshop-2026``; not
+    ``seite-2``, ``123`` or a UUID (AU3-R2, AU3-R3)."""
     return sum(1 for part in stem.split("-") if _TWO_LETTERS.search(part)) >= 2
 
 
@@ -774,11 +777,15 @@ _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
 )
 _EVENT_SCHEMA_SUFFIX: Final = "Event"  # Event, EducationEvent, BusinessEvent ...
 _MATERIAL_SCHEMA_TYPES: Final = frozenset({"LearningResource", "Quiz", "Course"})
-# Article, NewsArticle, TechArticle, BlogPosting, SocialMediaPosting ...: an article entity, which
-# competes with an event or a learning resource for the page's main entity.
-_ARTICLE_SCHEMA_SUFFIXES: Final = ("Article", "Posting")
+# Article, NewsArticle, TechArticle ... and the postings that are articles: an article entity,
+# which competes with an event or a learning resource for the page's main entity. Not every
+# ``*Posting`` is one: a ``JobPosting`` is no article.
+_ARTICLE_SCHEMA_SUFFIX: Final = "Article"
+_POSTING_SCHEMA_TYPES: Final = frozenset(
+    {"BlogPosting", "SocialMediaPosting", "DiscussionForumPosting", "LiveBlogPosting"}
+)
 _PAGE_SCHEMA_SUFFIX: Final = "Page"  # WebPage, ItemPage, ...: a node whose mainEntity counts
-# The types a page's one main entity gives; they rank below ``url`` (finding A2).
+# The types a page's one main entity gives; they rank below ``url`` (AU3-R5).
 _ENTITY_PAGE_TYPES: Final = frozenset({"event", "learning_material"})
 # Microdata scopes on these elements can be the page's main entity, unless inside one of the
 # frame elements (a sidebar, a menu, the header or the footer).
@@ -874,7 +881,9 @@ def _json_ld_page_nodes(tree: HtmlElement) -> list[object]:
 def _entity_kind(names: list[str]) -> PageType | Literal["article"] | None:
     """What a schema entity of these type names is: an article, an event, a learning resource,
     or None (an organisation, a breadcrumb, a web page ...)."""
-    if any(name.endswith(_ARTICLE_SCHEMA_SUFFIXES) for name in names):
+    if _POSTING_SCHEMA_TYPES.intersection(names) or any(
+        name.endswith(_ARTICLE_SCHEMA_SUFFIX) for name in names
+    ):
         return "article"
     if any(name.endswith(_EVENT_SCHEMA_SUFFIX) for name in names):
         return "event"
@@ -883,15 +892,16 @@ def _entity_kind(names: list[str]) -> PageType | Literal["article"] | None:
     return None
 
 
-def _json_ld_main_entities(nodes: list[object]) -> list[dict[str, Any]]:
-    """The ``mainEntity`` of the ``*Page`` nodes (inline, or by ``@id`` a node of the page), else
-    every node."""
+def _json_ld_main_entities(nodes: list[object]) -> Iterator[dict[str, Any]]:
+    """The ``mainEntity`` of the ``*Page`` nodes (inline, or by a string ``@id`` a node of the
+    page), each node once and at most ``_MAX_JSON_LD_NODES`` values read, else every node."""
     by_id = {
         node["@id"]: node
         for node in nodes
         if isinstance(node, dict) and isinstance(node.get("@id"), str)
     }
-    mains: list[dict[str, Any]] = []
+    yielded: set[int] = set()
+    budget = _MAX_JSON_LD_NODES
     for node in nodes:
         page_types = _json_ld_types(node)
         if not isinstance(node, dict) or not any(
@@ -899,27 +909,43 @@ def _json_ld_main_entities(nodes: list[object]) -> list[dict[str, Any]]:
         ):
             continue
         raw = node.get("mainEntity")
-        for value in (raw if isinstance(raw, list) else [raw])[:_MAX_JSON_LD_NODES]:
+        for value in (raw if isinstance(raw, list) else [raw])[:budget]:
+            budget -= 1
             if not isinstance(value, dict):
                 continue
-            if _json_ld_types(value):
-                mains.append(value)
-            elif isinstance(target := by_id.get(value.get("@id")), dict):
-                mains.append(target)
-    return mains or [node for node in nodes if isinstance(node, dict)]
+            target: object = value
+            if not _json_ld_types(value):
+                ref = value.get("@id")
+                target = by_id.get(ref) if isinstance(ref, str) else None
+            if isinstance(target, dict) and id(target) not in yielded:
+                yielded.add(id(target))
+                yield target
+        if budget <= 0:
+            break
+    if not yielded:
+        yield from (node for node in nodes if isinstance(node, dict))
+
+
+def _entity_key(node: dict[str, Any], names: list[str]) -> object:
+    """What makes two entities one: the ``@id``, else the types, the name, the start date and
+    the URL (a recurring event has one name and several dates)."""
+    node_id = node.get("@id")
+    if isinstance(node_id, str):
+        return node_id
+    return (tuple(names), *(str(node.get(field)) for field in ("name", "startDate", "url")))
 
 
 def _entity_kinds_json_ld(nodes: list[object]) -> list[PageType | Literal["article"]]:
-    """The kinds of the page's main JSON-LD entities, one per entity (by ``@id``, else by its
-    types and name)."""
+    """The kinds of the page's main JSON-LD entities, one per entity (`_entity_key`); it stops
+    at the second, as two are no main entity."""
     seen: dict[object, PageType | Literal["article"]] = {}
     for node in _json_ld_main_entities(nodes):
         names = _json_ld_types(node)
         if (kind := _entity_kind(names)) is None:
             continue
-        node_id = node.get("@id")
-        key = node_id if isinstance(node_id, str) else (tuple(names), str(node.get("name")))
-        seen.setdefault(key, kind)
+        seen.setdefault(_entity_key(node, names), kind)
+        if len(seen) > 1:
+            break
     return list(seen.values())
 
 
@@ -934,7 +960,7 @@ def _is_main_scope(scope: HtmlElement) -> bool:
 def _schema_page_type(tree: HtmlElement) -> PageType | None:
     """The type schema.org says: a page kind (``ContactPage`` ...) of any node or outermost
     scope, else the kind of the page's one main entity when it is an event or a learning
-    resource (finding A2)."""
+    resource (AU3-R5)."""
     nodes = _json_ld_page_nodes(tree)
     scopes = _microdata_scopes(tree)
     names: set[str] = set()
@@ -1024,7 +1050,7 @@ _SIGNAL_ORDER: Final[tuple[PageSignal, ...]] = (
     "word_count",
 )
 _DECISIVE: Final[tuple[PageSignal, ...]] = tuple(s for s in _SIGNAL_ORDER if s != "og_type")
-# The same with ``url`` before ``schema_org``, for a schema vote of a main entity (finding A2).
+# The same with ``url`` before ``schema_org``, for a schema vote of a main entity (AU3-R5).
 _DECISIVE_URL_FIRST: Final[tuple[PageSignal, ...]] = (
     "status",
     "soft_404",
@@ -1100,21 +1126,27 @@ def page_type(
     body = tree.find(".//body")
     if _is_link_dense(body if body is not None else tree):
         votes["link_density"] = "listing"
+    long_article = False
     if quality.word_count >= min_words:
         votes["word_count"] = "content"
-        if is_article:
+        long_article = is_article
+        if long_article:
             for signal in _ARTICLE_DROPS:
                 votes.pop(signal, None)
-            if "url" in votes:
-                # A type name as the first segment, before a slug of words, does not count for
-                # an article (AU3-R3); a ``url`` vote for ``listing`` never does (A26-R5).
-                by_last = (
-                    _url_type(url, first_segment=False) if _has_slug_after_first(url) else by_url
-                )
-                if by_last in (None, "listing"):
-                    del votes["url"]
-                else:
-                    votes["url"] = by_last
+    # A type name as the first segment, before a slug of words, does not count for an article
+    # with enough words nor against a main entity (AU3-R3, AU3-R5): the ``url`` vote is what the
+    # other segments and the query say.
+    if (
+        "url" in votes
+        and (long_article or votes.get("schema_org") in _ENTITY_PAGE_TYPES)
+        and _has_slug_after_first(url)
+    ):
+        if (by_rest := _url_type(url, first_segment=False)) is None:
+            del votes["url"]
+        else:
+            votes["url"] = by_rest
+    if long_article and votes.get("url") == "listing":  # A26-R5
+        del votes["url"]
 
     order = _DECISIVE_URL_FIRST if votes.get("schema_org") in _ENTITY_PAGE_TYPES else _DECISIVE
     winner: PageType = next((votes[s] for s in order if s in votes), "other")

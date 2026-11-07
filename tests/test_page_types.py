@@ -1118,3 +1118,93 @@ def test_a_type_name_as_first_segment_still_counts_without_an_article() -> None:
     assert classify(doc(), url, words=ARTICLE_WORDS) == ("privacy", ["url"])
     short = doc(head=OG_ARTICLE)
     assert classify(short, url, words=MIN_WORDS - 1) == ("privacy", ["url"])
+
+
+# --- third audit, fix round 1 ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reference", [["#e"], {"x": "#e"}, 7, None])
+def test_a_main_entity_reference_that_is_no_string_is_ignored(reference: object) -> None:
+    graph = {
+        "@graph": [
+            {"@type": "WebPage", "mainEntity": {"@id": reference}},
+            {"@id": "#e", "@type": "Event"},
+        ]
+    }
+    # The reference names nothing, so every node is a candidate: the one Event.
+    assert classify(doc(head=json_ld(graph)), words=ARTICLE_WORDS)[0] == "event"
+
+
+def test_a_main_entity_reference_that_is_no_string_next_to_a_good_one() -> None:
+    graph = {
+        "@graph": [
+            {"@type": "WebPage", "mainEntity": [{"@id": ["#a"]}, {"@id": "#c"}]},
+            {"@id": "#c", "@type": "Course"},
+            {"@type": "Article"},
+        ]
+    }
+    assert classify(doc(head=json_ld(graph)), words=ARTICLE_WORDS)[0] == "learning_material"
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        # A recurring event: one name, several dates.
+        [{"@type": "Event", "name": "Elternabend", "startDate": f"2026-1{i}-01"} for i in range(2)],
+        # Unnamed events with their own dates or pages.
+        [{"@type": "Event", "startDate": f"2026-1{i}-01"} for i in range(2)],
+        [{"@type": "Event", "url": f"https://example.org/veranstaltungen/{i}"} for i in range(2)],
+    ],
+)
+def test_several_events_without_an_id_are_no_main_entity(events: list[object]) -> None:
+    html = doc(head=json_ld(events), body=link_list(30, filler_words=5))
+    url = "https://example.org/veranstaltungen/"
+    assert classify(html, url, words=120) == ("listing", ["link_density"])
+    paged = doc(head=json_ld(events) + '<link rel="next" href="?page=2">')
+    assert classify(paged, url, words=120) == ("listing", ["pagination"])
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/kontakt/workshop-anmeldung", "/ueber-uns/termine/tag-der-offenen-tuer"],
+)
+def test_a_type_name_as_first_segment_does_not_beat_a_main_event(path: str) -> None:
+    html = doc(head=json_ld({"@type": "Event", "name": "Workshop"}))
+    assert classify(html, f"https://example.org{path}", words=ARTICLE_WORDS) == (
+        "event",
+        ["schema_org"],
+    )
+
+
+def test_a_main_entity_keeps_a_type_name_as_last_or_only_segment() -> None:
+    html = doc(head=json_ld({"@type": "Quiz"}))
+    assert classify(html, "https://example.org/impressum")[0] == "imprint"
+    assert classify(html, "https://example.org/service/impressum")[0] == "imprint"
+    assert classify(html, "https://example.org/kontakt/anfahrt")[0] == "contact"
+    assert classify(html, "https://example.org/kategorie/mathe")[0] == "listing"
+
+
+def test_a_job_posting_is_no_article() -> None:
+    data = [{"@type": "Course", "name": "OER-Einführung"}, {"@type": "JobPosting", "title": "x"}]
+    assert classify(doc(head=json_ld(data)), words=ARTICLE_WORDS)[0] == "learning_material"
+    for posting in ("BlogPosting", "SocialMediaPosting", "DiscussionForumPosting"):
+        both = [{"@type": "Course"}, {"@type": posting}]
+        assert classify(doc(head=json_ld(both)), words=ARTICLE_WORDS)[0] == "content", posting
+
+
+def _timed(html: str) -> tuple[float, tuple[PageType, list[PageSignal]]]:
+    started = time.perf_counter()
+    result = classify(html)
+    return time.perf_counter() - started, result
+
+
+def test_many_main_entity_values_cost_little_more_than_parsing_them() -> None:
+    def page(key: str) -> str:
+        graph = {"@graph": [{"@type": "WebPage", key: [{"@type": "Event"}] * 200}] * 120}
+        text = json.dumps(graph, separators=(",", ":"))
+        return doc(head=f'<script type="application/ld+json">{text}</script>' * 20)
+
+    baseline, _ = _timed(page("about"))
+    elapsed, result = _timed(page("mainEntity"))
+    assert result[0] == "event"
+    assert elapsed < 3 * baseline + 0.1

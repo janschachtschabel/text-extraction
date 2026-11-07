@@ -19,6 +19,7 @@ from text_extraction.ui.site_tree import (
     NON_CONTENT_TYPES,
     TREE_MAX_SOCIAL,
     SiteTree,
+    TreeBuilder,
     TreeNode,
     build_tree,
     leaf_origins,
@@ -771,3 +772,17 @@ def test_a_slug_linked_as_a_type_word_stays_content_in_the_tree() -> None:
     ]
     node = _by_url(build_tree(items, max_urls=10))[url]
     assert (node.page_type, node.type_reason) == ("content", "default")
+
+
+def test_a_sitemap_guess_merged_into_a_held_link_replaces_its_link_text_guess() -> None:
+    """With the sitemap source full, an entry merges into the link held for the same URL; the
+    sitemap's default still beats the link text (AU3-R2)."""
+    url = f"{ORIGIN}/medien/"
+    builder = TreeBuilder(max_urls=1)
+    builder.add(page_item(0, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)))
+    builder.add(
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/andere/"}, {"loc": url}])
+    )
+    [held] = builder._sources[2].values()
+    assert held.url == url
+    assert (held.page_type, held.type_reason, held.from_sitemap) == ("content", "default", True)
