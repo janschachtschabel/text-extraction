@@ -55,6 +55,7 @@ _QUOTING = frozenset(
     | {"figcaption"}
 )
 _BOLD = frozenset({"b", "strong"})
+_HEAD_CHARS = _MAX_MESSAGE + _MAX_PATH + 50  # of an Xdebug head cell: "( ! )", message, path
 _XDEBUG_MARK = re.compile(r"\(\s*!\s*\)\s*")  # "( ! )" before an Xdebug message
 
 # A block's text, piece by piece: a text node, a <br> or a boundary (a nested block or a
@@ -103,7 +104,7 @@ def strip_server_errors(soup: BeautifulSoup) -> list[ServerError]:
     removed = _strip_xdebug(tables, order)
     for block, pieces, flags in _blocks(soup):
         texts = [str(piece) if isinstance(piece, NavigableString) else "\n" for piece in pieces]
-        quoted = _QUOTED in flags or (_QUOTED | _IN_BOLD) in flags
+        quoted = any(flag & _QUOTED for flag in flags)
         found = _messages("".join(texts), _accepting(texts, flags) if quoted else None)
         if not found:
             continue
@@ -126,20 +127,73 @@ def _strip_xdebug(tables: list[Tag], order: dict[int, int]) -> list[tuple[int, i
     message stays."""
     removed: list[tuple[int, int, ServerError]] = []
     for table in tables:
-        if table.decomposed or "xdebug-error" not in table.get_attribute_list("class"):
+        # A table inside one removed before is decomposed, and bs4 blanks its name. Its
+        # ``decomposed`` is not asked: on a live tag it searches the whole subtree for a child
+        # called "_decomposed", which is quadratic in nested tables.
+        if table.name != "table" or "xdebug-error" not in table.get_attribute_list("class"):
             continue
-        head = table.find("th")
-        if not isinstance(head, Tag):
+        head = _xdebug_head(table)
+        if head is None:
             continue
-        text = " ".join(head.get_text().split())
+        first, raw = _head_text(head)
+        text = " ".join(raw.split())
         mark = _XDEBUG_MARK.match(text)
         found = _messages(text[mark.end() :]) if mark else []
         if not found or found[0].start:
             continue
-        first = table.find(string=True)
         removed.append((order.get(id(first), 0), 0, found[0].error))
         table.decompose()
     return removed
+
+
+def _xdebug_head(table: Tag) -> Tag | None:
+    """The first ``th`` of the table's own first row (a child of the table or of its
+    ``thead`` or ``tbody``). Only direct children are read, never a nested table's: bs4's
+    ``find`` and ``descendants`` cost a whole subtree even when they stop early."""
+    for child in table.children:
+        if not isinstance(child, Tag):
+            continue
+        if child.name == "tr":
+            row: Tag | None = child
+        elif child.name in ("thead", "tbody"):
+            row = _child(child, "tr")
+            if row is None:
+                continue
+        else:
+            continue
+        return _child(row, "th") if row is not None else None
+    return None
+
+
+def _child(tag: Tag, name: str) -> Tag | None:
+    """The tag's first child element called ``name``."""
+    for child in tag.children:
+        if isinstance(child, Tag) and child.name == name:
+            return child
+    return None
+
+
+def _head_text(head: Tag) -> tuple[NavigableString | None, str]:
+    """The head cell's first text node and its text, read in document order up to a nested
+    table and at most ``_HEAD_CHARS`` characters, so a cell that holds further tables is not
+    read in full."""
+    first: NavigableString | None = None
+    parts: list[str] = []
+    length = 0
+    stack = [iter(head.children)]
+    while stack and length < _HEAD_CHARS:
+        node = next(stack[-1], None)
+        if node is None:
+            stack.pop()
+        elif isinstance(node, Tag):
+            if node.name == "table":
+                break
+            stack.append(iter(node.children))
+        elif type(node) is NavigableString:
+            first = node if first is None else first
+            parts.append(node)
+            length += len(node)
+    return first, "".join(parts)[:_HEAD_CHARS]
 
 
 def _accepting(texts: list[str], flags: list[int]) -> _Accept:

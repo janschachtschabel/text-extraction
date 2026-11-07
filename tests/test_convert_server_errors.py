@@ -476,7 +476,7 @@ def test_a_quoted_message_stays_in_the_converted_text(quote: str) -> None:
     assert SERVER_ERRORS_REMOVED_WARNING not in result.warnings
 
 
-def test_a_drupal_message_leaves_no_glued_markdown() -> None:
+def test_a_drupal_message_is_removed_from_markdown() -> None:
     page = (
         "<html><body><article><h1>Lesson</h1>"
         f"{ARTICLE_TEXT}<br />\n<b>Warning</b>: Invalid argument supplied for foreach() in "
@@ -511,3 +511,42 @@ def test_many_xdebug_tables_take_linear_time() -> None:
         return "<div>" + XDEBUG * size + "</div>"
 
     assert growth(_stripping(page), 200) < GROWTH_LIMIT
+
+
+def test_an_xdebug_table_is_read_by_its_own_head() -> None:
+    # The outer table has no head cell of its own; the nested one's message removes only it.
+    soup = _soup(
+        "<table class='xdebug-error'><tr><td>outer<table class='xdebug-error'><tr><th>( ! ) "
+        "Warning: Undefined variable $x in /var/www/a.php on line 3</th></tr></table>"
+        "</td></tr></table>"
+    )
+
+    assert strip_server_errors(soup) == [
+        ServerError("Warning", "Undefined variable $x", "/var/www/a.php", 3)
+    ]
+    assert len(soup.find_all("table")) == 1
+    assert soup.get_text() == "outer"
+
+
+def test_an_xdebug_head_in_a_thead_or_tbody_counts() -> None:
+    head = "<tr><th>( ! ) Notice: a in /a.php on line 1</th></tr>"
+    soup = _soup(
+        f"<table class='xdebug-error'><thead>{head}</thead></table>"
+        f"<table class='xdebug-error'><tbody>{head}</tbody></table><p>kept</p>"
+    )
+
+    assert strip_server_errors(soup) == [ServerError("Notice", "a", "/a.php", 1, count=2)]
+    assert soup.get_text() == "kept"
+
+
+@pytest.mark.parametrize(
+    "nested",
+    ["<table class='xdebug-error'><tr><td>", "<table class='xdebug-error'><tr><th>( ! ) a"],
+)
+def test_nested_xdebug_tables_take_linear_time(nested: str) -> None:
+    # Each table reads only its own first row's head cell, up to the next nested table; the
+    # version that searched each table's whole subtree took 6 s at 100 KB and 94 s at 400 KB.
+    def page(size: int) -> str:
+        return nested * (size // len(nested))
+
+    assert growth(_stripping(page), 25_000) < GROWTH_LIMIT
