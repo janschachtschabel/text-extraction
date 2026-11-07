@@ -568,6 +568,25 @@ def test_site_structure_form_starts_a_job(client: TestClient) -> None:
     assert texts(refused, "//*[@class='http-status']") == ["HTTP 422"]
 
 
+@pytest.mark.parametrize(
+    ("state", "shown"), [("queued", True), ("running", True), ("completed", False)]
+)
+def test_the_growing_total_note_shows_only_while_the_crawl_runs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, state: str, shown: bool
+) -> None:
+    """A finished crawl (completed, cancelled or failed: each ends as ``completed``) grows no
+    more."""
+    site = [page_item(0, f"{ORIGIN}/", depth=0)]
+    fake_reads(
+        monkeypatch, len(site), lambda offset, limit: site[offset : offset + limit], state=state
+    )
+
+    (section,) = jobs_of(progress(client, "a" * 32)).values()
+
+    note = "The total grows while it crawls."
+    assert (note in texts(section, ".//p[@class='hint']")) is shown
+
+
 # --- the site tree -------------------------------------------------------------------------------
 
 
@@ -1301,11 +1320,62 @@ def test_tree_marks_robots_disallowed_urls(monkeypatch: pytest.MonkeyPatch) -> N
     allowed = box_of(root, f"{ORIGIN}/sammlung/")
     assert allowed.get("data-blocked") is None
     assert allowed.get("disabled") is None
+    # A user is offered "Check and report only", not "Checks off": the note names that one.
     assert texts(root, "//p[@class='tree-blocked']") == [
         "2 URLs blocked by the site's rules: they can be selected only with "
-        "“Check and report only” or “Checks off”."
+        "“Check and report only”."
     ]
     assert root.xpath("//p[@class='tree-unchecked']") == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "headers", "note"),
+    [
+        (
+            {"api_keys": ACCESS_KEYS},
+            ADMIN_HEADERS,
+            "2 URLs blocked by the site's rules: they can be selected only with "
+            "“Check and report only” or “Checks off”.",
+        ),
+        (
+            {"compliance_allow_override": False},
+            HEADERS,
+            "2 URLs blocked by the site's rules.",
+        ),
+    ],
+    ids=["admin", "no-choice"],
+)
+def test_the_blocked_note_names_only_the_modes_the_caller_may_choose(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], headers: dict[str, str], note: str
+) -> None:
+    with running(rules_fetcher(), **overrides) as client:
+        root = rules_tree(monkeypatch, client, rules_site(), headers=headers)
+
+    assert texts(root, "//p[@class='tree-blocked']") == [note]
+
+
+@pytest.mark.parametrize(
+    ("language", "role", "note"),
+    [
+        (
+            "de",
+            "user",
+            "1 URL durch die Regeln der Website gesperrt: auswählbar nur mit "
+            "„Nur prüfen und melden“.",
+        ),
+        ("de", "none", "1 URL durch die Regeln der Website gesperrt."),
+        ("en", "none", "1 URL blocked by the site's rules."),
+    ],
+)
+def test_the_blocked_note_in_both_languages(
+    monkeypatch: pytest.MonkeyPatch, language: str, role: str, note: str
+) -> None:
+    overrides: dict[str, Any] = {"compliance_allow_override": False} if role == "none" else {}
+    site = rules_site()[:1]  # the crawled page and its one blocked link
+    with running(rules_fetcher(), **overrides) as client:
+        root = rules_tree(monkeypatch, client, site, headers={**HEADERS, LANGUAGE_HEADER: language})
+
+    assert texts(root, "//p[@class='tree-blocked']") == [note]
 
 
 def test_tree_batch_is_preset_with_the_crawl_mode(monkeypatch: pytest.MonkeyPatch) -> None:

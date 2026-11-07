@@ -78,6 +78,15 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 - A short transcript is a `success`, not `partial` with `content_too_short`: subtitles, the
   transcript view and a transcription are all that the media says, so `QUALITY_MIN_WORDS` does
   not apply to them (a 27-word video was marked partial).
+- Playground: on a phone the site tree's checkbox, path and page count no longer overlap from
+  about level 6 (the indentation stops at 6rem, a page count or title moves under its path, a wide
+  type pill ends in an ellipsis), and every checkbox keeps its target size; a long file path in
+  "Server errors" wraps instead of widening the page; the status column's title holds the whole
+  status and error code; paths, titles and link texts are bidi isolates, so a right-to-left
+  override cannot reorder the text around them; the note on blocked URLs names only the "Site
+  rules" choices the caller is offered; "The total grows while it crawls" shows only while the
+  crawl runs. German: the "Checks off" hint says „die Grenzen für ausgehende Anfragen“ like its
+  siblings.
 
 ## [0.1.6] - 2026-11-07
 

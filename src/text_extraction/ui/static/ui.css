@@ -799,6 +799,12 @@ dl.info,
   margin-bottom: 12px;
 }
 
+/* A PHP message names a file path that can be hundreds of characters without a break: it
+   wraps anywhere instead of widening the page (third audit U1). */
+ul.server-errors {
+  overflow-wrap: anywhere;
+}
+
 .timeline-view .warnings-title {
   margin: 12px 0 4px;
   font-size: 15px;
@@ -1301,12 +1307,15 @@ ul.tree .cell-name input {
   margin: 0;
 }
 
+/* Path and title are bidi isolates: a right-to-left override in a title or a link text cannot
+   reorder the text around it (third audit U3). */
 ul.tree .label {
   flex: 0 1 auto;
   min-width: 4rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  unicode-bidi: isolate;
 }
 
 ul.tree .title {
@@ -1316,6 +1325,7 @@ ul.tree .title {
   color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
+  unicode-bidi: isolate;
 }
 
 /* A title taken from a link's text is not the page's own: italic, in quotes. */
@@ -1575,12 +1585,25 @@ dl.facts.counts {
     display: none;
   }
 
+  /* The name keeps room for its indentation, a fold button (or a leaf's 30px in its stead), the
+     checkbox and 4rem of the path; a wide type pill ends in an ellipsis instead (third audit
+     R3). */
   ul.tree li {
-    grid-template-columns: minmax(0, 1fr) auto;
+    --name-room: calc(10px + min(var(--level, 0) * 12px, 6rem) + 30px + 18px + 6px + 4rem + 10px);
+    grid-template-columns: minmax(min(100%, var(--name-room)), 1fr) minmax(0, auto);
   }
 
+  /* The indentation stops growing at 6rem, and a section's page count or a page's title moves
+     under its path when the row has no room for it; the label keeps the checkbox and 4rem of
+     its path, so nothing overlaps on a phone (third audit R3). */
   .cell-name {
-    padding-left: calc(10px + var(--level, 0) * 12px);
+    flex-wrap: wrap;
+    padding-left: calc(10px + min(var(--level, 0) * 12px, 6rem));
+  }
+
+  ul.tree .cell-name label.inline {
+    flex-wrap: wrap;
+    min-width: calc(18px + 6px + 4rem);
   }
 
   .row-meta {
@@ -1588,7 +1611,7 @@ dl.facts.counts {
     flex-wrap: wrap;
     gap: 0 12px;
     grid-column: 1 / -1;
-    padding: 0 10px 4px calc(10px + var(--level, 0) * 12px);
+    padding: 0 10px 4px calc(10px + min(var(--level, 0) * 12px, 6rem));
   }
 
   .row-meta > div {

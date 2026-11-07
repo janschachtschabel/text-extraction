@@ -29,7 +29,8 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
       {% set success %}<span class="success">{{ job.success }}</span>{% endset %}{% set partial %}<span class="partial">{{ job.partial }}</span>{% endset %}{% set failed %}<span class="failed">{{ job.failed }}</span>{% endset %}
       <span class="counts">{{ t("progress.counts", success=success, partial=partial, failed=failed) }}</span>
     </p>
-    {% if job.kind == "site" %}<p class="hint">{{ t("progress.site_total") }}</p>{% endif %}
+    {#- Only a crawl that still runs can grow its total (third audit U6). #}
+    {% if job.kind == "site" and job.state in ("queued", "running") %}<p class="hint">{{ t("progress.site_total") }}</p>{% endif %}
     <p class="elapsed">{{ t("progress.elapsed", elapsed=job.elapsed) }}</p>
     {% if job.items %}
     <table class="items">
