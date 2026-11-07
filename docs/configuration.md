@@ -239,9 +239,10 @@ and holds no models: they come from a volume (Helm: a PVC filled by an init cont
 the volume `docling-models` filled by the one-shot service `docling-models`). All images start
 `tini` as PID 1, which forwards signals and reaps orphaned child processes.
 
-docker compose starts the Docling worker only with the profile `docling`:
-`docker compose --profile docling up -d --wait` with `DOCLING_ENABLED=true` in `.env` (compose
-passes `DOCLING_ENABLED` from `.env` or the shell to every service, default false). The service
+docker compose always starts the Docling worker (no profile): OCR is on by default there (compose
+passes `DOCLING_ENABLED` from `.env` or the shell to every service, default true). To switch it
+off, set `DOCLING_ENABLED=false` in `.env` and start with
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. The service
 `docling-models` runs `--download-models` into the volume first (it needs the internet once), then
 `docling-worker` mounts it read-only; its stop grace period is 45 s.
 
@@ -357,7 +358,7 @@ worker. Docling is off by default: without it a scan keeps its text layer and an
 | `DOCUMENT_MAX_UNCOMPRESSED_BYTES` | `200000000` | Largest total size of all entries of a ZIP-based document (DOCX, PPTX, XLSX, EPUB, ODT, ODS, ODP) once unpacked, in bytes. A document over it, with more than 10,000 entries or with an entry that unpacks to over 100 times its size fails with `too_large`. Minimum 1024. |
 | `DOCUMENT_CONCURRENCY` | `2` | Conversion child processes per pod; each converts one document at a time. A request waits for a free one within its time budget. Minimum 1. |
 | `DOCUMENT_MEMORY_LIMIT_MB` | `2048` | Address space limit (`RLIMIT_AS`) of one conversion child, in MiB. A child that exceeds it answers `too_large`. Minimum 256. Keep `DOCUMENT_CONCURRENCY` x this below the container's memory limit minus what the process itself needs; the Helm chart renders it that way from the memory limit (768 with the defaults) unless set in `config`. |
-| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod. |
+| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod; docker compose sets it to true unless `.env` or the shell says false. |
 | `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. Docling itself stops at 0.9 of it and answers the pages it read (warning `pages_partial`). 30 to 1800. |
 | `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
 | `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker, or of an upload that became a job (`wait_seconds`), stay in Valkey, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
@@ -489,7 +490,7 @@ time. A result that could not be processed answers `failed`/`pii_failed` with it
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`; start-up refuses `PII_ENABLED=true` without it. Off, a request with `pii` answers 400 `invalid_request`. The Helm chart sets it from `workers.nlp.enabled` on every pod. docker compose: `.env` together with the profile `nlp`. |
+| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`; start-up refuses `PII_ENABLED=true` without it. Off, a request with `pii` answers 400 `invalid_request`. The Helm chart sets it from `workers.nlp.enabled` on every pod. docker compose starts the NLP worker and sets it to true unless `.env` or the shell says false (then also `--scale nlp-models=0 --scale nlp-worker=0`). |
 | `PII_DEFAULT_ENTITIES` | `PERSON,EMAIL_ADDRESS,PHONE_NUMBER,IBAN_CODE,CREDIT_CARD,IP_ADDRESS` | Entity types handled when a request names none: a comma-separated list of `PERSON`, `LOCATION`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, without repeats. Places, organisations and URLs are left out by default: teaching material is full of them and they are rarely personal data. An empty, unknown or repeated entry makes the service exit with code 2. |
 | `PII_SCORE_THRESHOLD` | `0.4` | Least confidence of an entity, 0 to 1, when a request names none (`score_threshold`). Lower finds more and mistakes more. |
 | `PII_FALLBACK_LANGUAGE` | `en` | The model (`de` or `en`) for names in a language that has none of its own, with the warning `pii_language_unsupported`. The patterns (e-mail, phone, IBAN, card, IP) work in any language. |
@@ -589,7 +590,8 @@ same name. The other `LLM_*` settings and `SELECTOR_LEARN_TTL_SECONDS`,
 `STRUCTURED_SELECTOR_PROCESSES`, `STRUCTURED_SELECTOR_MEMORY_MB` and `POST_CONCURRENCY` are service
 defaults (the chart sets the last four under `config` with these values): set them under
 `config` (for example `config.LLM_TIMEOUT_SECONDS`, and `config.LLM_ALLOW_HTTP` for an `http` URL).
-docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm worker's
+docker compose starts the llm worker and sets `LLM_ENABLED` to true unless `.env` or the shell
+says false (then also `--scale llm-worker=0`); the llm worker's
 `stop_grace_period` (45 s) must stay at least `LLM_GRACEFUL_SECONDS` + 10 s: raise both together.
 
 | Key | Default | Variable or effect |
@@ -1204,7 +1206,7 @@ read the queue and exports no queue gauge.
 
 The Helm chart's requests and limits come from measurement under load, not from estimates (ops
 guide, section 5.3). The load test (`.github/workflows/load.yml`, `tests/load/`) starts the
-compose stack with every profile (one container per service) plus a local site farm and a fake
+compose stack with every worker (one container per service) plus a local site farm and a fake
 OpenAI-compatible server, runs each scenario alone, and samples `docker stats` every 2 s. A
 scenario's numbers come only from the samples inside its window (its first request to its last
 answer plus a settle time). CPU is in % of one core. Memory is `MemUsage` in MiB: cgroup usage

@@ -41,8 +41,8 @@ Siehe [Website-Regeln](docs/user-guide/de/site-rules.md) und
 ## Schnellstart mit Docker
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker, einen ASR-Worker (sein erster Start lädt das Whisper-Modell, etwa 1,6 GB) und ein
-Valkey (mit Passwort) für den gemeinsamen Zustand.
+Browser-Worker, die optionalen Worker für OCR, Transkription, personenbezogene Daten und das LLM
+(ihr erster Start lädt etwa 3 GB Modelle) und ein Valkey (mit Passwort) für den gemeinsamen Zustand.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it

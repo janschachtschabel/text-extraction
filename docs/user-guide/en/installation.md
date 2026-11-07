@@ -40,9 +40,10 @@ uv run pre-commit install    # install the git hooks
 
 ## Docker Compose
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, an ASR
-worker and a Valkey with a password. It switches on browser mode, transcription, the MCP server and
-the playground.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
+optional workers (OCR, transcription, personal data, LLM) and a Valkey with a password. It switches
+on browser mode, OCR, transcription, personal data handling, the LLM, the MCP server and the
+playground.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
@@ -65,7 +66,7 @@ http://localhost:8080/mcp.
 
 Instead of building the images, Compose can run a released version from
 `ghcr.io/janschachtschabel/text-extraction` (linux/amd64). The file `docker-compose.release.yml`
-swaps every build for the published image; `.env` stays the same, and the profiles work as below.
+swaps every build for the published image; `.env` stays the same, and the switches work as below.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
@@ -78,28 +79,28 @@ since an image already on the machine is not pulled again). The releases and the
 
 ### Optional workers
 
-The heavier parts run in workers of their own, which are off by default. Each has a Compose
-profile and a switch in `.env`:
+The heavier parts run in workers of their own. Compose starts all of them, and each has a switch
+in `.env` that is `true` by default:
 
-| Worker | Switch in `.env` | Profile | What it adds |
+| Worker | Switch in `.env` | Services | What it adds |
 | --- | --- | --- | --- |
-| Docling | `DOCLING_ENABLED=true` | `docling` | OCR for scans and images, OpenDocument files (an image of about 2 GB, models of about 335 MiB) |
-| NLP | `PII_ENABLED=true` | `nlp` | Personal data handling with Presidio and spaCy (models of about 1 GB for `lg`, 115 MB for `md`) |
-| LLM | `LLM_ENABLED=true` | `llm` | Structured output with an LLM, semantic chunking and image descriptions |
+| Docling | `DOCLING_ENABLED` | `docling-models`, `docling-worker` | OCR for scans and images, OpenDocument files (an image of about 2 GB, models of about 335 MiB) |
+| ASR | `ASR_ENABLED` | `asr-models`, `asr-worker` | Speech recognition for audio and video (the Whisper model, about 1.6 GB; `ASR_MODEL=small`, about 0.5 GB) |
+| NLP | `PII_ENABLED` | `nlp-models`, `nlp-worker` | Personal data handling with Presidio and spaCy (models of about 1 GB for `lg`, 115 MB for `md`) |
+| LLM | `LLM_ENABLED` | `llm-worker` | Structured output with an LLM, semantic chunking and image descriptions |
 
-Speech recognition for audio and video (the ASR worker) is on by default: `docker compose up`
-starts it, and its first start downloads the Whisper model (about 1.6 GB; `ASR_MODEL=small`,
-about 0.5 GB). To run without it, set `ASR_ENABLED=false` in `.env` and start with
-`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`. An `.env` copied from an
-older `.env.example` still says `ASR_ENABLED=false`: set it to `true`.
+The first start downloads the models into volumes (about 3 GB in all); with every worker the stack
+takes about 6 GiB of memory when idle. To run without a worker, set its switch to `false` in `.env`
+and leave its services out, for example
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. An `.env` copied
+from an older `.env.example` still has the switches at `false`: set them to `true`.
 
-Start a profile with `docker compose --profile docling up --build` (several: one
-`--profile` each). The first start downloads the models into a volume. The LLM worker needs
-`LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` of an OpenAI-compatible endpoint (and
-`LLM_EMBEDDING_MODEL` for semantic chunking);
+The LLM worker needs `LLM_BASE_URL` and `LLM_MODEL` of an OpenAI-compatible endpoint and a key:
+`LLM_API_KEY` in `.env`, or the caller's `X-LLM-Api-Key` (the playground's key field); without
+either, a request that needs the LLM answers 400. `LLM_EMBEDDING_MODEL` is for semantic chunking;
 `docker compose run --rm llm-worker text-extraction-llm-worker --check` sends one tiny
-extraction to it. For `pii: hash` with the same hash in every result, set `PII_HASH_KEY`
-(`openssl rand -hex 32`).
+extraction to the endpoint. For `pii: hash` with the same hash in every result, set
+`PII_HASH_KEY` (`openssl rand -hex 32`).
 
 While a switch is off, a request that needs its worker answers 400: `pii` without
 `PII_ENABLED`, the strategy `llm`, `learn_selectors` and `semantic` chunking without

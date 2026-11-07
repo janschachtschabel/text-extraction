@@ -1,6 +1,6 @@
 name: load
 
-# Load test (package 11): the compose stack with every profile, plus a local site farm and a fake
+# Load test (package 11): the compose stack with every worker, plus a local site farm and a fake
 # LLM (deploy/load/compose.load.yml), under the load profile of tests/load/scenarios.py. docker
 # stats is sampled every 2 s; the report gives CPU and memory per scenario and service, and
 # sizing.json the requests and limits the measurement gives (configuration.md, "Sizing rule").
@@ -65,10 +65,9 @@ jobs:
     env:
       # The sizing report strips this prefix from the container names.
       COMPOSE_PROJECT_NAME: text-extraction
-      # Every compose call: the base file, the load override and every profile.
+      # Every compose call: the base file, the load override (every worker runs without a profile).
       COMPOSE: >-
         docker compose -f docker-compose.yml -f deploy/load/compose.load.yml
-        --profile docling --profile nlp --profile llm
       # A pull request has no inputs: the dispatch defaults apply, which are the production
       # defaults (ruling R-P11-6). The override reads the models.
       SELECTOR_PROCESSES: ${{ inputs.selector_processes || '1,2,4' }}

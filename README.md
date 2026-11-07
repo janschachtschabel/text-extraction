@@ -37,9 +37,9 @@ the page needs it (`auto`, the default), never (`fast`) or always (`browser`). S
 
 ## Quick start with Docker
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, an ASR
-worker (its first start downloads the Whisper model, about 1.6 GB) and a Valkey (with a password)
-for the shared state.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
+optional workers for OCR, transcription, personal data and the LLM (their first start downloads
+about 3 GB of models) and a Valkey (with a password) for the shared state.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it

@@ -1,7 +1,7 @@
 # Load-test override for docker-compose.yml (package 11). Used only by .github/workflows/load.yml:
 #
 #   docker compose -f docker-compose.yml -f deploy/load/compose.load.yml \
-#     --profile docling --profile nlp --profile llm up -d --wait
+#     up -d --wait
 #
 # Relative paths resolve against the first file's directory, the repo root.
 #

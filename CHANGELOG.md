@@ -16,6 +16,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `.env.example` is `true`; `ASR_ENABLED=false` with `--scale asr-models=0 --scale asr-worker=0`
   switches it off. The service's own default and the Helm chart (`workers.asr.enabled`) are
   unchanged. An existing `.env` with `ASR_ENABLED=false` keeps transcription off: set it to `true`.
+- docker compose starts every optional worker by default (package 19): the Docling, NLP and llm
+  workers have no profiles any more (`docling`, `nlp`, `llm` are gone), and `DOCLING_ENABLED`,
+  `PII_ENABLED` and `LLM_ENABLED` are `true` in compose and `.env.example`. Each switch at `false`,
+  with `--scale` of the feature's services to 0, switches a feature off. The LLM still needs a key
+  (`LLM_API_KEY` or the caller's `X-LLM-Api-Key`). The Helm chart is unchanged.
 
 ### Fixed
 

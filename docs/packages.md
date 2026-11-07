@@ -94,7 +94,7 @@ Package 8 note (Jan, D1-D5): `structured` (strategies `metadata`, `selectors`, `
 `semantic`) on `POST /v1/extract`, `/v1/extract/file`, `/v1/batch` and the new routes
 `POST /v1/structured` and `POST /v1/chunk` (a URL or a text). The LLM is an OpenAI-compatible
 endpoint of the operator (`LLM_BASE_URL`, default model `gpt-6-luna`), off by default
-(`LLM_ENABLED`, Helm `workers.llm.enabled`, compose profile `llm`); its calls run only in the llm
+(`LLM_ENABLED`, Helm `workers.llm.enabled`, compose profile `llm` until package 19); its calls run only in the llm
 worker (API image, no model), as the last hop after PII, so the LLM only sees masked content, and a
 sync request that needs it waits `LLM_SYNC_WAIT_SECONDS` (30 s), then answers 202 with its job. The
 caller's `X-LLM-Api-Key` wins over `LLM_API_KEY`. `semantic` embeds with the same endpoint's

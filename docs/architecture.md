@@ -859,8 +859,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   can take `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` (25 + 20 = 45 s by default),
   the fast phase and then the wait for the worker. Callers that need a shorter bound send
   `wait_seconds` or lower `DOCLING_SYNC_WAIT_SECONDS` (at 0 a sync request does not wait).
-- **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false`, compose
-  profile `docling`; it needs an image of about 2 GB and about 335 MiB of models (9 files). Without it a
+- **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false` (compose
+  starts it by default since package 19, 2026-11-07); it needs an image of about 2 GB and about 335 MiB of models (9 files). Without it a
   scan keeps its text layer (`ocr_unavailable`), and images and OpenDocument files answer
   `unsupported_content_type` ("OCR is not enabled on this service.").
 
@@ -1077,8 +1077,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   volume: one that finds the marker after its downloads keeps the other's files, and a failed
   rename is a failure only while the marker is still missing.
 - **F16, switches (D3).** `DOCLING_ENABLED` (default false). Helm renders it into every pod from
-  `workers.docling.enabled` (default false); compose reads it from `.env` (`docker compose
-  --profile docling up` with `DOCLING_ENABLED=true`).
+  `workers.docling.enabled` (default false); compose always starts the Docling worker and sets
+  it to true unless `.env` or the shell says false (package 19).
 - **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
   `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
   file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB
@@ -1842,7 +1842,8 @@ full copy of the `lg` pair, about 2.4 GB at its peak). Compose: the one-shot `nl
 volume `nlp-models`.
 
 **N15, switches.** `PII_ENABLED` (default false, as `DOCLING_ENABLED`): Helm renders it into
-every pod from `workers.nlp.enabled`, compose from `.env` with the profile `nlp`. Start-up refuses
+every pod from `workers.nlp.enabled`; compose starts the NLP worker and sets it to true unless
+`.env` says false (package 19). Start-up refuses
 `PII_ENABLED` without `JOBS_ENABLED`. Without it a request with `pii` answers 400. The settings and
 Helm values are in [configuration.md](configuration.md#pii).
 
@@ -2160,7 +2161,8 @@ rate-limits before it reads the body (R16). The header `X-LLM-Api-Key` is on all
 and `LLM_VISION_MAX_IMAGE_BYTES`. Start-up refuses `LLM_ENABLED` without
 `JOBS_ENABLED`. Helm: `workers.llm.enabled` (false) renders
 `LLM_ENABLED` into every pod and deploys the llm worker (API image, no volume), `LLM_API_KEY` from
-`workers.llm.apiKey.existingSecret`; compose: the profile `llm`. The settings and Helm values are in
+`workers.llm.apiKey.existingSecret`; compose starts the llm worker and sets `LLM_ENABLED` to true
+unless `.env` says false (package 19). The settings and Helm values are in
 [configuration.md](configuration.md#llm).
 
 **Rulings made while building it** (they override the plan where they differ). R3: `auto` looks
@@ -3199,7 +3201,7 @@ the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship 
 are never logged.
 
 **Resource baselines.** The load test (`.github/workflows/load.yml`, `tests/load/`, rulings
-P11-S1 to P11-S7) runs the compose stack with every profile against a local site farm and a fake
+P11-S1 to P11-S7) runs the compose stack with every worker against a local site farm and a fake
 LLM endpoint, one scenario at a time, and samples `docker stats` every 2 s. Its reports give CPU
 (mean, p95, max) and memory (p95, max) per container and scenario, the latency and throughput of
 each scenario, the LLM bytes per call, the site jobs' duration and Valkey bytes, and the extract
