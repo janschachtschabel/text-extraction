@@ -4,6 +4,7 @@ not; the progress view's tree button says when it may load the tree by itself; t
 judgement is reused for 30 s per job and origin set (a bounded in-process memo, derived data
 only)."""
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.ui.conftest import run, running
+from tests.ui.site_items import page_item
 from tests.ui.test_jobs_views import (
     HEADERS,
     ORIGIN,
@@ -23,6 +25,8 @@ from tests.ui.test_jobs_views import (
     texts,
     tree,
 )
+from text_extraction.envelope import ErrorCode
+from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobItem
 from text_extraction.ui import job_views
 from text_extraction.ui.i18n import LANGUAGE_HEADER
@@ -149,6 +153,46 @@ def test_the_memo_holds_at_most_64_entries_and_drops_the_oldest() -> None:
     assert memo.get(("job-69", frozenset())) == {}
 
 
+def test_the_memo_merges_a_later_put_and_keeps_the_first_expiry() -> None:
+    clock = Clock()
+    memo = _RulesMemo(clock)
+    key = ("job", frozenset({"a", "b"}))
+    memo.put(key, {"a": None})
+    clock.now += 20
+    memo.put(key, {"b": None})
+
+    assert memo.get(key) == {"a": None, "b": None}
+    clock.now += 11  # thirty seconds after the first put
+    assert memo.get(key) is None
+
+
+def test_only_the_origins_without_rules_are_read_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Clock()
+    monkeypatch.setattr(job_views, "_RULES_MEMO", _RulesMemo(clock))
+    loaded: list[str] = []
+    answers: dict[str, Any] = {}
+
+    async def origin_rules(pipeline: Any, origin: str, url: str) -> Any:
+        loaded.append(origin)
+        return answers[origin]
+
+    monkeypatch.setattr(job_views, "_origin_rules", origin_rules)
+    real = rules_site()
+    other = "https://other.example"
+    items = [*real, page_item(9, f"{other}/x", depth=1)]
+    with running(rules_fetcher()) as client:
+        pipeline = cast(FastAPI, client.app).state.pipeline
+        good = asyncio.run(pipeline.origin_rules(f"{ORIGIN}/"))
+        answers.update({ORIGIN: good, other: None})
+        fake_reads(monkeypatch, len(items), fresh(items), state="running")
+        params = {"id": JOB, "live": "1"}
+        client.get("/ui/run/site-tree", params=params, headers=HEADERS)
+        assert sorted(loaded) == sorted([ORIGIN, other])
+        loaded.clear()
+        client.get("/ui/run/site-tree", params=params, headers=HEADERS)
+        assert loaded == [other]
+
+
 def test_live_refreshes_load_the_rules_once_in_thirty_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,3 +238,76 @@ def test_a_cached_judgement_still_marks_the_blocked_urls(monkeypatch: pytest.Mon
         b.get("value") for b in first.xpath("//input[@data-blocked]")
     ]
     assert ORIGIN in second.xpath("//input[@name='url']/@value")[0]
+
+
+def test_a_retryable_refusal_of_a_live_refresh_swaps_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def refused(request: Any) -> Any:
+        raise ServiceError(
+            ErrorCode.RATE_LIMITED, "slow down", 429, True, headers={"Retry-After": "17"}
+        )
+
+    monkeypatch.setattr(job_views, "ui_principal", refused)
+    live = client.get("/ui/run/site-tree", params={"id": JOB, "live": "1"}, headers=HEADERS)
+    plain = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+
+    assert live.status_code == 204
+    assert live.content == b""
+    assert live.headers["Retry-After"] == "17"
+    assert plain.status_code == 200  # a click shows the refusal as before
+    assert "slow down" in plain.text or "rate" in plain.text.lower()
+
+
+def test_a_missing_job_stops_a_live_refresh(client: TestClient) -> None:
+    response = client.get(
+        "/ui/run/site-tree", params={"id": "f" * 32, "live": "1"}, headers=HEADERS
+    )
+
+    assert response.status_code == 200
+    assert "HTTP 404" in response.text
+
+
+def tree_delay(client: TestClient, monkeypatch: pytest.MonkeyPatch, items: int) -> str:
+    fake_reads(
+        monkeypatch,
+        items,
+        lambda offset, limit: [
+            page_item(offset + k, f"{ORIGIN}/p/{offset + k}") for k in range(limit)
+        ],
+        state="running",
+    )
+    response = client.get("/ui/run/site-tree", params={"id": JOB, "live": "1"}, headers=HEADERS)
+    [wrapper] = tree(response.text).xpath("//div[@data-tree-live]")
+    assert wrapper.get("data-tree-live") == wrapper.get("hx-trigger").split(":")[1].rstrip("s")
+    return str(wrapper.get("hx-trigger"))
+
+
+def test_the_refresh_interval_grows_with_the_rate_limit_hits_of_a_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert tree_delay(client, monkeypatch, 1) == "load delay:4s"
+    assert tree_delay(client, monkeypatch, 500) == "load delay:4s"
+    assert tree_delay(client, monkeypatch, 1001) == "load delay:12s"  # three hits
+
+
+def test_the_live_note_is_hidden_until_the_script_shows_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = site_tree(client, monkeypatch, state="running")
+
+    [note] = root.xpath("//p[contains(@class, 'tree-live')]")
+    assert note.get("hidden") is not None
+    [snapshot] = root.xpath("//p[contains(@class, 'tree-snapshot')]")
+    assert snapshot.get("hidden") is None
+
+
+def test_the_batch_view_of_the_tree_is_kept_across_a_refresh(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = site_tree(client, monkeypatch, state="running")
+
+    [jobs] = root.xpath("//div[contains(@class, 'tree-jobs')]")
+    assert jobs.get("id") == f"tree-{JOB}-jobs"
+    assert jobs.get("hx-preserve") is not None
+    assert root.xpath("//form[@id='tree-form']/@hx-target") == ["next .tree-jobs"]

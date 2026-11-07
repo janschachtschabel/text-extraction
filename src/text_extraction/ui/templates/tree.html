@@ -13,8 +13,9 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
 {%- endif %}
 <section class="tree-view" aria-label="{{ t('tree.label') }}">
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
-  {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
-  {% if refresh_url %}<p class="hint tree-live">{{ t("tree.live") }}</p>{% endif %}
+  {% if snapshot %}<p class="hint tree-snapshot">{{ t("tree.snapshot") }}</p>{% endif %}
+  {#- ui.js shows this note and hides the snapshot note: without it nothing refreshes. #}
+  {% if refresh_url %}<p class="hint tree-live" hidden>{{ t("tree.live") }}</p>{% endif %}
   <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if duration is not none %} · {{ t("tree.duration", seconds=duration) }}{% endif %}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {%- if tree.blocked %}
   <p class="tree-blocked">{{ tn("tree.blocked", tree.blocked) }}</p>
@@ -119,7 +120,8 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
       <button type="submit">{{ t("tree.extract_selected") }}</button>
     </div>
   </form>
-  <div class="tree-jobs"></div>
+  {#- hx-preserve: a refresh of a running job's tree keeps the batch view (and its polling). #}
+  <div class="tree-jobs" id="tree-{{ job_id }}-jobs" hx-preserve></div>
   {% endif %}
 </section>
 {%- if refresh_url %}

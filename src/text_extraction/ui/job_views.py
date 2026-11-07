@@ -729,14 +729,23 @@ class _RulesMemo:
             return None
         return found[1]
 
-    def put(self, key: _RulesKey, rules: dict[str, OriginRules | None]) -> None:
+    def put(self, key: _RulesKey, rules: Mapping[str, OriginRules | None]) -> None:
+        """Remember ``rules``; they join the entry of ``key`` that is still alive, which keeps its
+        expiry (so rules read again later never keep older ones alive)."""
         now = self._clock()
-        self._entries.pop(key, None)
+        kept = self._entries.get(key)
+        if kept is not None and now >= kept[0]:
+            kept = None
         for old in [old for old, (expires, _) in self._entries.items() if now >= expires]:
             del self._entries[old]
-        while len(self._entries) >= TREE_RULES_MEMO_SIZE:
-            del self._entries[next(iter(self._entries))]
-        self._entries[key] = (now + TREE_RULES_REUSE_SECONDS, rules)
+        if kept is None:
+            while len(self._entries) >= TREE_RULES_MEMO_SIZE:
+                del self._entries[next(iter(self._entries))]
+        self._entries.pop(key, None)
+        self._entries[key] = (
+            kept[0] if kept else now + TREE_RULES_REUSE_SECONDS,
+            {**(kept[1] if kept else {}), **rules},
+        )
 
 
 _RULES_MEMO: Final = _RulesMemo()
@@ -757,19 +766,17 @@ async def _tree_rules(pipeline: Pipeline, tree: SiteTree, reuse_for: str | None 
     ``TREE_RULES_SECONDS`` (loads still pending then are cancelled, also when the request itself
     is cancelled); an origin whose load fails or times out counts as not read
     (``SiteTree.unchecked``), one past the cap as not tried (``SiteTree.unchecked_more``). With
-    ``reuse_for`` (a job id: a live refresh) the rules of the last complete judgement of the same
-    origins are reused for ``TREE_RULES_REUSE_SECONDS``."""
+    ``reuse_for`` (a job id: a live refresh) the rules read at the refreshes before for the same
+    origins are reused for ``TREE_RULES_REUSE_SECONDS`` (an origin whose rules were not read is
+    read again)."""
     origins = list(leaf_origins(tree).items())[:TREE_RULES_MAX_ORIGINS]
     key = (reuse_for, frozenset(origin for origin, _ in origins)) if reuse_for else None
-    remembered = _RULES_MEMO.get(key) if key else None
-    if remembered is not None:
-        deadline = time.monotonic() + TREE_JUDGE_SECONDS
-        return await asyncio.to_thread(mark_blocked, tree, remembered, deadline)
+    rules: dict[str, OriginRules | None] = dict(_RULES_MEMO.get(key) or {}) if key else {}
     loads = {
         origin: asyncio.ensure_future(_origin_rules(pipeline, origin, url))
         for origin, url in origins
+        if origin not in rules
     }
-    rules: dict[str, OriginRules | None] = {}
     try:
         if loads:
             await asyncio.wait(loads.values(), timeout=TREE_RULES_SECONDS)
@@ -787,8 +794,12 @@ async def _tree_rules(pipeline: Pipeline, tree: SiteTree, reuse_for: str | None 
         for load in pending:
             load.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-    if key and all(known is not None for known in rules.values()):
-        _RULES_MEMO.put(key, rules)  # a failed or late load is tried again at the next refresh
+    if key:
+        # What was read is kept; an origin that failed or ran late is tried again at the next
+        # refresh, the others are not.
+        found = {origin: known for origin, known in rules.items() if known is not None}
+        if found:
+            _RULES_MEMO.put(key, found)
     deadline = time.monotonic() + TREE_JUDGE_SECONDS
     return await asyncio.to_thread(mark_blocked, tree, rules, deadline)
 
@@ -809,6 +820,8 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)
+    live = request.query_params.get("live") == "1"
+    pages = 0
     try:
         principal = await ui_principal(request)
         jobs_api.check_jobs_enabled(settings)
@@ -819,14 +832,17 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
             offset = await _read_tree_page(
                 request.app.state, principal, job_id, offset, builder, read
             )
+        pages = math.ceil(read.items / TREE_ITEMS_PER_HIT)
+        await count_used(request.app.state, principal, pages - 1)  # the view's own hit is the first
     except ServiceError as error:
+        if live and error.retryable:
+            # A 429 or 503 of a refresh: nothing is swapped (the user's work stays) and ui.js
+            # tries again after the Retry-After.
+            return Response(status_code=204, headers=dict(error.headers or {}))
         return refusal(error, request_language(request))
-    pages = math.ceil(read.items / TREE_ITEMS_PER_HIT)
-    await count_used(request.app.state, principal, pages - 1)  # the view's own hit is the first
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
-    live = request.query_params.get("live") == "1"
     tree = await _tree_rules(request.app.state.pipeline, tree, job_id if live else None)
     access = access_offer(principal.role, settings)
     preset = access_value(access, tree.crawl_mode)
@@ -841,7 +857,8 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
             if read.state != "completed"
             else None
         ),
-        "refresh_seconds": TREE_REFRESH_SECONDS,
+        # A refresh that reads more costs more rate-limit hits: it comes less often.
+        "refresh_seconds": TREE_REFRESH_SECONDS * max(1, pages),
         "duration": read.seconds,
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,

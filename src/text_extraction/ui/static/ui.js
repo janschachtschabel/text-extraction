@@ -583,13 +583,23 @@
     if (active.matches(".tree-filter button.chip")) {
       return { kind: "chip", key: active.getAttribute("data-filter-type") };
     }
-    // Anything else that can be named again: a button of the tools, the skip link, the submit
-    // button, any element with an id.
+    // Anything else that can be named again: a control of the batch options by its name and
+    // value, a link by its address, the options' summary, a button of the tools, the skip link,
+    // the submit button, any element with an id.
+    var form = wrapper.querySelector("form.tree-form");
+    if (form && optionFields(form).indexOf(active) >= 0) {
+      return { kind: "field", key: fieldKey(active) };
+    }
+    if (active.matches("a[href]:not(.skip-to-actions)")) {
+      return { kind: "href", key: active.getAttribute("href") };
+    }
     var selector = null;
     if (active.matches("[data-action]")) {
       selector = "[data-action=\"" + active.getAttribute("data-action") + "\"]";
     } else if (active.matches("a.skip-to-actions")) {
       selector = "a.skip-to-actions";
+    } else if (active.matches("details.advanced > summary")) {
+      selector = "details.advanced > summary";
     } else if (active.matches("button[type=submit]")) {
       selector = "button[type=submit]";
     } else if (active.id) {
@@ -601,6 +611,15 @@
   function findPlace(form, place) {
     if (place.kind === "sel") {
       return (form.closest(".tree-view") || form).querySelector(place.key);
+    }
+    if (place.kind === "field") {
+      return optionFields(form).filter(function (field) { return fieldKey(field) === place.key; })[0];
+    }
+    if (place.kind === "href") {
+      return Array.prototype.filter.call(
+        (form.closest(".tree-view") || form).querySelectorAll("a[href]"),
+        function (link) { return link.getAttribute("href") === place.key; }
+      )[0];
     }
     var found = null;
     var candidates = place.kind === "chip"
@@ -635,9 +654,7 @@
       fields: optionFields(form).map(function (field) {
         return { key: fieldKey(field), value: field.value, checked: field.checked };
       }),
-      details: Array.prototype.map.call(form.querySelectorAll("details"), function (each) {
-        return each.open;
-      }),
+      options_open: Boolean(form.querySelector("details.advanced[open]")),
       scroll: form.querySelector(".tree-box") ? form.querySelector(".tree-box").scrollTop : 0,
       focus: focusPlace(wrapper)
     };
@@ -665,9 +682,10 @@
         field.value = before.value;
       }
     });
-    form.querySelectorAll("details").forEach(function (each, index) {
-      each.open = Boolean(saved.details[index]);
-    });
+    var advanced = form.querySelector("details.advanced");
+    if (advanced) {
+      advanced.open = saved.options_open;
+    }
     applyTreeMode(form);  // the restored "Site rules" decide which boxes are disabled
     var ticked = {};
     saved.ticked.forEach(function (value) { ticked[value] = true; });
@@ -699,27 +717,76 @@
     }
   }
 
-  document.addEventListener("htmx:beforeRequest", function (event) {
-    var wrapper = event.detail.elt;
-    var active = document.activeElement;
-    if (!(wrapper instanceof Element) || !wrapper.hasAttribute("data-tree-live") ||
-        !(active instanceof Element) || !wrapper.contains(active) || !takesText(active)) {
-      return;
-    }
-    event.preventDefault();
-    window.setTimeout(function () {
+  // A refresh that did not happen (the focus was in a text field, the answer was a 204 or an
+  // error, the network failed) is asked for again after the interval, or the Retry-After when
+  // that is longer: the one-shot "load" trigger of the wrapper is spent.
+  function refreshLater(wrapper, seconds) {
+    window.clearTimeout(wrapper.treeTimer);
+    var wait = Math.max(Number(wrapper.getAttribute("data-tree-live")) || 4, seconds || 0);
+    wrapper.treeTimer = window.setTimeout(function () {
       if (wrapper.isConnected) {
         window.htmx.ajax("GET", wrapper.getAttribute("hx-get"), {
           source: wrapper, target: wrapper, swap: "outerHTML"
         });
       }
-    }, (Number(wrapper.getAttribute("data-tree-live")) || 4) * 1000);
+    }, wait * 1000);
+  }
+
+  function typing(wrapper) {
+    var active = document.activeElement;
+    return active instanceof Element && wrapper.contains(active) && takesText(active);
+  }
+
+  function isLive(element) {
+    return element instanceof Element && element.hasAttribute("data-tree-live");
+  }
+
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var wrapper = event.detail.elt;
+    if (isLive(wrapper) && typing(wrapper)) {
+      event.preventDefault();
+      refreshLater(wrapper, 0);
+    }
   });
 
+  // The answer arrived while the user started typing: it is dropped (afterRequest asks again).
   document.addEventListener("htmx:beforeSwap", function (event) {
     var wrapper = event.detail.elt;
-    if (event.detail.shouldSwap && wrapper instanceof Element && wrapper.hasAttribute("data-tree-live")) {
+    if (!isLive(wrapper) || !event.detail.shouldSwap) {
+      return;
+    }
+    if (typing(wrapper)) {
+      event.detail.shouldSwap = false;
+    } else {
       treeSaved = saveTree(wrapper);
+    }
+  });
+
+  document.addEventListener("htmx:afterRequest", function (event) {
+    var wrapper = event.detail.elt;
+    if (isLive(wrapper) && wrapper.isConnected) {  // not swapped out: nothing new arrived
+      var after = event.detail.xhr ? Number(event.detail.xhr.getResponseHeader("Retry-After")) : 0;
+      refreshLater(wrapper, after || 0);
+    }
+  });
+
+  // The note that the tree updates is shown only here: without this script nothing does, and
+  // it would contradict the snapshot note, which this hides in turn.
+  function showLiveNote(root) {
+    var notes = root.matches(".tree-live[hidden]") ? [root] : root.querySelectorAll(".tree-live[hidden]");
+    Array.prototype.forEach.call(notes, function (note) {
+      note.hidden = false;
+      var view = note.closest(".tree-view");
+      var snapshot = view ? view.querySelector(".tree-snapshot") : null;
+      if (snapshot) {
+        snapshot.hidden = true;
+      }
+    });
+  }
+
+  document.addEventListener("htmx:load", function (event) {
+    if (event.target instanceof Element) {
+      showLiveNote(event.target);
     }
   });
 
@@ -735,12 +802,33 @@
     if (form) {
       restoreTree(form, saved.form);
     }
+    showLiveNote(root);
   });
 
   // A site job's tree shows itself once the job has a result: the progress view marks the
-  // button (data-tree-auto), and the script presses it once per job unless something else is
-  // shown below the jobs. Marked data-refresh, the request is no request of the user's: nothing
-  // is announced. Without this script the "Show tree now" button stays as it is.
+  // button (data-tree-auto), and the script presses it once per job unless the tree was asked
+  // for already (a click, a request in flight) or something is shown below the jobs. Marked
+  // data-refresh, the request is no request of the user's: nothing is announced. A click while
+  // the script's own request is in flight is dropped (the tree is on its way), any other click
+  // counts as the user's request, so the script never loads the tree a second time. Without
+  // this script the "Show tree now" button stays as it is. The progress view replaces the
+  // button every few seconds, so the state is kept by the job's button id.
+  var autoPending = {};
+  var pressing = false;
+
+  document.addEventListener("click", function (event) {
+    var target = event.target instanceof Element ? event.target : null;
+    var button = target ? target.closest("button.tree-button") : null;
+    if (!button || pressing) {
+      return;
+    }
+    if (autoPending[button.id]) {
+      event.stopImmediatePropagation();  // htmx listens on the button itself, later
+      return;
+    }
+    autoLoaded[button.id] = true;
+  }, true);
+
   document.addEventListener("htmx:load", function (event) {
     var root = event.target instanceof Element ? event.target : null;
     var buttons = root ? root.querySelectorAll("button.tree-button[data-tree-auto]") : [];
@@ -748,12 +836,31 @@
       window.setTimeout(function () {
         var view = button.closest(".jobs-view");
         var detail = view ? view.querySelector(".job-detail") : null;
-        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild) {
+        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild ||
+            button.classList.contains("htmx-request")) {
           return;
         }
         autoLoaded[button.id] = true;
+        autoPending[button.id] = true;
         button.setAttribute("data-refresh", "");
+        // Once the answer is in, the button is the user's again.
+        var done = function (settled) {
+          // A swap is over at afterSettle; a request that swapped nothing ends at afterRequest.
+          var over = settled.type === "htmx:afterSettle" || !settled.detail.successful;
+          if (settled.detail.elt === button && over) {
+            autoPending[button.id] = false;
+            button.removeAttribute("data-refresh");
+            document.removeEventListener("htmx:afterSettle", done);
+            document.removeEventListener("htmx:afterRequest", done);
+          }
+        };
+        document.addEventListener("htmx:afterSettle", done);
+        document.addEventListener("htmx:afterRequest", done);
+        // A request that never ends (its button gone) must not drop the user's clicks for good.
+        window.setTimeout(function () { autoPending[button.id] = false; }, 10000);
+        pressing = true;
         button.click();
+        pressing = false;
       }, 0);
     });
   });

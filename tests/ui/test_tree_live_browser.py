@@ -11,10 +11,11 @@ from collections.abc import Iterator
 from typing import Final
 
 import pytest
-from playwright.sync_api import Locator, Page, expect
+from playwright.sync_api import Locator, Page, Route, expect
 from pytest_httpserver import HTTPServer
 from werkzeug import Request, Response
 
+from tests.ui.test_a11y_browser import _axe
 from tests.ui.test_playground_browser import (
     _page,
     _settings,
@@ -108,6 +109,9 @@ def test_the_tree_keeps_the_users_work_across_a_refresh(ui: tuple[str, str]) -> 
     with browsing(url) as (page, console):
         view = _start(page, origin)
         expect(view.locator(".tree-live")).to_have_text("Updates while the job runs")
+        expect(view.locator(".tree-live")).to_be_visible()
+        expect(view.locator(".tree-snapshot")).to_be_hidden()  # the note says it already
+        expect(page.locator("button.tree-button[data-refresh]")).to_have_count(0)
 
         # The first page's address is under /docs/; its section starts folded: the user opens it.
         name = page.locator(
@@ -156,6 +160,7 @@ def test_the_tree_keeps_the_users_work_across_a_refresh(ui: tuple[str, str]) -> 
         assert view.locator("li[data-type]:not([data-type=content]):not([hidden])").count() == 0
         assert view.locator("li[data-type][hidden]").count() > 0
         assert view.locator("[aria-live] .tree-view").count() == 0
+        assert _axe(page, "live note shown") == []
     assert console == []
 
 
@@ -196,4 +201,95 @@ def test_the_focus_stays_on_a_checkbox_across_a_refresh(ui: tuple[str, str]) -> 
         _wrapper_mark(page)
         _refreshed(page)
         assert page.evaluate("document.activeElement.dataset.action") == "tree-none"
+
+        # So do controls without an id: a radio and a checkbox of the options, their summary.
+        for selector in (
+            "input[name=format][value=text]",
+            "input[name=metadata]",
+            "details.advanced > summary",
+        ):
+            view.locator(selector).focus()
+            _wrapper_mark(page)
+            _refreshed(page)
+            assert page.evaluate("(s) => document.activeElement.matches(s)", selector), selector
+    assert console == []
+
+
+def test_the_batch_view_of_the_tree_survives_a_refresh(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        view = _start(page, origin)
+        _more_than(page, FAST)
+        view.locator("input[name=url][value$='/p3.html']").check()
+        view.locator(".tree-actions button[type=submit]").click()
+        job = view.locator(".tree-jobs section.job")
+        expect(job).to_have_count(1)
+        page.evaluate("window.__jobs = document.querySelector('.tree-jobs')")
+        _wrapper_mark(page)
+        _refreshed(page)
+
+        assert page.evaluate("window.__jobs === document.querySelector('.tree-jobs')")
+        expect(job).to_have_count(1)
+        expect(job.locator(".state")).to_have_attribute(
+            "data-value", "completed"
+        )  # it kept polling
+    assert console == []
+
+
+def test_a_refresh_that_failed_is_asked_for_again(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, _console):  # the aborted request logs a console error
+        view = _start(page, origin)
+        _more_than(page, FAST)
+        view.locator("input[name=url][value$='/p3.html']").check()
+        answers = ["abort", "retry", "pass"]
+        seen: list[str] = []
+
+        def answer(route: Route) -> None:
+            how = answers[len(seen)] if len(seen) < len(answers) else "pass"
+            seen.append(how)
+            if how == "abort":
+                route.abort()
+            elif how == "retry":
+                route.fulfill(status=204, headers={"Retry-After": "6"})
+            else:
+                route.continue_()
+
+        page.route(re.compile(r".*/ui/run/site-tree\?.*live=1"), answer)
+        _wrapper_mark(page)
+        _refreshed(page)  # the network error, then the 204 left the tree alone; the third swapped
+
+        assert seen[:3] == answers
+        assert page.locator("input[name=url]:checked").count() == 1
+        expect(view.locator("input[name=url]").first).to_be_attached()
+
+
+def test_a_click_on_the_tree_button_and_the_auto_load_ask_for_one_tree(
+    ui: tuple[str, str],
+) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        requests: list[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                requests.append(request.url)
+                if "/ui/run/site-tree" in request.url and "live=1" not in request.url
+                else None
+            ),
+        )
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        panel = page.locator("#panel-site-structure")
+        panel.locator("input[name=url]").fill(f"{origin}/")
+        panel.locator("input[name=depth]").fill("1")
+        panel.locator("input[name=max_pages]").fill(str(FAST + SLOW + 1))
+        panel.locator("button[type=submit]").click()
+        # The user's click comes as early as there is a button, before the job has a result.
+        page.locator("#result button.tree-button").click()
+        expect(page.locator("#result .tree-view input[name=url]").first).to_be_attached()
+        page.wait_for_timeout(8_000)  # past the progress view's next refreshes, which auto-load
+
+        assert len(requests) == 1, requests
     assert console == []
