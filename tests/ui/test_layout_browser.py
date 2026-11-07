@@ -202,7 +202,7 @@ def test_tree_and_preview_pills_are_26px_and_aligned(ui: tuple[str, str]) -> Non
         expect(job.locator(".state")).to_have_text("completed")
         job.locator("button.tree-button").click()
         expect(page.locator("#result .tree-view .page-type").first).to_be_visible()
-        kind, found = boxes(page, "#result .tree-view .page-type", "#result .tree-view .found")
+        kind, found = boxes(page, "#result .tree-view .page-type", "#result .tree-view .cell-found")
         assert round(kind["height"]) == 26
         assert abs((kind["top"] + kind["bottom"]) - (found["top"] + found["bottom"])) <= 2
         page.evaluate(

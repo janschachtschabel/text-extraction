@@ -37,7 +37,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
 | `FETCH_ALLOW_PRIVATE_NETWORKS` | `false` | **Unsafe.** `true` switches the SSRF guard off for private, loopback and link-local addresses. For local development and tests only; never set it in a deployment. |
 | `OUTBOUND_MAX_CONCURRENCY_PER_HOST` | `2` | Requests in flight to one host at the same time, across all pods. Minimum 1. |
-| `OUTBOUND_MIN_DELAY_MS` | `1000` | Least gap between the starts of two requests to one host, in milliseconds. 0 switches the spacing off. Minimum 0. |
+| `OUTBOUND_MIN_DELAY_MS` | `500` | Least gap between the starts of two requests to one host, in milliseconds. 0 switches the spacing off. Minimum 0. |
 | `OUTBOUND_MAX_CRAWL_DELAY_SECONDS` | `10` | Upper limit for the `Crawl-delay` of a robots.txt, in seconds. A longer value is cut to this. Minimum 0. |
 | `OUTBOUND_MAX_WAIT_SECONDS` | `10` | Longest time a request waits for its turn at a host. Longer waits are refused as `OutboundBusy`. Minimum 0. |
 | `OUTBOUND_BACKOFF_SECONDS` | `30` | Pause for a host after 429 or 503 without a usable `Retry-After`. Minimum 1. |
@@ -617,8 +617,8 @@ one crawl. All are service defaults; the Helm chart sets them under `config` wit
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SITE_MAX_DEPTH` | `5` | Deepest link distance from the start page that a request's `depth` may ask for; more answers 422 `invalid_request`. 0 to 10. |
-| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 1 s take about 28 h, more than the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
-| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
+| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 0.5 s take about 14 h, more than half the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
+| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
 | `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
 | `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
 | `SITE_MAX_LINKS_PER_PAGE` | `1000` | Most links kept of one crawled page, in document order; the others are neither listed nor followed (warning `links_truncated`). 10 to 50000. |
@@ -1157,7 +1157,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |
 | `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
-| `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
+| `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`, `sitemap_first`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
 | `text_extraction_mcp_tool_calls_total` | counter | `tool`, `outcome` (`success`, `partial`, `failed`, `job` or the error code of a refusal or error result) | API pods (with `MCP_ENABLED`) | MCP tool calls. `tool` is the tool's name, or `unknown` for a name the server has no tool of (a caller's text is never a label). Every tool is exported with `success` at 0 from the start. Use `sum()` over pods. |
 | `text_extraction_mcp_tool_seconds` | histogram | `tool` | API pods (with `MCP_ENABLED`) | Seconds of one MCP tool call, the rate limit check included. Buckets 0.05 s to 120 s. |
@@ -1214,8 +1214,8 @@ the service, not the politeness limits: it sets `OUTBOUND_MIN_DELAY_MS=0` (no pe
 of the farm, one host with no network latency. The latencies below are therefore the service's
 own processing time. Under the defaults a batch takes at least (URLs per host) ×
 `OUTBOUND_MIN_DELAY_MS` per host, and at least (URLs per host) × fetch time /
-`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 1,000 s (about
-17 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 500 s (about
+8 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
 requests a minute.
 
 Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10-31:

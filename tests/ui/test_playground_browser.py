@@ -53,7 +53,7 @@ def _page(title: str, links: list[str]) -> bytes:
 # whose path says nothing, so it has no page type).
 FAILING_PAGES = {
     "/": ("Start page", ["/docs/a.html", "/impressum.html", "/broken.html"]),
-    "/docs/a.html": ("Docs A", ["/docs/deeper.html"]),
+    "/docs/a.html": ("Docs A", ["/docs/12345"]),
     "/impressum.html": ("Impressum", []),
 }
 
@@ -193,10 +193,12 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         view = page.locator("#result .tree-view")
         expect(view.locator("input[name=url]")).to_have_count(5)
 
-        root = view.locator("ul.tree > li > label > input")
-        label = page.locator(":scope > label > span.label", has_text=re.compile("^docs/$"))
+        root = view.locator("ul.tree > li > .cell-name > label > input")
+        label = page.locator(
+            ":scope > .cell-name > label > span.label", has_text=re.compile("^docs/$")
+        )
         docs = view.locator("li.node-section", has=label)
-        docs.locator(":scope > label > input").check()
+        docs.locator(":scope > .cell-name > label > input").check()
         docs_pages = docs.locator("input[name=url]")
         assert [docs_pages.nth(n).is_checked() for n in range(docs_pages.count())] == [True] * 2
         assert root.evaluate("box => box.indeterminate") is True
@@ -211,7 +213,9 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         # leaves the imprint unticked (package 14).
         imprint = view.locator(f"input[name=url][value='{origin}/impressum.html']")
         expect(imprint).to_have_attribute("data-page-type", "imprint")
-        badge = imprint.locator("xpath=ancestor::label[1]/span[contains(@class, 'page-type')]")
+        badge = imprint.locator(
+            "xpath=ancestor::li[1]/div[@class='cell-type']/span[contains(@class, 'page-type')]"
+        )
         expect(badge).to_have_text("Imprint")
         expect(view.locator(".tree-types")).to_contain_text("Imprint 1")
         view.locator("[data-action=tree-content]").click()
@@ -225,14 +229,16 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
             f"{origin}/docs/b.html",
         ]
         assert root.evaluate("box => box.indeterminate") is True
-        assert docs.locator(":scope > label > input").is_checked()
+        assert docs.locator(":scope > .cell-name > label > input").is_checked()
         view.locator("[data-action=tree-none]").click()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
-        docs.locator(":scope > label > input").check()
-        docs.locator(":scope > button.fold").click()  # folded at first (package 17)
+        docs.locator(":scope > .cell-name > label > input").check()
+        docs.locator(":scope > .cell-name > button.fold").click()  # folded at first (package 17)
         docs_pages.first.uncheck()
         expect(view.locator(".tree-counter")).to_have_text("1 selected")
-        assert docs.locator(":scope > label > input").evaluate("box => box.indeterminate")
+        assert docs.locator(":scope > .cell-name > label > input").evaluate(
+            "box => box.indeterminate"
+        )
 
         docs_pages.first.check()
         view.locator("button[type=submit]", has_text="Extract selected").click()
@@ -262,13 +268,13 @@ def test_select_content_pages_leaves_failed_pages_out(failing_ui: tuple[str, str
         view = page.locator("#result .tree-view")
         expect(view.locator("input[name=url]")).to_have_count(5)
         broken = view.locator(f"input[name=url][value='{origin}/broken.html']")
-        deeper = view.locator(f"input[name=url][value='{origin}/docs/deeper.html']")
+        deeper = view.locator(f"input[name=url][value='{origin}/docs/12345']")
         expect(broken).to_have_attribute("data-failed", "")
         assert broken.get_attribute("data-page-type") is None
         assert deeper.get_attribute("data-page-type") is None
         assert deeper.get_attribute("data-failed") is None
-        # The type badge is read with its checkbox.
-        expect(view.get_by_role("checkbox", name=re.compile("Imprint"))).to_have_count(1)
+        # The type is a cell of its own, read with the column's name.
+        expect(view.locator(".cell-type", has_text="Type: Imprint")).to_have_count(1)
 
         view.locator("[data-action=tree-all]").click()
         expect(view.locator(".tree-counter")).to_have_text("5 selected")
@@ -277,8 +283,8 @@ def test_select_content_pages_leaves_failed_pages_out(failing_ui: tuple[str, str
         checked = view.locator("input[name=url]:checked")
         assert sorted(checked.nth(n).get_attribute("value") or "" for n in range(3)) == [
             f"{origin}/",
+            f"{origin}/docs/12345",
             f"{origin}/docs/a.html",
-            f"{origin}/docs/deeper.html",
         ]
         assert not broken.is_checked()
     assert console == []

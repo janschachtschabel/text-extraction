@@ -11,8 +11,8 @@ das seitenweise Lesen der Jobs. Einen einzelnen Bereich einer Website beschreibt
 ## Die Website erfassen
 
 `POST /v1/site-structure` erfasst eine Website: ihre Sitemaps (die `Sitemap:`-Zeilen der robots.txt,
-sonst `/sitemap.xml`; Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren Linkgraphen ab der
-Startseite, `depth` Klicks tief (Standard 2, höchstens `SITE_MAX_DEPTH`), für höchstens `max_pages`
+sonst nacheinander `/sitemap.xml`, `/sitemap_index.xml` oder `/wp-sitemap.xml`, bis eine existiert;
+Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren Linkgraphen ab der Startseite, `depth` Klicks tief (Standard 2, höchstens `SITE_MAX_DEPTH`), für höchstens `max_pages`
 Seiten (Standard 100, höchstens `SITE_MAX_PAGES`). Die Antwort ist 202 mit einem Job der Art `site`;
 die Extract-Worker crawlen, und jede Seite, robots.txt und Sitemap-Datei, die sie finden, wird zu
 einem Eintrag des Jobs, sodass sein `total` wächst, solange er läuft:
@@ -51,7 +51,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "role": "page", "depth": 1, "parent": 0, "links": [...]}, ...}, ...}},
 #  {"index": 3, "url": "https://example.org/sitemap.xml", "result": {"data": {"site": {
 #   "role": "sitemap", "depth": 0, "parent": 1, "sitemap": {"format": "urlset", "guessed": false,
-#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01"}, ...],
+#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01",
+#                "type_guess": "listing"}, ...],
 #   "children": [], "entry_count": 2400, "part": 1, "parts": 3}}, ...}, ...}}, ...]}, ...}
 ```
 
@@ -59,7 +60,12 @@ Seiten werden nur über HTTP geholt, mit dem User-Agent des Dienstes, den Grenze
 Prüfungen von `compliance`; die Einträge behalten Titel, Status, Metadaten und Qualität, aber
 keinen Text (`content: null`). Der Crawl bleibt auf dem Host der Startseite (ein führendes `www.`
 zählt nicht); `scope: "path"` hält ihn unter dem Verzeichnis der Start-URL, `sitemaps: false`
-lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Ein Crawl wird
+lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Mit
+`discovery: "sitemap_first"` liest der Crawl nur die Startseite, wenn robots.txt eine Sitemap nennt
+oder eine der drei Adressen eine liefert, und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap
+folgt er den Links wie sonst. `discovery: "sitemap_first"` mit `sitemaps: false` ergibt 422. Die
+Weboberfläche bietet das als „Schnell: Sitemap zuerst“ (Voreinstellung; „robots.txt und Sitemaps“
+muss angehakt sein) neben „Gründlich: Links folgen“ an; der API-Standard ist `discovery: "crawl"`. Ein Crawl wird
 zusammen mit Ihren Batches auf `BATCH_MAX_OPEN_PER_CLIENT` angerechnet.
 
 ### Die Website-Struktur lesen
@@ -78,11 +84,16 @@ führt (siehe [Seitentypen und Linkkategorien](#seitentypen-und-linkkategorien))
 - Den anderen wird nicht gefolgt: `depth` (tiefer als gewünscht), `listed` (Links im Kopf und
   Iframes), `file`, `out_of_scope` (ein anderer Host oder außerhalb des Startverzeichnisses mit
   `scope: "path"`), `nofollow`, `blocked` (robots.txt oder ein TDM-Nutzungsvorbehalt unter
-  `compliance: enforce`), `max_pages` und `memory_guard`.
+  `compliance: enforce`), `max_pages`, `memory_guard` und `sitemap_first` (ein Crawl mit
+  `discovery: "sitemap_first"` hat eine Sitemap gefunden, daher wurde dem Link nicht gefolgt).
 
 Die Einträge einer Sitemap stehen in `sitemap.entries`; eine große setzt sich in
 `sitemap_part`-Einträgen mit derselben URL fort (`part` von `parts`), und ein Index listet seine
-Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Ein Eintrag, dessen `final_url`
+Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Jeder Eintrag trägt ein
+`type_guess`: den Seitentyp, der aus seiner URL und dem `type_hint` der Sitemap (was ihr Dateiname
+nahelegt, etwa `listing` bei einer WordPress-Kategorie-Sitemap) geschätzt wird, ohne die Seite
+abzurufen; sagt die URL nichts, fehlt das `type_guess`. Es ist eine Schätzung, kein `page_type`;
+Sitemaps, die vor diesem Feld gelesen wurden, haben keines. Ein Eintrag, dessen `final_url`
 die URL eines anderen Eintrags ist, ist eine Weiterleitung auf diese Seite (seine Links
 wiederholen die der Seite): Entfernen Sie die Duplikate des Graphen anhand von `final_url`.
 
@@ -104,7 +115,9 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    Sprache an (`<html lang>`): Über `/it/` auf einer deutschen Seite entscheiden die übrigen
    Regeln.
 3. schema.org: Das JSON-LD oder die Microdata der Seite sagen `ContactPage` (`contact`),
-   `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`).
+   `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`); trifft
+   keine davon zu, nennt ein `Event`-Typ (`Event`, `EducationEvent` und andere Namen, die auf
+   `Event` enden) `event`, und `LearningResource`, `Quiz` oder `Course` nennt `learning_material`.
 4. Die URL: ein ganzes Pfadsegment wie `impressum` oder `imprint` (`imprint`), `datenschutz`
    oder `privacy` (`privacy`), `agb`, `terms`, `cookies` oder `barrierefreiheit` (`legal`),
    `login`, `registrieren` oder `konto` (`auth`), `suche` oder `search` oder eine Suchanfrage
@@ -191,11 +204,16 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
 ## In der Spielwiese
 
 1. **Website-Struktur**: Geben Sie die Start-URL ein, setzen Sie „Linktiefe“ und „Maximale
-   Seitenzahl“, lassen Sie „Bereich“ beim Host, und klicken Sie auf „Website-Struktur lesen“.
+   Seitenzahl“, lassen Sie „Bereich“ beim Host, wählen Sie bei „So wird die Website gelesen“
+   „Schnell: Sitemap zuerst“ (Voreinstellung) oder „Gründlich: Links folgen“, und klicken Sie auf
+   „Website-Struktur lesen“.
 2. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“ die Seiten nach Host und Pfad;
-   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. Jede URL zeigt ihren
-   Seitentyp, und „Typen:“ über dem Baum zählt sie. „Alle auswählen“ markiert jede URL und
-   „Inhaltsseiten auswählen“ jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme; der Baum erscheint auch von
+   selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange er läuft. Jede URL zeigt
+   ihren Seitentyp, und die Zeile „Typen:“ über dem Baum zählt sie; mit JavaScript ersetzen
+   Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
+   JavaScript bleibt die Zeile stehen). „Alle auswählen“ markiert jede angezeigte URL (unter einem
+   Typfilter nur die angezeigten) und „Inhaltsseiten auswählen“ jede angezeigte URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,
    die Sie möchten. URLs, die die Regeln der Website sperren, sind mit „robots.txt“ oder „TDM“
    markiert und werden von den Schaltflächen übersprungen, solange „Website-Regeln“ auf „Regeln der

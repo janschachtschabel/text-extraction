@@ -213,7 +213,7 @@ add a note of its own):
 - Image descriptions: `image_not_described` (at least one image of `describe_images` was
   skipped or got no description while the status stays: not fetched, refused, not a type the
   model takes, too large, or the endpoint refused it or found nothing to describe; V-S11).
-- Site structure (items of a `site` job): `sitemap_not_found` (the guessed `/sitemap.xml`
+- Site structure (items of a `site` job): `sitemap_not_found` (a guessed sitemap address
   answered 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
   its inflate or by its time limit, or its children did not fit the item; the entries before the
   cut), `sitemap_urls_truncated` (`SITE_MAX_SITEMAP_URLS` reached: the first entries),
@@ -296,7 +296,7 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `POST /v1/screenshot` | Full page (default) or first-viewport image, by default a PNG of a 1920×1080 window; options `full_page`, `viewport`, `format` (`png`, `jpeg`, `webp`), `quality`, `width` (see B7), `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
-| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 400 `invalid_request` while jobs are off (`JOBS_ENABLED=false`), 503 while Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
+| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `discovery` (`crawl` or `sitemap_first`), `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 400 `invalid_request` while jobs are off (`JOBS_ENABLED=false`), 503 while Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`, as `image/png`, `image/jpeg` or `image/webp`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
@@ -2426,7 +2426,8 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
 
 - **P9-S1, the request** (`site/types.py`). `url`, `depth` (default 2, 0 to 10, over
   `SITE_MAX_DEPTH` 422), `max_pages` (default 100, 1 to 100,000, over `SITE_MAX_PAGES` 422; page
-  items, the start page included), `sitemaps` (default true), `scope` (`host` or `path`),
+  items, the start page included), `sitemaps` (default true), `discovery` (`crawl`, the default, or
+  `sitemap_first`; the latter with `sitemaps: false` is 422), `scope` (`host` or `path`),
   `metadata` (default true), `compliance` (`ignore` for admins only), `cache` (default true); other
   fields 422. `depth: 0` fetches the start page only (and the sitemaps). The options are stored as
   `JobOptions.site` (left out of the stored JSON while null); `JobKind` has `site`. A site item never
@@ -2468,9 +2469,45 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
 - **P9-S7, sitemap discovery.** Item 0, whatever its outcome, appends the robots item when
   `sitemaps` is asked. It reads robots.txt through the compliance checker's cache (or loads it in
   the host's turn, in every compliance mode): its `Sitemap:` lines (relative ones resolved, at most
-  `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them one guess,
-  `<origin>/sitemap.xml` (`guessed: true`); robots.txt unavailable fails the item
-  `target_http_error`, retryable, without a guess.
+  `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them guesses in
+  turn (`guessed: true`, `GUESSED_SITEMAP_PATHS`, the position stored as `SiteNode.guess`): `<origin>/sitemap.xml`, then
+  `/sitemap_index.xml`, then `/wp-sitemap.xml`. The robots item appends only the first; a guess
+  that answers 404 or 410, or 2xx with something that is no sitemap (`looks_like_sitemap` on the
+  first 64 KiB: a CMS that answers every path with its HTML page; `format: absent`,
+  `sitemap_not_found`) appends the next through its own `extend` (so a rerun appends nothing
+  twice), the first that answers with a sitemap is parsed and ends the chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
+  sitemap that robots.txt lists never guesses; under the memory guard the next guess is not appended
+  (`site_memory_guard` on the absent item). **`discovery: sitemap_first`:** after item 0's fetch,
+  `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps` (a listed sitemap: yes), else
+  probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
+  `SITEMAP_PROBE_MAX_BYTES`, 64 KiB; a 2xx answer that `looks_like_sitemap` is yes, a 404, 410 or
+  2xx that is no sitemap moves on, a failure or another status is no; an unavailable robots.txt
+  counts as no listed sitemap), so every probe has the SSRF guard,
+  compliance and the host's turn. When the site has a sitemap, the links that `judge_links` would
+  make candidates say `crawl: sitemap_first` (no target, none appended); the robots item is still
+  appended, and with it the sitemap items. Other decisions (`out_of_scope`, `file`, ...) stay.
+  A link to a page that is an item already says `seen` with its target, as under `crawl` (the
+  candidates stay look-ups, so their keys do not depend on the probe). The probe mirrors the
+  chain: robots.txt unavailable is no; guesses: a 2xx that looks like a sitemap is yes, a 404 or
+  410 or a 2xx that is not a sitemap tries the next address, anything else is no. The sniff
+  (`looks_like_sitemap`, `site/sitemaps.py`, pure): a gzip body, an XML root `urlset`,
+  `sitemapindex`, `rss` or `feed` after an optional BOM, declaration, comments and blanks, or a
+  text file whose first non-empty lines are http(s) URLs. A guessed sitemap the probe found is requested twice (the probe, capped at 64 KiB,
+  then the sitemap item); accepted. The probe runs inside item 0's lease with what is left of the item's budget
+  (`EXTRACT_TIMEOUT_SECONDS * 2` from its start; none left: no probe); a probe that outlasts it is no.
+  The verdict is kept in the job's `site` hash (`probe`, set once), so a rerun of item 0 reuses it and
+  labels its links as the first run did. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap entry carries `type_guess` (`SitemapEntry.type_guess`, `guess_type(loc,
+  sitemap_hint=type_hint).type`, null for an opaque URL and omitted from the JSON then; set in
+  `_read_sitemap` on the pool thread, where the parse runs: about 15 µs per entry, 0.2 s for 13,500;
+  it is part of the entry when `pack_parts` measures the parts against `JOB_ITEM_MAX_BYTES // 2`, so
+  the size check includes it). It adds about 24 bytes per entry (`,"type_guess":"content"`, at most
+  33 for `learning_material`): about 320 KB for 13,500 entries, spread over the parts. The tree
+  prefers the stored value (the same function, so both agree) and still guesses for items of
+  v0.1.5 and older, which have none; the guess's reason is not stored and is recomputed. Linked-only
+  URLs of page items have no stored guess. Every sitemap result carries `sitemap.type_hint`
+  (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
+  WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
+  fails the item `target_http_error`, retryable, without a guess.
 - **P9-S8, sitemap parsing** (`site/sitemaps.py`, pure). A gzip body (by its magic bytes) is
   inflated to at most `SITE_SITEMAP_MAX_BYTES`; a body that does not start with `<` is a text
   sitemap; XML is read by `defusedxml`'s `iterparse` (no DTD, no entities, no external
@@ -2675,13 +2712,46 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   `contact`, `about`, `auth`, `search`), else `nav` when the collapsed, case-folded text is a
   navigation helper of the old service ("home", "startseite", "nach oben", "back to top", "menu",
   arrows and the like), else `content`.
+- **`event` and `learning_material` (package 18).** Two more page types, after `listing`.
+  `page_type` reads them from schema.org: a JSON-LD `@type` or microdata `itemtype` ending in
+  `Event` (`Event`, `EducationEvent`, `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz`
+  and `Course` are `learning_material` (signal `schema_org`; the contact, about, search and
+  collection types keep their rank).
+- **`guess_type(url, link_text, region, sitemap_hint)`** answers `TypeGuess(type, reason)` or
+  None for a URL that was not fetched. First rule that applies:
+  1. `url_type(url)` (`url`);
+  2. WordPress and dated patterns (`url`): `?p=N`, `?page_id=N` and a dated path are `content`;
+     `?post_type=X&p=N` is the post type's type (an event name `event`, a material name
+     `learning_material`, else `content`); `?cat=`, `?tag=`, `?author=` with a value are
+     `listing`; a last segment ending in `__trashed` is `other`;
+  3. a `sitemap_hint` other than `content` (`sitemap`);
+  4. the link text equals a type word of the headings (`Kontakt`, `Impressum` ...), or `region` is
+     `pagination` (`link_text`);
+  5. a keyword token in the path (split on `/ - _ .`) or in the link text (`keywords`); event
+     words (`veranstaltung`, `termine`, `workshop`, `symposium` ...) before material words
+     (`arbeitsblatt`, `quiz`, `lernpfad`, `oer` ...); whole tokens only, so `eventually` is none;
+  6. a `sitemap_hint` of `content` (`sitemap`);
+  7. `content` as the default (`default`) when the URL has no query besides tracking and language
+     parameters and its last segment is no id (not hex of 8+ characters, not only digits, not a
+     UUID) and holds three letters in a row;
+  8. None.
+
+  `sitemap_type_hint(sitemap_url)` reads the file name of a sitemap: Yoast and Rank Math
+  `<name>-sitemap<N>` and WordPress core `wp-sitemap-posts-<name>-<N>` (`post`, `page` are
+  `content`; category, tag and author names `listing`; event names `event`; material names
+  `learning_material`; any other name None), `wp-sitemap-taxonomies-*` and `wp-sitemap-users-*`
+  are `listing`.
+  **Ruling P18-R1 (replaces P14-R8):** P14-R8 had the tree guess an unfetched URL from
+  `url_type(url)` alone and never from the link's `category`. Now the link text and the region
+  of the link inform the guess as well (rules 4 and 5), and a guessed type is always marked
+  guessed together with its reason (`url`, `sitemap`, `link_text`, `keywords`, `default`).
+  An imprint or privacy URL still wins over the sitemap and the link text (rule 1).
 - **Older results.** `page_type` and `category` default to null, so results cached and items
   stored before package 14 load unchanged.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
-  linked-only URL was not read, so its leaf guesses the type from `url_type(url)` alone, never
-  from the link's `category` (ruling P14-R8), marked "guessed from the URL"; a URL that says
-  nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
-  URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
+  linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
+  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own
+  verdict, even none, wins over a guess for the same URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
   (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
   every crawled page whose item failed (`data-failed` on its checkbox; ruling P14-R9: a hard 404
@@ -2692,6 +2762,16 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
   home unless the page's `lang` names another language (A26-R3).
+- **Crawl speed (package 18).** Measured by the live harness (`tests/live/run_site.py`, depth 1,
+  `max_pages` 25, `compliance: enforce`, on GitHub runners): at the old 1 s spacing a crawl took
+  26 to 46 s for its 25 pages; at 500 ms it takes 17 to 32 s (wirlernenonline.de 46 -> 26 s,
+  klexikon.zum.de 26 -> 17 s, de.serlo.org 34 -> 23 s), so a crawl is no longer bound by the
+  spacing alone: per-host concurrency (2), fetch latency and the conversion of each page (median
+  `convert_ms` 97 to 484 ms) share the rest. **Ruling P18-R2:** no light conversion for crawl
+  pages in package 18. Conversion overlaps the next fetches, a light mode would change
+  `word_count` and the `soft_404` verdict of crawled pages, and the speed an editor feels comes
+  from `discovery: "sitemap_first"`, which reads only the start page when a sitemap exists. A
+  light mode stays an option if a thorough crawl is still too slow.
 
 ## MCP and UI
 

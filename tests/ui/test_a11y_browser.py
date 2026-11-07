@@ -55,9 +55,9 @@ SOCIAL: Final = "https://www.youtube.com/@example"
 SITE: Final = {
     **PAGES,
     "/": (PAGES["/"][0], [*PAGES["/"][1], SOCIAL]),
-    "/docs/a.html": (PAGES["/docs/a.html"][0], ["/docs/deeper.html"]),
+    "/docs/a.html": (PAGES["/docs/a.html"][0], ["/docs/12345"]),
 }
-TREE_URLS: Final = 6  # the five pages and /docs/deeper.html, linked only
+TREE_URLS: Final = 6  # the five pages and /docs/12345, linked only
 
 
 def _serve(httpserver: HTTPServer) -> str:
@@ -95,7 +95,7 @@ def _tree(page: Page, origin: str, state: str) -> list[str]:
     expect(view.locator(".tree-social a")).to_have_attribute("href", SOCIAL)
     found = _axe(page, f"{state}, folded")
     view.locator("[data-action=tree-unfold-all]").click()
-    expect(view.locator(".page-type-open")).to_be_visible()  # /docs/deeper.html
+    expect(view.locator(".type-open")).to_be_visible()  # /docs/12345
     found += _axe(page, f"{state}, unfolded")
     return found
 

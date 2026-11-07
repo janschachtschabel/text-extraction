@@ -9,6 +9,59 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+Package 18: the site tree after the v0.1.5 test (plan
+[docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md](docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md)).
+API changes: the site option `discovery`, the field `SiteNode.guess`, the field
+`SitemapInfo.type_hint` and the page types `event` and `learning_material`.
+
+### Added
+
+- The site tree guesses a type for every URL the crawl did not fetch, always marked "guessed", with
+  the reason: the URL (rules), the file name of the sitemap that listed it (`type_hint`), the link
+  text, keywords of the path or the link text, or "Content" by default for a URL with a readable
+  name. A bare default guess gives way to the reason of another source. Only opaque id-like URLs
+  stay "Type open".
+- The page types `event` (Veranstaltung) and `learning_material` (Lernmaterial): from schema.org
+  (`Event` and its subtypes; `LearningResource`, `Quiz`, `Course`), from event and material words
+  in URLs, link texts and sitemap file names.
+- Sitemaps carry `sitemap.type_hint`, read from their file name (Yoast and Rank Math
+  `post-sitemap`, WordPress `wp-sitemap-posts-*` and the like).
+- Without a sitemap in robots.txt the crawl tries `/sitemap.xml`, then `/sitemap_index.xml`, then
+  `/wp-sitemap.xml`; a 404, a 410 or a 2xx that is no sitemap (a CMS answering with an HTML page)
+  moves on to the next address (the position is `SiteNode.guess`).
+  A site without any sitemap costs up to two extra 404 fetches per crawl.
+- Each sitemap entry has `type_guess`, the page type guessed from its URL and the sitemap's
+  `type_hint` (omitted when the URL says nothing); about 24 bytes per entry.
+- `POST /v1/site-structure` and the MCP tool `site_structure` take `discovery`: `crawl` (default)
+  or `sitemap_first`, which reads only the start page when a sitemap exists and takes the other
+  pages from it (links not followed say `crawl: sitemap_first`); with `sitemaps: false` it is 422.
+- The playground's site tree has aligned columns (page, type, found, status, depth) under a sticky
+  head, compact rows when the tree is narrow, chips to filter by type, page counts and the type of
+  each section, link texts in quotes as titles, and a summary line with counts and duration.
+- The tree appears by itself once the job has a result and refreshes while the job runs. A refresh
+  keeps ticks, folds, the filter, the batch options, the scroll position and the focus; the
+  interval grows with the cost of reading the job, retryable failures are tried again, and the
+  batch below the tree survives a refresh.
+- The site form has "How to read the site": "Fast: sitemap first" (the preset) or "Thorough: follow
+  links".
+- The live harness `tests/live/run_site.py` takes `--discovery` (the live workflow's
+  `site_discovery` runs both) and measures the sitemap state, the tree URLs, the types
+  left open (`type open %`), the median convert time and the crawl time, and waits out the
+  service's own 429 `Retry-After`.
+
+### Changed
+
+- `OUTBOUND_MIN_DELAY_MS` defaults to 500 (was 1000): the least gap between the starts of two
+  requests to one host is halved; in the live harness a 25-page crawl of wirlernenonline.de
+  took 26 s instead of 46 s. robots.txt `Crawl-delay` still wins where it is longer. Operators
+  who want the old pace set `OUTBOUND_MIN_DELAY_MS=1000`.
+
+### Upgrade
+
+- A stored site job carries `discovery`. During a rolling update an old pod may reject a site job
+  that a new pod created (the job fails or is retried): finish the rollout before creating site
+  jobs, or accept that.
+
 ## [0.1.5] - 2026-11-06
 
 Package 17: the playground after the v0.1.4 test (plan

@@ -154,7 +154,7 @@ job. Batches and crawls are jobs from the start. The full picture is in
     `OUTBOUND_MIN_DELAY_MS` and (URLs on that host) × the site's fetch time /
     `OUTBOUND_MAX_CONCURRENCY_PER_HOST`, because the spacing applies between the starts of two
     requests to one host across all pods, and at most 2 run at once. A 1,000-URL batch on one host
-    takes at least 1,000 × 1 s = 1,000 s, about 17 minutes (25 minutes with a 3 s fetch: 1,000 ×
+    takes at least 1,000 × 0.5 s = 500 s, about 8 minutes (25 minutes with a 3 s fetch: 1,000 ×
     3 s / 2), not the 50 s above; a robots.txt `Crawl-delay` stretches it further (up to
     `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`, 10 s per request). Hosts run in parallel, so a batch over
     many hosts is bounded by its largest host;

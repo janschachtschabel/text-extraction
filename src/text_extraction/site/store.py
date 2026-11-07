@@ -250,6 +250,23 @@ return grant
 )
 
 
+# KEYS = meta, site; ARGV = the verdict ("1" or "0"), ttl_ms (used when meta has no TTL). Keeps
+# the verdict unless one is kept already and returns the kept one, or -1 when the job is gone
+# (nothing is written, so no orphan hash outlives its job).
+_KEEP_PROBE = (
+    "#!lua\n"
+    + _TTL
+    + """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
+redis.call('HSETNX', KEYS[2], 'probe', ARGV[1])
+redis.call('PEXPIRE', KEYS[2], remaining_ttl(ARGV[2]))
+return tonumber(redis.call('HGET', KEYS[2], 'probe'))
+"""
+)
+
+
 @dataclass(frozen=True)
 class Candidate:
     """An item a parent may append: ``key`` is the URL's ``seen_key`` (the store files sitemap
@@ -322,6 +339,7 @@ class SiteStore:
         self._init = valkey.register_script(_INIT)
         self._extend = valkey.register_script(_EXTEND)
         self._reserve_entries = valkey.register_script(_RESERVE_ENTRIES)
+        self._keep_probe = valkey.register_script(_KEEP_PROBE)
 
     async def init(self, job_id: str, url: str) -> None:
         """Make item 0 the start page (depth 0, no parent), seen under the URL's key, and count
@@ -456,6 +474,27 @@ class SiteStore:
         if granted is not None:
             return int(granted)
         return max(self._max_entries - int(used or 0), 0)
+
+    async def probe_verdict(self, job_id: str) -> bool | None:
+        """The stored verdict of the ``sitemap_first`` probe (item 0's), None before one is
+        kept."""
+        stored = await self._valkey.hget(job_key(job_id, "site"), "probe")
+        return None if stored is None else reply_text(stored) == "1"
+
+    async def keep_probe_verdict(self, job_id: str, verdict: bool) -> bool:
+        """Keep the probe's verdict unless one is kept already; the kept one. A rerun of item 0
+        asks it first and reuses it, so its links and candidates match the first run's. The
+        ``site`` hash keeps the remaining TTL of ``meta``; raises ``JobLost`` when the job is
+        gone."""
+        kept = int(
+            await self._keep_probe(
+                keys=[job_key(job_id, "meta"), job_key(job_id, "site")],
+                args=["1" if verdict else "0", self._ttl_ms],
+            )
+        )
+        if kept == _NOT_FOUND:
+            raise JobLost(job_id)
+        return kept == 1
 
     async def stored_children(self, job_id: str, parent: int) -> list[tuple[int, str]]:
         """The items that the stored answers of ``parent`` appended, as ``(index, url)``, its

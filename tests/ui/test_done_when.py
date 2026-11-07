@@ -446,10 +446,10 @@ def test_batches_site_tree_and_cancel(
     # Page types (package 14): a badge per typed page, none for the imprint (a 404: its page
     # failed, ruling P14-R7), the counts over the tree and "Select content pages".
     badges = {
-        leaf.xpath("./label/input/@value")[0]: texts(
-            leaf, "./label/span[contains(@class, 'page-type')]"
+        leaf.xpath("./div/label/input/@value")[0]: texts(
+            leaf, "./div[@class='cell-type']/span[contains(@class, 'page-type')]"
         )
-        for leaf in site_tree.xpath("//ul[@class='tree']//li[./label/input[@name='url']]")
+        for leaf in site_tree.xpath("//ul[@class='tree']//li[./div/label/input[@name='url']]")
     }
     home, content = translate(lang, "page_type.home"), translate(lang, "page_type.content")
     assert badges == {

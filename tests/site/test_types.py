@@ -205,4 +205,22 @@ def test_sitemap_entry_schema_keeps_its_fields() -> None:
     """Dropping nulls must not hide the entry's fields from the OpenAPI spec."""
     schema = SitemapEntry.model_json_schema(mode="serialization")
 
-    assert set(schema["properties"]) == {"loc", "lastmod", "changefreq", "priority"}
+    assert set(schema["properties"]) == {
+        "loc",
+        "lastmod",
+        "changefreq",
+        "priority",
+        "type_guess",
+    }
+
+
+def test_sitemap_entry_type_guess_is_null_omitted_and_described() -> None:
+    entry = SitemapEntry(loc="https://a.example/x", type_guess="listing")
+
+    assert json.loads(entry.model_dump_json()) == {
+        "loc": "https://a.example/x",
+        "type_guess": "listing",
+    }
+    assert SitemapEntry.model_validate_json(entry.model_dump_json()) == entry
+    assert "type_guess" not in SitemapEntry(loc="https://a.example/x").model_dump_json()
+    assert SitemapEntry.model_json_schema()["properties"]["type_guess"]["description"]

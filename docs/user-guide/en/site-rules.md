@@ -15,7 +15,7 @@ This is the default. The service:
 - checks robots.txt and the EU TDM opt-out (the site's reservation against text and data mining)
   before it fetches a page;
 - sends only a few requests to a host at a time (`OUTBOUND_MAX_CONCURRENCY_PER_HOST`, 2) with a
-  gap between them (`OUTBOUND_MIN_DELAY_MS`, 1 s), and pauses a host that answered 429 or 503;
+  gap between them (`OUTBOUND_MIN_DELAY_MS`, 0.5 s), and pauses a host that answered 429 or 503;
   a request it holds back for this answers `rate_limited` (retryable), with the wait in
   `error.details` (`retry_after_seconds`);
 - sends its own, honest user agent.

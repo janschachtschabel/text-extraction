@@ -50,13 +50,16 @@ def page_item(
     *,
     title: str | None = None,
     depth: int = 1,
-    links: tuple[tuple[str, str] | tuple[str, str, str | None], ...] = (),
+    links: tuple[
+        tuple[str, str] | tuple[str, str, str | None] | tuple[str, str, str | None, str], ...
+    ] = (),
     error: ErrorCode | None = None,
     page_type: str | None = None,
     external: tuple[tuple[str, str | None], ...] = (),
 ) -> JobItem:
-    """A crawled page; ``links`` are (url, crawl) pairs or (url, crawl, category) triples (a
-    pair, like an item stored before link categories, has no category); ``page_type`` is the
+    """A crawled page; ``links`` are (url, crawl) pairs, (url, crawl, category) triples (a
+    pair, like an item stored before link categories, has no category) or (url, crawl, category,
+    text) quadruples; ``page_type`` is the
     page's type (None: like a failed page or an item stored before page types); ``external`` are
     (url, category) pairs of external links (a None category: like an item stored before link
     categories)."""
@@ -67,12 +70,12 @@ def page_item(
         "links": [
             {
                 "url": link[0],
-                "text": "",
+                "text": link[3] if len(link) == 4 else "",
                 "kind": "internal",
                 "source": "a",
                 "rel": [],
                 "crawl": link[1],
-                "category": link[2] if len(link) == 3 else None,
+                "category": link[2] if len(link) >= 3 else None,
             }
             for link in links
         ]
@@ -105,14 +108,24 @@ def robots_item(index: int, url: str) -> JobItem:
 
 
 def sitemap_item(
-    index: int, url: str, entries: list[dict[str, Any]], *, part: int | None = None
+    index: int,
+    url: str,
+    entries: list[dict[str, Any]],
+    *,
+    part: int | None = None,
+    type_hint: str | None = None,
 ) -> JobItem:
     """A sitemap (or, with ``part``, a further part of one) listing ``entries``."""
     site = {
         "role": "sitemap" if part is None else "sitemap_part",
         "depth": 0,
         "parent": 1,
-        "sitemap": {"format": "urlset", "entries": entries, "part": part or 1},
+        "sitemap": {
+            "format": "urlset",
+            "entries": entries,
+            "part": part or 1,
+            "type_hint": type_hint,
+        },
     }
     return _item(index, url, {"status": "success", "data": result_data(url, site=site)})
 

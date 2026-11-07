@@ -9,9 +9,11 @@ from text_extraction.page_types import (
     LISTING_MIN_LINKS,
     PageSignal,
     PageType,
-    guess_url_type,
+    TypeGuess,
+    guess_type,
     link_category,
     page_type,
+    sitemap_type_hint,
     url_type,
 )
 from text_extraction.quality import THIN_PAGE_BELOW_WORDS, Quality
@@ -829,32 +831,93 @@ def test_microdata_scan_stops_after_the_scope_limit() -> None:
     assert classify(doc(body=scopes + late))[0] == "other"
 
 
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        ("https://x.org/2021/05/oer-camp/", "content"),
-        ("https://x.org/2021/05/17/oer-camp/", "content"),
-        ("https://x.org/2021/13/a/", None),
-        ("https://x.org/?page_id=45952", "content"),
-        ("https://x.org/?p=12", "content"),
-        ("https://x.org/?p=12&cat=3", None),
-        ("https://x.org/impressum/", "imprint"),
-        ("https://x.org/author/jan/", "listing"),
-        ("https://x.org/ansprechpartner/", "contact"),
-        ("https://x.org/2-dezember/", None),
-        # Language and tracking parameters say nothing about the page, as in ``url_type``.
-        ("https://x.org/?page_id=12&lang=en", "content"),
-        ("https://x.org/?hl=de&p=12", "content"),
-        ("https://x.org/?p=12&locale=de_DE&utm_source=news", "content"),
-        ("https://x.org/2021/05/oer-camp/?lang=de", "content"),
-        ("https://x.org/2021/05/oer-camp/?LANG=de&fbclid=x", "content"),
-        ("https://x.org/2021/05/oer-camp/?cat=3", None),
-    ],
-)
-def test_guess_url_type(url: str, expected: PageType | None) -> None:
-    assert guess_url_type(url) == expected
-
-
 def test_url_type_itself_never_says_content() -> None:
     assert url_type("https://x.org/2021/05/oer-camp/") is None
     assert url_type("https://x.org/?p=12") is None
+
+
+@pytest.mark.parametrize(
+    ("url", "kwargs", "expected"),
+    [
+        # An imprint stays an imprint whatever the sitemap and the link text say.
+        ("/impressum/", {"sitemap_hint": "content", "link_text": "Mehr"}, ("imprint", "url")),
+        ("/datenschutz/", {"sitemap_hint": "content"}, ("privacy", "url")),
+        ("/?post_type=portal&p=21528", {}, ("content", "url")),
+        ("/?post_type=event&p=3", {}, ("event", "url")),
+        ("/?post_type=arbeitsblatt&p=3", {}, ("learning_material", "url")),
+        ("/?cat=7", {}, ("listing", "url")),
+        ("/?tag=oer", {}, ("listing", "url")),
+        ("/?p=12", {}, ("content", "url")),
+        ("/2021/05/oer-camp/", {}, ("content", "url")),
+        ("/foo__trashed/", {}, ("other", "url")),
+        ("/__trashed/", {}, ("other", "url")),
+        ("/x/", {"sitemap_hint": "listing"}, ("listing", "sitemap")),
+        ("/kontakt-aufnehmen-und-mehr/", {"link_text": "Kontakt"}, ("contact", "link_text")),
+        ("/seite-3/", {"region": "pagination"}, ("listing", "link_text")),
+        ("/3-online-symposium-begabungsfoerderung/", {}, ("event", "keywords")),
+        (
+            "/8-monate-wirlernenonline/",
+            {"link_text": "Arbeitsblatt Bruchrechnen"},
+            ("learning_material", "keywords"),
+        ),
+        ("/termine-und-fristen-im-recht/", {}, ("event", "keywords")),
+        ("/eventually-later/", {}, ("content", "default")),
+        ("/pretermination/", {}, ("content", "default")),
+        ("/8-monate-wirlernenonline/", {"sitemap_hint": "content"}, ("content", "sitemap")),
+        ("/achtsamkeit-gegen-stress-in-der-schule/", {}, ("content", "default")),
+        ("/?id=8f3a2c", {}, None),
+        ("/12345/", {}, None),
+        ("/a1b2c3d4e5f6/", {}, None),
+        ("/550e8400-e29b-41d4-a716-446655440000/", {}, None),
+        ("/?foo=bar", {}, None),
+        ("/?sessionid=1", {}, None),
+    ],
+)
+def test_guess_type(url: str, kwargs: dict[str, str], expected: tuple[str, str] | None) -> None:
+    result = guess_type(f"https://x.org{url}", **kwargs)  # type: ignore[arg-type]
+    assert result == (TypeGuess(*expected) if expected else None)  # type: ignore[arg-type]
+
+
+def test_guess_type_is_frozen() -> None:
+    guess = TypeGuess("event", "url")
+    with pytest.raises(AttributeError):
+        guess.type = "content"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://x.de/post-sitemap.xml", "content"),
+        ("https://x.de/page-sitemap2.xml", "content"),
+        ("https://x.de/category-sitemap.xml", "listing"),
+        ("https://x.de/post_tag-sitemap.xml", "listing"),
+        ("https://x.de/tribe_events-sitemap.xml", "event"),
+        ("https://x.de/wp-sitemap-posts-post-1.xml", "content"),
+        ("https://x.de/wp-sitemap-posts-veranstaltung-1.xml", "event"),
+        ("https://x.de/wp-sitemap-taxonomies-category-1.xml", "listing"),
+        ("https://x.de/wp-sitemap-users-1.xml", "listing"),
+        ("https://x.de/sitemap.xml", None),
+        ("https://x.de/portal-sitemap.xml", None),
+        ("https://x.de/sitemap.xml.gz", None),
+    ],
+)
+def test_sitemap_type_hint(url: str, expected: PageType | None) -> None:
+    assert sitemap_type_hint(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("schema_type", "expected"),
+    [
+        ("EducationEvent", "event"),
+        ("Event", "event"),
+        ("LearningResource", "learning_material"),
+        ("Quiz", "learning_material"),
+        ("Course", "learning_material"),
+    ],
+)
+def test_json_ld_event_and_learning_material(schema_type: str, expected: str) -> None:
+    html = doc(
+        head=f'<script type="application/ld+json">{{"@type": "{schema_type}"}}</script>',
+        title="Willkommen",
+    )
+    assert classify(html, "https://example.org/service") == (expected, ["schema_org"])
