@@ -92,7 +92,7 @@ jobs:
 
       # uv reads .python-version (3.13) and provisions its own managed Python. The generator runs
       # on the runner; the dev group holds python-docx for the generated upload.
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
