@@ -255,6 +255,7 @@ from text_extraction.pipeline_media import (
     asr_available,
     asr_failed,
     cached_details_only,
+    is_transcript,
     no_speech,
     panel_result,
     transcribed,
@@ -2845,8 +2846,10 @@ class Pipeline:
         self, result: ExtractResult, *, min_words: int | None = None
     ) -> Envelope[ExtractResult]:
         """The envelope for a finished result: the quality verdict decides the status.
-        ``min_words`` replaces ``QUALITY_MIN_WORDS`` (an upload with ``short_ok``)."""
-        min_words = self._settings.quality_min_words if min_words is None else min_words
+        ``min_words`` replaces ``QUALITY_MIN_WORDS`` (an upload with ``short_ok``); a media
+        transcript (``is_transcript``) needs one word only, since it is all the media says."""
+        if min_words is None:
+            min_words = 1 if is_transcript(result) else self._settings.quality_min_words
         verdict = quality_error(result.quality, min_words) if result.quality else None
         if verdict is None:
             return Envelope(status="success", data=result)

@@ -81,7 +81,9 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `login_wall`; `quality.browser_recommended` is `js_heavy or bot_challenge or soft_404` and is
    reported in both modes. A bot challenge, soft-404, login wall or empty content ends `failed`
    (`bot_protection`, `likely_error_page`, `login_required`, `empty_content`), fewer than
-   `QUALITY_MIN_WORDS` words ends `partial` (`content_too_short`). In `auto` mode with
+   `QUALITY_MIN_WORDS` words ends `partial` (`content_too_short`); a media transcript (subtitles,
+   transcript view, transcription; `pipeline_media.is_transcript`) needs one word only, since it is
+   all the media says (2026-11-07). In `auto` mode with
    `BROWSER_ENABLED`, a fast result escalates to the browser worker when it came from a 2xx
    response with an HTML content type (`text/html`, `application/xhtml+xml`) and
    `browser_recommended` is set (`escalation.needs_browser`). A page served without a

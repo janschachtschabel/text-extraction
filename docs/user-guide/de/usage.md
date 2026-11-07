@@ -286,6 +286,10 @@ Angaben mit der Warnung `transcript_panel_unavailable`. Eine HTML-Seite, deren `
 `<audio>` ein `<track>` hat, bekommt dessen Text nach ihrem eigenen, unter `## Transcript`, und
 `data.media.embeds` listet die Player, die eine Seite einbettet, damit Sie sie einzeln extrahieren.
 
+Ein Transkript (Untertitel, Transkriptansicht oder Transkription) ist alles, was die Medien sagen.
+Darum ist auch ein kurzes ein `success`: `QUALITY_MIN_WORDS` gilt dafür nicht, und nur ein
+Transkript ganz ohne Wort ist kein Ergebnis.
+
 Mit dem ASR-Worker transkribiert `"transcribe": true` ein Video ohne Untertitel oder die URL einer
 Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine
 Transkription ist immer ein Job, die Antwort ist sofort 202. Eine hochgeladene Audio- oder

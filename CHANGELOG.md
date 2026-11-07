@@ -35,6 +35,9 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 - The playground names switched-off transcription ("Transcription is switched off in this
   service") instead of "This kind of content cannot be converted" when an audio or video upload
   or `transcribe: true` meets a service without ASR.
+- A short transcript is a `success`, not `partial` with `content_too_short`: subtitles, the
+  transcript view and a transcription are all that the media says, so `QUALITY_MIN_WORDS` does
+  not apply to them (a 27-word video was marked partial).
 
 ## [0.1.6] - 2026-11-07
 

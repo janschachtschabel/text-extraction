@@ -273,6 +273,10 @@ details with the warning `transcript_panel_unavailable`. An HTML page whose `<vi
 has a `<track>` gets that text after its own, under `## Transcript`, and `data.media.embeds` lists
 the players a page embeds, for you to extract one by one.
 
+A transcript (subtitles, the transcript view or a transcription) is all that the media says, so
+a short one is a `success`: `QUALITY_MIN_WORDS` does not apply to it, and only a transcript
+without any word is no result.
+
 With the ASR worker, `"transcribe": true` transcribes a video without subtitles or an audio or
 video file URL. A video with subtitles still answers at once; a transcription is always a job,
 answered 202 at once. An uploaded audio or video file is always transcribed (the bytes decide), up

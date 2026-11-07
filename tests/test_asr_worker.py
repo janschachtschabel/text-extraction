@@ -1854,3 +1854,21 @@ def test_openai_backend_without_its_base_url_exits_2(
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
     (failed,) = [line for line in lines if line["event"] == "invalid_configuration"]
     assert "ASR_EXTERNAL_BASE_URL" in failed["message"]
+
+
+@scenario
+async def test_a_short_recording_is_a_success(tmp_path: Path) -> None:
+    """A transcription is all the recording says: fewer words than ``QUALITY_MIN_WORDS`` is no
+    ``content_too_short`` (2026-11-07, a 27-word video)."""
+    harness = asr_harness(**settings_for(tmp_path))
+    short = transcript(segments=[[0.0, 3.0, "Willkommen in der Schokoladenfabrik."]])
+    asr = Asr(harness, FakeChildren(transcribe=short))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert (item.result.status, item.result.error) == ("success", None)
+    assert item.result.data is not None
+    assert item.result.data.word_count == 4
