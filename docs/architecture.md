@@ -169,7 +169,23 @@ add a note of its own):
   that starts a line of its block counts, as PHP writes one, so a message quoted inside a
   sentence stays, and so does text inside `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
   `textarea` and `script`; a message over several lines, such as PHP 8's "Fatal error: Uncaught
-  …" with its stack trace, is not recognised and stays; package 17). The removed messages are listed
+  …" with its stack trace, is not recognised and stays; package 17; the path ends in `.php`,
+  `.inc`, `.phtml` or Drupal's `.module`, `.theme`, `.install`, `.engine`; an Xdebug message,
+  a `table.xdebug-error` whose first `th` reads `( ! ) Warning: … on line 3`, is removed as a
+  whole table and listed once; audit A1). **Ruling AU3-R4 (third audit, R2):** in a quoting
+  context, `blockquote`, `q`, `cite`, `h1`–`h6`, `li`, `dd`, `dt`, `td`, `th`, `figcaption` and
+  anything inside them, a message counts only in the `html_errors` form, its label and its path
+  each the whole text of a `<b>` or `<strong>` (`<b>Warning</b>: … in <b>/a.php</b> on line
+  <b>12</b>`): a reader who quotes a message copies it from the browser, which drops the markup,
+  and real output keeps it. There the plain form (`Warning: … in /a.php on line 12`, also with
+  only a bold label) stays. Outside those contexts the plain form still counts, as PHP prints it
+  with `html_errors` off and real output often lands in a `<p>` or `<div>` that a theme opened.
+  Known limit: a forum post that pastes a message on a line of its own in a bare `<p>` or `<div>`
+  (`Hallo,<br>…<br>Warning: … on line 5<br>Was tun?`) loses it; forums usually quote pasted
+  output in a `<blockquote>`, where it stays. Known limit: an `html_errors` message that is not
+  recognised (another extension) and stands loose in a container that starts with a block reads
+  `**/a.ext**on line` in Markdown: Trafilatura joins such loose inline text without the space,
+  for any bold text, not only here. The removed messages are listed
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none, and null when PII handling was requested: the messages are page
   text that can name a person, and the PII step does not read them), and the playground shows

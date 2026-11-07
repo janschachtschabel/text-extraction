@@ -10,11 +10,18 @@ The scan reads the text of each block, its inline children included (a message i
 label at the start of a line: every candidate costs a few binary searches, so the work stays
 linear in the page. A message inside a line of prose is a quotation and stays, and so does text
 inside ``pre``, ``code``, ``kbd``, ``samp``, ``var``, ``tt``, ``textarea`` and ``script``.
+
+In a quoting context (``blockquote``, ``q``, ``cite``, a heading, ``li``, ``dd``, ``dt``,
+``td``, ``th``, ``figcaption`` and anything inside them) a reader quotes a message as copied
+from the browser, as plain text; there only the ``html_errors`` form counts, its label and its
+path each the whole text of a ``<b>`` or ``<strong>`` (ruling AU3-R4). Xdebug writes a message as
+a ``table.xdebug-error`` whose first ``th`` reads ``( ! ) Warning: ... on line 3``; such a table
+goes as a whole.
 """
 
 import re
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -39,14 +46,26 @@ _IN_PATH = re.compile(r" in (?:/|[A-Za-z]:\\)")  # a path starts with "/" or a d
 _IN = len(" in ")
 _NEWLINE = re.compile(r"\n")
 _NON_SPACE = re.compile(r"\S")
-_EXTENSIONS = (".php", ".inc", ".phtml")
+_EXTENSIONS = (".php", ".inc", ".phtml", ".module", ".theme", ".install", ".engine")
 _MAX_MESSAGE = 1000
 _MAX_PATH = 500
 _SKIPPED = frozenset({"pre", "code", "kbd", "samp", "script", "textarea", "tt", "var"})
+_QUOTING = frozenset(
+    {"blockquote", "q", "cite", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dd", "dt", "td", "th"}
+    | {"figcaption"}
+)
+_BOLD = frozenset({"b", "strong"})
+_XDEBUG_MARK = re.compile(r"\(\s*!\s*\)\s*")  # "( ! )" before an Xdebug message
 
 # A block's text, piece by piece: a text node, a <br> or a boundary (a nested block or a
 # skipped element), which reads as a line break.
 _Piece = NavigableString | Tag | None
+# Whether a piece is in a quoting context, and whether a <b> or <strong> inside its block
+# holds it.
+_QUOTED: Final = 1
+_IN_BOLD: Final = 2
+# Takes a candidate's label span and path span; False keeps the message in the page.
+_Accept = Callable[[int, int, int, int], bool]
 
 
 @dataclass(frozen=True)
@@ -72,16 +91,20 @@ def strip_server_errors(soup: BeautifulSoup) -> list[ServerError]:
     right after each, and return what was removed: identical messages merged into one entry
     with its ``count``, in the order first seen, at most ``MAX_LISTED_ERRORS`` entries."""
     # Blocks are visited out of document order (a block's own text can follow a nested
-    # block), so each message is placed by the position of its first text node.
-    order = {
-        id(node): index
-        for index, node in enumerate(soup.descendants)
-        if isinstance(node, NavigableString)
-    }
-    removed: list[tuple[int, int, ServerError]] = []
-    for block, pieces in _blocks(soup):
+    # block), so each message is placed by the position of its first text node. The same
+    # walk finds the tables, for Xdebug's.
+    order: dict[int, int] = {}
+    tables: list[Tag] = []
+    for index, node in enumerate(soup.descendants):
+        if isinstance(node, NavigableString):
+            order[id(node)] = index
+        elif isinstance(node, Tag) and node.name == "table":
+            tables.append(node)
+    removed = _strip_xdebug(tables, order)
+    for block, pieces, flags in _blocks(soup):
         texts = [str(piece) if isinstance(piece, NavigableString) else "\n" for piece in pieces]
-        found = _messages("".join(texts))
+        quoted = _QUOTED in flags or (_QUOTED | _IN_BOLD) in flags
+        found = _messages("".join(texts), _accepting(texts, flags) if quoted else None)
         if not found:
             continue
         starts = _starts(texts)
@@ -97,6 +120,59 @@ def strip_server_errors(soup: BeautifulSoup) -> list[ServerError]:
     return list(merged.values())[:MAX_LISTED_ERRORS]
 
 
+def _strip_xdebug(tables: list[Tag], order: dict[int, int]) -> list[tuple[int, int, ServerError]]:
+    """Remove each Xdebug message table (``table.xdebug-error``) of ``tables``, and return its
+    message with the position of its first text node. A table whose first ``th`` reads no
+    message stays."""
+    removed: list[tuple[int, int, ServerError]] = []
+    for table in tables:
+        if table.decomposed or "xdebug-error" not in table.get_attribute_list("class"):
+            continue
+        head = table.find("th")
+        if not isinstance(head, Tag):
+            continue
+        text = " ".join(head.get_text().split())
+        mark = _XDEBUG_MARK.match(text)
+        found = _messages(text[mark.end() :]) if mark else []
+        if not found or found[0].start:
+            continue
+        first = table.find(string=True)
+        removed.append((order.get(id(first), 0), 0, found[0].error))
+        table.decompose()
+    return removed
+
+
+def _accepting(texts: list[str], flags: list[int]) -> _Accept:
+    """Outside a quoting context every candidate counts; inside one only the ``html_errors``
+    form, whose label and path are each the whole text of a bold piece. The pieces' starts are
+    found on the first candidate, and a piece's bounds are read once, however many candidates
+    it holds."""
+    bounds: dict[int, tuple[int, int]] = {}
+    starts: list[int] = []
+
+    def alone(begin: int, end: int) -> int | None:
+        """The bold piece whose whole text, without its blanks, is ``[begin, end)``."""
+        index = bisect_right(starts, begin) - 1
+        if not flags[index] & _IN_BOLD:
+            return None
+        if index not in bounds:
+            piece = texts[index]
+            stripped = piece.strip()
+            lead = starts[index] + len(piece) - len(piece.lstrip())
+            bounds[index] = (lead, lead + len(stripped))
+        return index if bounds[index] == (begin, end) else None
+
+    def accept(label: int, label_end: int, path: int, path_end: int) -> bool:
+        if not starts:
+            starts.extend(_starts(texts))
+        if not flags[bisect_right(starts, label) - 1] & _QUOTED:
+            return True
+        label_piece, path_piece = alone(label, label_end), alone(path, path_end)
+        return label_piece is not None and path_piece is not None and label_piece != path_piece
+
+    return accept
+
+
 def _starts(texts: list[str]) -> list[int]:
     """Where each piece's text starts in the block's text."""
     starts: list[int] = []
@@ -107,18 +183,26 @@ def _starts(texts: list[str]) -> list[int]:
     return starts
 
 
-def _blocks(soup: BeautifulSoup) -> Iterator[tuple[Tag, list[_Piece]]]:
-    """Each block with its pieces. A block's pieces are complete before the caller changes
-    them; the blocks nested in it come later and are not touched by that change."""
-    pending: list[Tag] = [soup]
+def _blocks(soup: BeautifulSoup) -> Iterator[tuple[Tag, list[_Piece], list[int]]]:
+    """Each block with its pieces and their flags (``_QUOTED``, ``_IN_BOLD``). A block's pieces
+    are complete before the caller changes them; the blocks nested in it come later and are
+    not touched by that change."""
+    pending: list[tuple[Tag, int]] = [(soup, 0)]
     while pending:
-        block = pending.pop()
+        block, quoted = pending.pop()
+        if block.name in _QUOTING:
+            quoted = _QUOTED
         pieces: list[_Piece] = []
+        flags: list[int] = []
         stack = [iter(list(block.children))]
+        flag_stack = [quoted]
+        flag = quoted
         while stack:
             node = next(stack[-1], None)
             if node is None:
                 stack.pop()
+                flag_stack.pop()
+                flag = flag_stack[-1] if flag_stack else 0
             elif isinstance(node, Tag):
                 if node.name == "br":
                     pieces.append(node)
@@ -126,16 +210,25 @@ def _blocks(soup: BeautifulSoup) -> Iterator[tuple[Tag, list[_Piece]]]:
                     pieces.append(None)
                 elif node.name in BLOCK_TAGS:
                     pieces.append(None)
-                    pending.append(node)
+                    pending.append((node, flag & _QUOTED))
                 else:  # inline: its text flows with the block's
+                    if node.name in _QUOTING:
+                        flag |= _QUOTED
+                    if node.name in _BOLD:
+                        flag |= _IN_BOLD
                     stack.append(iter(list(node.children)))
+                    flag_stack.append(flag)
+                    continue
+                flags.append(flag)
             elif type(node) is NavigableString:  # comments and the like carry no text
                 pieces.append(node)
-        yield block, pieces
+                flags.append(flag)
+        yield block, pieces, flags
 
 
-def _messages(text: str) -> list[_Found]:
-    """Each PHP error message in ``text``, in order and without overlap."""
+def _messages(text: str, accept: _Accept | None = None) -> list[_Found]:
+    """Each PHP error message in ``text`` that ``accept`` (by default every one) takes, in
+    order and without overlap."""
     lines = list(_ON_LINE.finditer(text))
     line_starts = [line.start() for line in lines]
     newlines = [match.start() for match in _NEWLINE.finditer(text)]
@@ -163,6 +256,8 @@ def _messages(text: str) -> list[_Found]:
         if candidate < 0 or paths[candidate] < earliest:
             continue
         k = paths[candidate]
+        if accept and not accept(start, label.end("label"), k + _IN, path_end):
+            continue
         error = ServerError(
             level=label.group("level"),
             message=" ".join(text[message:k].split())[:MAX_MESSAGE_CHARS],

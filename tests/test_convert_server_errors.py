@@ -1,8 +1,10 @@
 from collections.abc import Callable
 
+import pytest
 from bs4 import BeautifulSoup
 
 from tests.scaling import GROWTH_LIMIT, growth
+from text_extraction.convert import convert_html
 from text_extraction.convert.server_errors import (
     MAX_LISTED_ERRORS,
     MAX_MESSAGE_CHARS,
@@ -287,3 +289,225 @@ def test_many_html_messages_in_one_block_take_linear_time() -> None:
     assert " ".join(soup.get_text().split()) == "start end"
     # The quadratic version (bs4 removing one node at a time) grew about 16-fold.
     assert growth(_stripping(page), 1_000) < GROWTH_LIMIT
+
+
+# A message a reader quotes: plain text, as copied from the browser (ruling AU3-R4).
+QUOTED = (
+    "Warning: Cannot modify header information - headers already sent by (output started at "
+    "/var/www/html/config.php:12) in /var/www/html/index.php on line 5"
+)
+HTML_ERRORS = (
+    "<br />\n<b>Warning</b>:  foreach() argument must be of type array in "
+    "<b>/var/www/a.php</b> on line <b>12</b><br />"
+)
+FOREACH = ServerError("Warning", "foreach() argument must be of type array", "/var/www/a.php", 12)
+ARTICLE_TEXT = "<p>" + "The lesson is about birds and the forest they live in. " * 6 + "</p>"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"<blockquote>{QUOTED}</blockquote>",
+        f"<blockquote><p>{QUOTED}</p></blockquote>",
+        f"<p>He wrote: <q>{QUOTED}</q></p>",
+        f"<div>The log said<br><cite>{QUOTED}</cite></div>",
+        f"<h2>{QUOTED}</h2>",
+        f"<ul><li>{QUOTED}</li></ul>",
+        f"<table><tr><td>{QUOTED}</td></tr></table>",
+        f"<table><tr><th>{QUOTED}</th></tr></table>",
+        f"<dl><dt>Message</dt><dd>{QUOTED}</dd></dl>",
+        f"<figure><img src='a.png'><figcaption>{QUOTED}</figcaption></figure>",
+        "<blockquote><p><strong>Notice</strong>: Undefined index: x in /var/www/a.php on line 7"
+        "</p></blockquote>",
+    ],
+)
+def test_keeps_a_plain_message_in_a_quoting_context(body: str) -> None:
+    soup = _soup(body)
+    text = soup.get_text()
+
+    assert strip_server_errors(soup) == []
+    assert soup.get_text() == text
+
+
+def test_keeps_a_message_a_forum_post_quotes() -> None:
+    soup = _soup(
+        "<div class='post'><p>Hallo zusammen,<br>nach dem Update sehe ich auf meiner Seite:</p>"
+        f"<blockquote>{QUOTED}</blockquote><p>Was kann ich tun?</p></div>"
+    )
+
+    assert strip_server_errors(soup) == []
+    assert QUOTED in soup.get_text()
+
+
+def test_removes_a_plain_message_in_a_bare_paragraph_after_a_break() -> None:
+    # Known limit (ruling AU3-R4): outside a quoting context the plain form counts, as real
+    # PHP output often lands in a <p> or <div> a theme opened, so a forum post that pastes
+    # the message on a line of its own in a bare <p> loses it.
+    soup = _soup(f"<p>Hallo,<br>nach dem Update sehe ich:<br>{QUOTED}<br>Was tun?</p>")
+
+    assert [error.file for error in strip_server_errors(soup)] == ["/var/www/html/index.php"]
+    assert "index.php" not in soup.get_text()
+    assert "Was tun?" in soup.get_text()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"{QUOTED}<p>kept</p>",
+        f"<div>{QUOTED}</div><p>kept</p>",
+        f"<p>{QUOTED}</p><p>kept</p>",
+        f"{HTML_ERRORS}<p>kept</p>",
+        f"<div>{HTML_ERRORS}</div><p>kept</p>",
+        f"<p>{HTML_ERRORS}</p><p>kept</p>",
+    ],
+)
+def test_removes_real_php_output_outside_quoting_contexts(body: str) -> None:
+    soup = _soup(body)
+
+    (error,) = strip_server_errors(soup)
+
+    assert error.level == "Warning"
+    assert soup.get_text().strip() == "kept"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"<ul><li>{HTML_ERRORS}</li><li>kept</li></ul>",
+        f"<table><tr><td>{HTML_ERRORS}</td><td>kept</td></tr></table>",
+        f"<blockquote>{HTML_ERRORS}kept</blockquote>",
+        "<ul><li><strong>Warning</strong>:  foreach() argument must be of type array in "
+        "<strong>/var/www/a.php</strong> on line <strong>12</strong></li><li>kept</li></ul>",
+    ],
+)
+def test_removes_the_html_errors_form_even_in_a_quoting_context(body: str) -> None:
+    soup = _soup(body)
+
+    assert strip_server_errors(soup) == [FOREACH]
+    assert soup.get_text().strip() == "kept"
+
+
+def test_keeps_a_whole_bold_quote_in_a_quoting_context() -> None:
+    # Only a bold label and a bold path of their own make the html_errors form.
+    soup = _soup(f"<ul><li><b>{QUOTED}</b></li></ul>")
+
+    assert strip_server_errors(soup) == []
+
+
+@pytest.mark.parametrize("extension", [".module", ".theme", ".install", ".engine"])
+def test_recognises_drupal_paths(extension: str) -> None:
+    path = f"/var/www/sites/all/modules/views/views{extension}"
+    soup = _soup(
+        "<br />\n<b>Warning</b>: Invalid argument supplied for foreach() in "
+        f"<b>{path}</b> on line <b>12</b><br /><p>kept</p>"
+    )
+
+    assert strip_server_errors(soup) == [
+        ServerError("Warning", "Invalid argument supplied for foreach()", path, 12)
+    ]
+    assert soup.get_text().strip() == "kept"
+
+
+XDEBUG = (
+    "<br />\n<font size='1'><table class='xdebug-error xe-warning' dir='ltr' border='1' "
+    "cellspacing='0' cellpadding='1'>\n<tr><th align='left' bgcolor='#f57900' colspan=\"5\">"
+    "<span style='background-color: #cc0000; color: #fce94f; font-size: x-large;'>( ! )</span>"
+    " Warning: Undefined variable $x in /var/www/a.php on line <i>3</i></th></tr>\n"
+    "<tr><th align='left' bgcolor='#e9b96e' colspan='5'>Call Stack</th></tr>\n"
+    "<tr><th align='center' bgcolor='#eeeeec'>#</th><th align='left' bgcolor='#eeeeec'>Time"
+    "</th><th align='left' bgcolor='#eeeeec'>Memory</th><th align='left' bgcolor='#eeeeec'>"
+    "Function</th><th align='left' bgcolor='#eeeeec'>Location</th></tr>\n"
+    "<tr><td bgcolor='#eeeeec' align='center'>1</td><td bgcolor='#eeeeec' align='center'>"
+    "0.0001</td><td bgcolor='#eeeeec' align='right'>393936</td><td bgcolor='#eeeeec'>{main}( )"
+    "</td><td title='/var/www/a.php' bgcolor='#eeeeec'>.../a.php<b>:</b>0</td></tr>\n"
+    "</table></font>\n"
+)
+
+
+def test_removes_an_xdebug_table() -> None:
+    soup = _soup(f"<p>before</p>{XDEBUG}<p>after</p>")
+
+    assert strip_server_errors(soup) == [
+        ServerError("Warning", "Undefined variable $x", "/var/www/a.php", 3)
+    ]
+    assert soup.find("table") is None
+    assert " ".join(soup.get_text().split()) == "before after"
+
+
+def test_xdebug_tables_are_merged_and_listed_in_document_order() -> None:
+    soup = _soup(
+        f"<div>Notice: first in /a.php on line 1</div>{XDEBUG}{XDEBUG}"
+        "<div>Notice: last in /a.php on line 2</div>"
+    )
+
+    assert [(error.message, error.count) for error in strip_server_errors(soup)] == [
+        ("first", 1),
+        ("Undefined variable $x", 2),
+        ("last", 1),
+    ]
+
+
+def test_keeps_a_table_that_only_has_the_class() -> None:
+    soup = _soup("<table class='xdebug-error'><tr><th>( ! ) Results</th></tr></table>")
+
+    assert strip_server_errors(soup) == []
+    assert soup.find("table") is not None
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        f"<blockquote>{QUOTED}</blockquote>",
+        f"<p>Hallo zusammen,<br>nach dem Update sehe ich auf meiner Seite:</p>"
+        f"<blockquote>{QUOTED}</blockquote><p>Was kann ich tun?</p>",
+    ],
+)
+def test_a_quoted_message_stays_in_the_converted_text(quote: str) -> None:
+    page = (
+        "<html><body><article><h1>PHP header errors</h1>"
+        f"{ARTICLE_TEXT}{quote}{ARTICLE_TEXT}</article></body></html>"
+    )
+
+    result = convert_html(page, "https://blog.example.org/php/header-fehler", "markdown")
+
+    assert "headers already sent" in result.content
+    assert "/var/www/html/index.php on line 5" in result.content
+    assert result.server_errors == []
+    assert SERVER_ERRORS_REMOVED_WARNING not in result.warnings
+
+
+def test_a_drupal_message_leaves_no_glued_markdown() -> None:
+    page = (
+        "<html><body><article><h1>Lesson</h1>"
+        f"{ARTICLE_TEXT}<br />\n<b>Warning</b>: Invalid argument supplied for foreach() in "
+        "<b>/var/www/sites/all/modules/views/views.module</b> on line <b>12</b><br />"
+        f"{ARTICLE_TEXT}</article></body></html>"
+    )
+
+    result = convert_html(page, "https://example.org/lesson", "markdown")
+
+    assert "**on line" not in result.content
+    assert "views.module" not in result.content
+    assert [error.file for error in result.server_errors] == [
+        "/var/www/sites/all/modules/views/views.module"
+    ]
+
+
+def test_linear_on_many_quoted_labels_in_one_bold_text() -> None:
+    # Each candidate in a quoting context reads its piece's bounds once, not per candidate.
+    def page(size: int) -> str:
+        return (
+            "<ul><li><b>"
+            + " " * size * 40
+            + "\nWarning: a in /a.php on line 1" * size
+            + "</b></li></ul>"
+        )
+
+    assert growth(_stripping(page), 2_000) < GROWTH_LIMIT
+
+
+def test_many_xdebug_tables_take_linear_time() -> None:
+    def page(size: int) -> str:
+        return "<div>" + XDEBUG * size + "</div>"
+
+    assert growth(_stripping(page), 200) < GROWTH_LIMIT

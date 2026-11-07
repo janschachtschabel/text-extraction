@@ -42,6 +42,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Fixed
 
+- PHP error removal keeps a message that the page quotes: in a quote, a heading, a list item, a
+  table cell, a definition list or a figure caption only the `html_errors` form (bold label and
+  bold path) is removed, and a message copied as plain text stays in `content`. It now also
+  recognises Drupal paths (`.module`, `.theme`, `.install`, `.engine`) and removes Xdebug's
+  message tables, each listed once in `data.server_errors`.
 - Rolling upgrades from 0.1.5: a site job with the default `discovery: crawl` no longer stores
   `discovery`, so pods of 0.1.5 read it; only `discovery: sitemap_first` needs every pod on the new
   release. Results read a page type, a link category or a `crawl` value of a later release as

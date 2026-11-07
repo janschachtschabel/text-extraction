@@ -103,6 +103,15 @@ removed message the conversion adds the warning `server_errors_removed` and list
 spans several lines stays in the text: PHP 8 writes an uncaught exception ("Fatal error: Uncaught
 …") with its stack trace, and that is not removed.
 
+A message that a page quotes stays as well: in a quote (`blockquote`, `q`, `cite`), a heading, a
+list item, a table cell, a definition list or a figure caption only the form with a bold label and
+a bold path is removed (`<b>Warning</b>: … in <b>/var/www/page.php</b> on line <b>12</b>`), as
+PHP writes it with `html_errors` on. A message copied as plain text stays there. Outside those
+places the plain form is removed too, so a forum post that pastes a message on a line of its own in
+an ordinary paragraph loses it; in a quote it stays. Besides `.php` files the conversion
+recognises `.inc`, `.phtml` and Drupal's `.module`, `.theme`, `.install` and `.engine`. A table
+that Xdebug prints for a message (it starts with "( ! )") is removed as a whole and listed once.
+
 A licence has an `id` (such as `CC-BY-SA-4.0`), a `url`, a `label`, its `source` (a `rel-license`
 link, JSON-LD, microdata, RDFa, a meta tag or the page text) and a `confidence`. `mode_used`
 says whether HTTP or the browser produced the answer, and `upstream_status` is the page's HTTP

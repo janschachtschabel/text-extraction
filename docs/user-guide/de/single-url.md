@@ -108,6 +108,17 @@ sie in einem zugeklappten Abschnitt nach „Bilder“. Eine Meldung, die über m
 bleibt im Text: PHP 8 schreibt eine nicht abgefangene Ausnahme („Fatal error: Uncaught …“) mit
 ihrem Stacktrace, und die wird nicht entfernt.
 
+Eine Meldung, die eine Seite zitiert, bleibt ebenfalls stehen: In einem Zitat (`blockquote`, `q`,
+`cite`), einer Überschrift, einem Listeneintrag, einer Tabellenzelle, einer Definitionsliste oder
+einer Bildunterschrift wird nur die Form mit fettem Label und fettem Pfad entfernt
+(`<b>Warning</b>: … in <b>/var/www/page.php</b> on line <b>12</b>`), wie PHP sie mit
+`html_errors` schreibt. Eine als reiner Text kopierte Meldung bleibt dort stehen. Außerhalb dieser
+Stellen wird auch die reine Textform entfernt; ein Forenbeitrag, der eine Meldung in einem
+gewöhnlichen Absatz in eine eigene Zeile einfügt, verliert sie also, in einem Zitat bleibt sie
+stehen. Neben `.php`-Dateien erkennt die Umwandlung `.inc`, `.phtml` und Drupals `.module`,
+`.theme`, `.install` und `.engine`. Eine Tabelle, die Xdebug für eine Meldung ausgibt (sie beginnt
+mit „( ! )“), wird als Ganzes entfernt und einmal aufgeführt.
+
 Eine Lizenz hat eine `id` (etwa `CC-BY-SA-4.0`), eine `url`, ein `label`, ihre `source` (ein Link
 `rel-license`, JSON-LD, Microdata, RDFa, ein Meta-Tag oder der Text der Seite) und eine
 `confidence`. `mode_used` sagt, ob HTTP oder der Browser die Antwort erzeugt hat, und
