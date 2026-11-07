@@ -47,7 +47,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `OUTBOUND_MAX_CONNECTIONS` | `200` | Open outbound connections of one pod at most, over all hosts (the fetcher's connection pool). Minimum 1. |
 | `OUTBOUND_MAX_KEEPALIVE` | `50` | Idle outbound connections a pod keeps for reuse; an idle connection is closed after 30 s. Minimum 0. |
 | `COMPLIANCE_DEFAULT` | `enforce` | Compliance mode when a request does not choose one: `enforce` blocks what robots.txt, TDMRep, ai.txt or `noai` forbid; `report` only reports it; `ignore` skips the checks. |
-| `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. |
+| `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. The playground offers non-admin keys `enforce` and `report` only while it is on. With the default `true` any user key may choose `report` per request and per run, so robots.txt and TDM opt-outs are then only reported; operators of a public service set it to `false`. |
 | `COMPLIANCE_CACHE_SECONDS` | `3600` | How long robots.txt, `tdmrep.json` and ai.txt of an origin are cached in Valkey. 0 switches the cache off. A file that could not be fetched (5xx, 429, network error) is cached at most 300 s, so a short outage does not block a site for the whole period. Minimum 0. |
 | `QUALITY_MIN_WORDS` | `50` | Fewest words (tokens with a letter or digit) the extracted content must have. Fewer ends as `partial` with `content_too_short`; no words at all is `failed` with `empty_content`. 0 switches the length check off. Minimum 0. A media transcript (subtitles, transcript view, transcription) needs one word only: it is all the media says. |
 | `RESULT_CACHE_TTL_SECONDS` | `3600` | How long a stored extraction result counts as fresh and is served without asking the site, measured from the time it was produced. 0 means a stored result is never served unchecked; it can still be revalidated. A fresh hit skips the compliance checks too: it carries the compliance report of the extraction that produced it, so a new robots.txt or TDM opt-out reaches cached results only after up to `RESULT_CACHE_TTL_SECONDS` plus `COMPLIANCE_CACHE_SECONDS`. Setting this above `COMPLIANCE_CACHE_SECONDS` lengthens that lag. Minimum 0. |
@@ -802,7 +802,10 @@ give is refused ("<key> is given twice."), as is invalid JSON, and nothing is se
 LRMI names: `name`, `headline`, `description`, `author`, `datePublished`, `dateModified`,
 `license`, `inLanguage`, `keywords`, `publisher`, `educationalLevel`, `learningResourceType`,
 `isAccessibleForFree`) and "Describe images" (`describe_images.max_images`, 5 by default; the
-REST answers apply, such as 400 without the LLM).
+REST answers apply, such as 400 without the LLM). The forms that fetch from a site have the "Site
+rules" step (`compliance`): an admin key gets "Respect the site's rules", "Check and report only"
+and "Checks off (contract partners)", a user key the first two while `COMPLIANCE_ALLOW_OVERRIDE`
+is on (and `ignore` only when it is `COMPLIANCE_DEFAULT`), else only the default.
 
 Every answer is shown with its HTTP status, the envelope's status and error (with the `details`
 of a 422), the raw JSON and the request as a curl command, with `$API_KEY`, `$LLM_API_KEY` and
@@ -865,8 +868,9 @@ progress:
   and "Start batch". Values such as `=HYPERLINK(...)` or `@cmd` are no URLs and are only
   reported; the UI writes no CSV. Log line `ui_batch_file` (`rows`, `urls`, `invalid`,
   `duplicates`).
-- **Site structure**: `POST /v1/site-structure` with the start URL, depth, most pages, scope and
-  sitemaps.
+- **Site structure**: `POST /v1/site-structure` with the start URL, depth, most pages, scope,
+  sitemaps and "How to read the site" (`discovery`; preset `sitemap_first`, which needs the
+  sitemaps).
 - **Progress** (`/ui/run/progress`): each job's kind and state, a progress bar with done/total
   and the success, partial and failed counts (a site job's total grows while it crawls), the
   elapsed time and a page of 20 items with previous and next buttons. An item shows "queued",
@@ -886,12 +890,24 @@ progress:
   time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
   leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
   is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages
-  (title, link depth, status), the sitemaps' entries (`lastmod`) and links not followed for depth
-  or the page limit ("linked only"), by the crawl's seen key; pages come first. It shows at most
+  (title, link depth, status), the sitemaps' entries (`lastmod`) and links not followed for
+  depth, the page limit, the site's rules (`blocked`) or `sitemap_first` ("linked only"), by the
+  crawl's seen key; pages come first. It shows at most
   `UI_TREE_MAX_URLS` URLs and counts the rest ("<n> more URLs not shown (UI_TREE_MAX_URLS)").
   Checking a section checks its subtree, a section shows a mixed state while part of it is
   checked, and a counter shows the selection; "Extract selected" starts batches of the checked
-  URLs as the Batch tab does.
+  URLs as the Batch tab does. Every shown URL is judged against the current robots.txt,
+  tdmrep.json and ai.txt of its origin (the badges "robots.txt" and "TDM"; under "Respect the
+  site's rules" a blocked URL cannot be checked). One view reads the rule files of at most 20
+  origins within 12 s, the origins the job contacted first (those of its pages, robots.txt and
+  sitemaps, fetched or queued, and of their final URLs); only those are loaded, in their host's
+  outbound turn, and any other origin is read from the compliance cache alone and shown as not
+  checked when it is not cached. The tree judges with the first 1,000 rules per user agent of a
+  file (best effort for larger files; the batch's own check reads the whole file and decides),
+  for at most 1 s per view on a one-thread pool of the UI's own (never the conversion pool).
+  While the job runs, the tree reloads itself every 4 s × (items / 500, at least 1); each reload
+  counts like a fresh view (one hit per 500 items) and reuses the rules and the judgements of the
+  reloads before for 30 s, so it judges only the URLs that are new.
 
 Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/file`,
 `/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,

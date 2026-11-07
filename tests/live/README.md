@@ -136,7 +136,7 @@ sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
 sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at
-`/sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no
+`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no
 page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and
 `crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and
 one by `crawl` decision; and the warnings and error codes of the items. A request the service
@@ -153,6 +153,7 @@ request, then reports the refusal. The exit code is always 0: the run is a repor
 | `--urls` | `urls/sites.csv` | CSV with a `url` column: the start pages. |
 | `--depth` | 1 | The request's `depth`. |
 | `--max-pages` | 25 | The request's `max_pages`. |
+| `--discovery` | `crawl` | The request's `discovery`: `crawl` follows links, `sitemap_first` reads only the start page when the site has a sitemap; sent only when not `crawl`. |
 | `--compliance` | `enforce` | The request's `compliance`. A crawler follows links, so it respects robots.txt and TDM opt-outs (CLAUDE.md rule 6, decision D4): what they exclude is not fetched and its link says `blocked`, counted in the crawl histogram. `report` fetches it anyway; use it only against a site you run. |
 | `--timeout` | 60 | Deadline of one HTTP request in seconds. |
 | `--job-timeout` | 1800 | Seconds to wait for a site's job to complete. |

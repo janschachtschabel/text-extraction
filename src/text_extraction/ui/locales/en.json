@@ -325,7 +325,7 @@
   "warning.chunks_truncated": "More chunks than CHUNK_MAX_CHUNKS: the first ones.",
   "warning.chunking_fallback_recursive": "The chunking strategy could not run: recursive was used.",
   "warning.image_not_described": "An image was skipped or not described: its description is empty.",
-  "warning.sitemap_not_found": "A guessed /sitemap.xml does not exist.",
+  "warning.sitemap_not_found": "No sitemap at a guessed address.",
   "warning.sitemap_truncated": "The sitemap file was over its size limit: the entries before the cut.",
   "warning.sitemap_urls_truncated": "The crawl reached SITE_MAX_SITEMAP_URLS: the first entries.",
   "warning.sitemap_files_truncated": "More sitemap files than SITE_MAX_SITEMAP_FILES: the first ones.",

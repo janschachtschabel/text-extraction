@@ -13,7 +13,7 @@ Open the **Extract** tab, enter the URL and press "Extract".
 - "Format": Markdown or text.
 - "Browser fallback": when the page needs it (the default), never or always; see
   [Browser fallback](usage.md#browser-fallback).
-- "Site rules" (admins only): see [Site rules](site-rules.md).
+- "Site rules": respect the rules, check and report only, or checks off, by role; see [Site rules](site-rules.md#in-the-playground).
 - "Metadata" (on by default), "Metadata, structured" (the schema.org and LRMI fields, read by
   name) and "Describe images".
 - "Also take a screenshot": the whole page as a PNG, taken in the browser, so the request takes

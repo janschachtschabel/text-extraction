@@ -61,10 +61,10 @@ Prüfungen von `compliance`; die Einträge behalten Titel, Status, Metadaten und
 keinen Text (`content: null`). Der Crawl bleibt auf dem Host der Startseite (ein führendes `www.`
 zählt nicht); `scope: "path"` hält ihn unter dem Verzeichnis der Start-URL, `sitemaps: false`
 lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Mit
-`discovery: "sitemap_first"` liest der Crawl nur die Startseite, wenn robots.txt eine Sitemap nennt
-oder eine der drei Adressen eine liefert, und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap
+`discovery: "sitemap_first"` liest der Crawl nur die Startseite, wenn eine Sitemap, die robots.txt
+nennt, als Sitemap antwortet oder eine der drei Adressen eine liefert, und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap
 folgt er den Links wie sonst. `discovery: "sitemap_first"` mit `sitemaps: false` ergibt 422. Die
-Weboberfläche bietet das als „Schnell: Sitemap zuerst“ (Voreinstellung; „robots.txt und Sitemaps“
+Spielwiese bietet das als „Schnell: Sitemap zuerst“ (Voreinstellung; „robots.txt und Sitemaps“
 muss angehakt sein) neben „Gründlich: Links folgen“ an; der API-Standard ist `discovery: "crawl"`. Ein Crawl wird
 zusammen mit Ihren Batches auf `BATCH_MAX_OPEN_PER_CLIENT` angerechnet.
 
@@ -224,7 +224,7 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme; der Baum erscheint auch von
    selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange er läuft. Jede URL zeigt
    ihren Seitentyp, und die Zeile „Typen:“ über dem Baum zählt sie; mit JavaScript ersetzen
-   Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
+   Filter-Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
    JavaScript bleibt die Zeile stehen). „Alle auswählen“ markiert jede angezeigte URL (unter einem
    Typfilter nur die angezeigten) und „Inhaltsseiten auswählen“ jede angezeigte URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,

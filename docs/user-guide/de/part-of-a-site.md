@@ -71,7 +71,10 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
 
 - **Website-Struktur**: Geben Sie die Start-URL ein, setzen Sie „Bereich“ auf „path: nur
   unterhalb des Verzeichnisses der Start-URL“, dazu „Linktiefe“ und „Maximale Seitenzahl“,
-  entfernen Sie das Häkchen bei „robots.txt und Sitemaps“ für `"sitemaps": false`, und klicken
+  wählen Sie bei „So wird die Website gelesen“ „Gründlich: Links folgen“ (die Voreinstellung
+  „Schnell: Sitemap zuerst“ liest nur die Startseite, wenn die Website eine Sitemap hat, und eine
+  Sitemap listet die ganze Website; ohne Häkchen bei „robots.txt und Sitemaps“ wird es von selbst
+  gewählt), entfernen Sie das Häkchen bei „robots.txt und Sitemaps“ für `"sitemaps": false`, und klicken
   Sie auf „Website-Struktur lesen“. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“
   seine Seiten nach Host und Pfad, jede als gecrawlt, Sitemap oder nur verlinkt markiert;
   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. Markieren Sie die Seiten,
@@ -87,9 +90,9 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   aber von einer gecrawlten Seite verlinkt ist, zeigt den Linktext in Anführungszeichen (ein
   Sitemap-Eintrag hat keinen eigenen Titel). Eine Zusammenfassung über dem Baum zählt die
   URLs (gecrawlt, aus der Sitemap, nur verlinkt) und bei einem beendeten Crawl, wie lange er
-  dauerte; die Schaltflächen unter „Nach Typ filtern“ zeigen nur die URLs eines Typs („Alle“
-  zeigt jede URL; mehrere Schaltflächen zeigen die Vereinigung). Mit JavaScript ersetzen die
-  Schaltflächen, jede mit ihrer Anzahl, die Zeile „Typen:“; ohne JavaScript bleibt die Zeile
+  dauerte; die Filter-Schaltflächen unter „Nach Typ filtern“ zeigen nur die URLs eines Typs („Alle“
+  zeigt jede URL; mehrere Filter-Schaltflächen zeigen die Vereinigung). Mit JavaScript ersetzen die
+  Filter-Schaltflächen, jede mit ihrer Anzahl, die Zeile „Typen:“; ohne JavaScript bleibt die Zeile
   stehen, und nichts filtert. Solange ein Typ gefiltert ist, wirken „Alle auswählen“,
   „Inhaltsseiten auswählen“ und das Häkchen eines Abschnitts nur auf die angezeigten URLs, und
   „Keine auswählen“ entfernt jedes Häkchen, auch die verborgenen.
@@ -104,7 +107,7 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   Jede URL des Baums zeigt ihren Seitentyp, etwa „Inhalt“, „Übersicht“, „Veranstaltung“,
   „Lernmaterial“ oder „Impressum“ (siehe
   [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien)),
-  und die Zeile „Typen:“ über dem Baum (mit JavaScript die Schaltflächen) zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
+  und die Zeile „Typen:“ über dem Baum (mit JavaScript die Filter-Schaltflächen) zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
   eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Jede andere URL wurde nicht
   gelesen; deshalb wird ihr Typ geschätzt und als „geschätzt“ markiert, mit dem Grund: „aus der
   URL“ (die URL-Regeln, unter anderem Autorenseiten (`author`, `autor`: „Übersicht“), weitere
@@ -124,7 +127,7 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   keine Regel schätzen kann (eine Zahl, eine Hex-Zeichenfolge oder eine UUID als letzter Teil,
   ein letzter Teil ohne Wort aus drei Buchstaben oder eine Abfrage, die kein Sprach- oder
   Tracking-Parameter ist), zeigt das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen; der Typ zeigt sich beim Extrahieren“
-  (als Tooltip und für Screenreader), und die Zeile „Typen:“ und die Schaltflächen zählen „Typ offen“ mit.
+  (als Tooltip und für Screenreader), und die Zeile „Typen:“ und die Filter-Schaltflächen zählen „Typ offen“ mit.
   „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
   Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite
   das Häkchen; eine URL ohne Typ wird markiert, außer ihre Seite ist gescheitert.
@@ -134,8 +137,13 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   Vorbehalt in tdmrep.json, ein Verbot in ai.txt oder eine noai-Angabe). Der Grund steht als
   Tooltip am Kennzeichen und wird von Screenreadern vorgelesen. Jede angezeigte URL wird beim
   Anzeigen des Baums gegen die aktuellen Dateien robots.txt, tdmrep.json und ai.txt der Website
-  beurteilt (aus dem Cache oder einmal pro Website geladen, innerhalb der Grenzen pro Host;
-  höchstens 20 Websites und 12 s); die Markierungen zeigen also die Regeln zu diesem Zeitpunkt.
+  beurteilt; die Markierungen zeigen also die Regeln zu diesem Zeitpunkt. Geladen werden die
+  Regeldateien (innerhalb der Grenzen pro Host; höchstens 20 Websites und 12 s) nur für die
+  Websites, die der Crawl kontaktiert hat: die Start-Website, Websites, zu denen er
+  weitergeleitet wurde, die Hosts von robots.txt und Sitemaps und die Seiten, die er eingereiht
+  hat. Jede andere Website wird nur aus dem Cache gelesen und, wenn sie dort fehlt, als nicht
+  geprüft aufgeführt. Eine sehr große Regeldatei (über 1.000 Regeln) wird nach ihren ersten
+  1.000 Regeln beurteilt, so gut es geht; die Prüfung des Batches entscheidet trotzdem.
   Links, die der Crawl wegen der Regeln nicht verfolgt hat, erscheinen als Blätter „nur
   verlinkt“. Eine Zeile über dem Baum zählt die gesperrten URLs, eine weitere nennt Websites,
   deren Regeln nicht gelesen werden konnten. Unter „Regeln der Website einhalten“ lassen sich
@@ -168,7 +176,7 @@ sich alle 3 s, bis er abgeschlossen ist.
 
 ## Mit MCP
 
-`site_structure` nimmt `url`, `depth`, `max_pages` und `scope`; `batch_extract` nimmt `urls`,
+`site_structure` nimmt `url`, `depth`, `max_pages`, `scope` und `discovery`; `batch_extract` nimmt `urls`,
 `format` und `mode`. Beide antworten mit einem Job: Rufen Sie `get_job` mit seiner `job_id` auf,
 bis er abgeschlossen ist, und blättern Sie mit `offset` und `limit` durch seine Einträge.
 

@@ -21,6 +21,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `PII_ENABLED` and `LLM_ENABLED` are `true` in compose and `.env.example`. Each switch at `false`,
   with `--scale` of the feature's services to 0, switches a feature off. The LLM still needs a key
   (`LLM_API_KEY` or the caller's `X-LLM-Api-Key`). The Helm chart is unchanged.
+- uv is pinned to the Dockerfile's minor (`[tool.uv] required-version = ">=0.11,<0.12"`), and
+  Dependabot ignores `uv-build` until uv and uv_build are raised together.
+- A test checks that every `.env.example` and Helm `config:` value equals its `Settings` default,
+  apart from a documented allow-list.
+- Dependencies: fastmcp 4.1.3, openai 3.37.0, patchright 1.64.2, reportlab 5.1.0 (#47); GitHub
+  Action astral-sh/setup-uv 10.3.2 (#46).
 
 ### Added
 
@@ -39,9 +45,15 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by
   default; a feature the service has switched off is disabled with a hint naming its switch, and
   the LLM choices say when the caller's LLM key is needed.
+- Helm: optional PodDisruptionBudgets (`podDisruptionBudget.enabled`, `maxUnavailable: 1`) for the
+  API and every worker pool with more than one replica; on in the production example.
 
 ### Fixed
 
+- ASR off no longer breaks the worker: with `ASR_ENABLED=false`,
+  `text-extraction-asr-worker --download-models` and `--check` exit 0 without a model (log event
+  `asr_disabled`), and the worker idles on `/health` and `/ready` without loading a model or
+  taking queue items; in docker compose the ASR services then idle.
 - The site tree's rule checks are bounded: rule files are loaded only for the sites the crawl
   itself visited (a site that a sitemap or a link merely names is read from the cache, else shown
   as not checked), the tree judges with the first 1,000 rules of each robots.txt and ai.txt user
@@ -93,7 +105,7 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 Package 18: the site tree after the v0.1.5 test (plan
 [docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md](docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md)).
-API changes: the site option `discovery`, the field `SiteNode.guess`, the field
+API changes: the site option `discovery`, the fields `SitemapEntry.type_guess` and
 `SitemapInfo.type_hint` and the page types `event` and `learning_material`.
 
 ### Added
@@ -157,7 +169,7 @@ The only API change is the new warning code `server_errors_removed` and the opti
 
 - PHP error output that a site prints into its pages (`Warning`, `Notice`, `Deprecated`,
   `Fatal error` and the like, "in /path.php on line N") is removed from the text, except inside
-  `pre`, `code`, `textarea` and `script`. The result carries the warning `server_errors_removed`
+  `pre`, `code`, `kbd`, `samp`, `tt`, `var`, `textarea` and `script`. The result carries the warning `server_errors_removed`
   and the new optional field `data.server_errors` (level, message, file, line, count; at most 50,
   identical messages merged; null when there are none). The playground lists them in a closed
   section after "Images".
@@ -525,3 +537,12 @@ tag.
 - A full 4,000-URL regression run against the WLO set. The `live` workflow takes a `mode` input
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
+
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/janschachtschabel/text-extraction/releases/tag/v0.1.0

@@ -228,7 +228,7 @@ jobs:
             --out results/live_media_auto.jsonl \
             --summary-out results/summary_media_auto.md
 
-      # Report only, never fails the job (package 9): the site structure crawl of five WLO-type
+      # Report only, never fails the job (package 9): the site structure crawl of six WLO-type
       # sites, one click deep, at most 25 pages each, once per chosen discovery (`site_discovery`:
       # crawl, sitemap_first or both; the second run shows how much the sitemap saves), under
       # `compliance: enforce` (a crawler follows links, so robots.txt and TDM opt-outs bind it:

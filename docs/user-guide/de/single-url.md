@@ -14,12 +14,12 @@ Antwort, auf die es ankommt. Eigene Dateien, Audio und Video beschreibt
 - „Format“: Markdown oder Text.
 - „Browser-Fallback“: wenn die Seite ihn braucht (der Standard), nie oder immer; siehe
   [Browser-Fallback](usage.md#browser-fallback).
-- „Website-Regeln“ (nur Admins): siehe [Website-Regeln](site-rules.md).
+- „Website-Regeln“: Regeln einhalten, nur prüfen und melden oder Prüfung aus, je nach Rolle; siehe [Website-Regeln](site-rules.md#in-der-spielwiese).
 - „Metadaten“ (standardmäßig an), „Metadaten, strukturiert“ (die schema.org- und LRMI-Felder,
   nach Namen gelesen) und „Bilder beschreiben“.
 - „Screenshot mitliefern“: die ganze Seite als PNG, im Browser aufgenommen; die Anfrage dauert
   daher länger. Das Kästchen ist bei „Browser-Fallback: nie“ und solange der Browser aus ist
-  gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Reiter Screenshot.
+  gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Tab **Screenshot**.
 - „Optionale Funktionen“: „OCR (Texterkennung)“ (automatisch, nie, immer), „Personenbezogene
   Daten“ (unverändert lassen, maskieren, schwärzen, hashen, nur markieren) und „Audio und Video
   ohne Untertitel transkribieren“. Standardmäßig ist nichts gewählt. Eine Funktion, die der Dienst

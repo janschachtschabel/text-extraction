@@ -2855,7 +2855,10 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   no string still fails. The OpenAPI enums stay the Literals, and request models keep the plain
   Literals, so an unknown value in a request is still 422. Job options still forbid unknown
   fields: `_options_json` leaves an option out while it is at its default (`site.discovery` while
-  it is `crawl`), so a new option needs an upgrade order only once a request sets it.
+  it is `crawl`), so a new option needs an upgrade order only once a request sets it. The other
+  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SitemapInfo.format`,
+  `SiteInfo.role`) stay strict, so a new value there still needs the upgrade order (API pods
+  first).
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
   marked guessed with its reason; a URL that `guess_type` cannot type shows "Type open" with its

@@ -139,7 +139,7 @@ Einträge, die noch warten, entfallen; laufende Einträge werden fertig, aber ni
 
 ## Browser-Fallback
 
-Manche Seiten brauchen JavaScript. Mit eingeschaltetem Browsermodus (`BROWSER_ENABLED=true`; Docker
+Manche Seiten brauchen JavaScript. Mit eingeschaltetem Browser-Modus (`BROWSER_ENABLED=true`; Docker
 Compose schaltet ihn ein) rendert der Browser-Worker sie in Chromium. `mode` wählt den
 Browser-Fallback:
 
@@ -152,7 +152,7 @@ Browser-Fallback:
 `data.mode_used` sagt, welcher Modus die Antwort erzeugt hat. Übernimmt kein Browser-Worker die
 Seite innerhalb von `BROWSER_QUEUE_WAIT_SECONDS` (10 s), behält `auto` das HTTP-Ergebnis mit der
 Warnung `browser_unavailable`, und `browser` schlägt mit `timeout` fehl (wiederholbar). Solange der
-Browsermodus aus ist, antworten `browser`, `POST /v1/screenshot` und `auto` mit `actions`,
+Browser-Modus aus ist, antworten `browser`, `POST /v1/screenshot` und `auto` mit `actions`,
 `cookies`, `headers` oder `screenshot` mit 400, und `auto` ohne sie nutzt den Browser nie.
 
 `actions` (höchstens 20), `cookies` und `headers` (nur an die angefragte Website gesendet)

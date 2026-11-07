@@ -75,7 +75,7 @@ A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and 
 | `extract_structured` | The fields of a JSON schema from a page. | `POST /v1/structured` | `url`, `structured` (required), `format`, `wait_seconds`, `content_offset`, `max_chars` |
 | `chunk` | A page or a text split into chunks. | `POST /v1/chunk` | `url` or `text`, `chunking` (required), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Many URLs as one job. | `POST /v1/batch` | `urls`, `format`, `mode`; answers a job |
-| `site_structure` | The map of a site, as a job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`); answers a job |
+| `site_structure` | The map of a site, as a job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`), `discovery` (`crawl`); answers a job |
 | `get_job` | A job's state and one page of its items. | `GET /v1/jobs/{id}` | `job_id`, `offset`, `limit` (5, 1-50), `wait_seconds` (0, up to `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; no `options` |
 | `get_job_screenshot` | The image of a screenshot job (PNG, JPEG or WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; no `options` |
 | `cancel_job` | Cancel a job and delete it with its results. | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
