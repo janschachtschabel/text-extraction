@@ -143,12 +143,7 @@ def test_the_shipped_site_list_has_the_five_sites_and_wlo() -> None:
 
 def test_histogram_columns_follow_the_api() -> None:
     assert (*get_args(LinkRegion), "none") == REGIONS
-    # `sitemap_first` is spelled out ahead of the API, so the harness also reads a service
-    # that already sends it; every other value is the API's.
-    assert tuple(value for value in CRAWLS if value != "sitemap_first") == tuple(
-        value for value in get_args(Crawl) if value != "sitemap_first"
-    )
-    assert CRAWLS[-1] == "sitemap_first"
+    assert get_args(Crawl) == CRAWLS
 
 
 def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:

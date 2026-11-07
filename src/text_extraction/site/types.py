@@ -4,7 +4,7 @@ No parser and no Valkey here: the request models, the job models and ``ExtractRe
 it."""
 
 import math
-from typing import Literal, get_args
+from typing import Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -13,6 +13,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 from text_extraction.compliance import ComplianceMode
@@ -57,7 +58,9 @@ LinkRegion = Literal["nav", "header", "footer", "aside", "main", "breadcrumb", "
 # followed), ``file``, ``out_of_scope``, ``nofollow``, ``blocked`` (robots.txt or TDM under
 # ``enforce``), ``depth`` (deeper than asked), ``queued`` (a new item), ``seen`` (an existing
 # item), ``max_pages`` (the page cap was reached), ``max_files`` (a sitemap index's child: the
-# crawl's ``SITE_MAX_SITEMAP_FILES`` was reached), ``memory_guard`` (Valkey was nearly full).
+# crawl's ``SITE_MAX_SITEMAP_FILES`` was reached), ``memory_guard`` (Valkey was nearly full),
+# ``sitemap_first`` (a would-be ``queued`` link of a ``discovery: sitemap_first`` crawl whose site
+# has a sitemap: not followed, the sitemap lists the pages).
 Crawl = Literal[
     "listed",
     "file",
@@ -70,6 +73,7 @@ Crawl = Literal[
     "max_pages",
     "max_files",
     "memory_guard",
+    "sitemap_first",
 ]
 SitemapFormat = Literal["urlset", "index", "text", "rss", "atom", "absent"]
 ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly", "never"]
@@ -116,6 +120,13 @@ class SiteOptions(BaseModel, strict=True):
         description="Which links are followed. `host`: the start page's host (a leading `www.` "
         "ignored). `path`: also only URLs under the start URL's directory.",
     )
+    discovery: Literal["crawl", "sitemap_first"] = Field(
+        default="crawl",
+        description="`crawl`: follow links up to `depth` and `max_pages`. `sitemap_first`: when "
+        "robots.txt lists a sitemap or a guessed sitemap address answers, only the start page is "
+        "crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs "
+        "`sitemaps: true` (422 otherwise).",
+    )
     metadata: bool = Field(default=True, description="Include each page's DOM metadata.")
     cache: bool = Field(
         default=True,
@@ -135,6 +146,12 @@ class SiteStructureRequest(SiteOptions):
         "Under `enforce` a page or sitemap that robots.txt disallows, or whose TDM rights are "
         "reserved, is not fetched (its link says `blocked`).",
     )
+
+    @model_validator(mode="after")
+    def _sitemap_first_needs_sitemaps(self) -> Self:
+        if self.discovery == "sitemap_first" and not self.sitemaps:
+            raise ValueError("discovery sitemap_first needs sitemaps to be true.")
+        return self
 
     def options(self) -> SiteOptions:
         """The options the job stores."""
@@ -182,7 +199,8 @@ class SiteLink(BaseModel):
     crawl: Crawl = Field(
         description="What the crawl did with it: `listed`, `file`, `out_of_scope`, `nofollow`, "
         "`blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files` (a sitemap index's "
-        "child over `SITE_MAX_SITEMAP_FILES`) or `memory_guard`."
+        "child over `SITE_MAX_SITEMAP_FILES`), `memory_guard` or `sitemap_first` (not followed: "
+        "the site's sitemap lists its pages)."
     )
     target: int | None = Field(
         default=None, description="The index of the item of the linked page, when it has one."

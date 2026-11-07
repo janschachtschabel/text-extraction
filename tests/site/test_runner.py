@@ -1355,3 +1355,125 @@ async def test_disallowed_sitemap_is_blocked_by_robots_under_enforce() -> None:
     assert item.result.error.code == ErrorCode.BLOCKED_BY_ROBOTS
     assert site(item).role == "sitemap"
     assert f"{SITE}/intern/map.xml" not in [url for url, _ in crawl.fetcher.calls]
+
+
+# --- discovery: sitemap_first --------------------------------------------------------------------
+
+LINKED = [f"{SITE}/a", f"{SITE}/b", f"{SITE}/c"]
+LISTED = [f"{SITE}/s{n}" for n in range(5)]
+
+
+def fetched_urls(crawl: Crawl) -> set[str]:
+    return {url for url, _ in crawl.fetcher.calls}
+
+
+async def assert_only_the_start_page(crawl: Crawl, job_id: str) -> None:
+    items = await crawl.items(job_id)
+    assert roles(items).count("page") == 1
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert [link.target for link in links(items[0])] == [None] * 3
+    [sitemap] = [item for item in items if site(item).role == "sitemap"]
+    parsed = site(sitemap).sitemap
+    assert parsed is not None
+    assert [entry.loc for entry in parsed.entries] == LISTED
+    assert not fetched_urls(crawl) & set(LINKED)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_with_listed_sitemap_crawls_only_the_start_page() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    await assert_only_the_start_page(crawl, job_id)
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)  # a listed sitemap never probes
+
+
+@scenario
+async def test_sitemap_first_with_guessed_sitemap() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    await assert_only_the_start_page(crawl, job_id)
+
+
+@scenario
+async def test_sitemap_first_probe_tries_the_next_guess_after_a_404() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert roles(items).count("page") == 1
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
+@scenario
+async def test_sitemap_first_without_sitemap_crawls_links() -> None:
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items).count("page") == 4
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    for url in LINKED:
+        assert url in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_keeps_the_other_crawl_decisions() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED, "https://elsewhere.example.com/x", f"{SITE}/f.pdf"),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    found = {link.url: link.crawl for link in links(items[0])}
+    assert found["https://elsewhere.example.com/x"] == "out_of_scope"
+    assert found[f"{SITE}/f.pdf"] == "file"
+    assert [found[url] for url in LINKED] == ["sitemap_first"] * 3
+
+
+@scenario
+async def test_crawl_discovery_never_probes() -> None:
+    crawl = Crawl({ROOT: page(ROOT)})
+    await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)

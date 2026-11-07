@@ -10,7 +10,7 @@ section of a site, see [Part of a site](part-of-a-site.md).
 ## Map the site
 
 `POST /v1/site-structure` maps a site: its sitemaps (robots.txt's `Sitemap:` lines, else
-`/sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
+`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
 start page, `depth` clicks deep (default 2, at most `SITE_MAX_DEPTH`), for at most `max_pages`
 pages (default 100, at most `SITE_MAX_PAGES`). It answers 202 with a job of kind `site`; the
 extract workers crawl, and every page, robots.txt and sitemap file they find becomes an item of
@@ -58,7 +58,9 @@ Pages are fetched over HTTP only, with the service's user agent, the per-host li
 checks of `compliance`; the items keep title, status, metadata and quality but no text
 (`content: null`). The crawl stays on the start page's host (a leading `www.` ignored);
 `scope: "path"` keeps it under the start URL's directory, `sitemaps: false` skips the sitemaps,
-and `depth: 0` reads the start page and the sitemaps only. A crawl counts towards
+and `depth: 0` reads the start page and the sitemaps only. With `discovery: "sitemap_first"` the
+crawl reads only the start page when robots.txt lists a sitemap or one of the three addresses
+answers, and takes the other pages from the sitemap; without a sitemap it follows links as usual. A crawl counts towards
 `BATCH_MAX_OPEN_PER_CLIENT` with your batches.
 
 ### Read the site structure
@@ -76,7 +78,8 @@ crawl did with it, and `category`, what it leads to (see
 - The others are not followed: `depth` (deeper than asked), `listed` (head links and iframes),
   `file`, `out_of_scope` (another host, or outside the start directory with `scope: "path"`),
   `nofollow`, `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages`
-  and `memory_guard`.
+  `memory_guard` and `sitemap_first` (a crawl with `discovery: "sitemap_first"` found a sitemap, so
+  the sitemap lists the page).
 
 A sitemap's entries are in `sitemap.entries`; a large one continues in `sitemap_part` items with
 the same URL (`part` of `parts`), and an index lists its sitemaps in `children`, each with the

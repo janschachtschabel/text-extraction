@@ -370,3 +370,14 @@ def test_concurrent_cancel_gives_the_site_job_back(api: Api) -> None:
         return sorted(str(key) for key in await valkey.keys("job*"))
 
     assert api.run(scenario) == []
+
+
+def test_sitemap_first_needs_sitemaps(api: Api) -> None:
+    response = site(api, discovery="sitemap_first", sitemaps=False)
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert "sitemaps" in error["details"][0]["msg"]
+    assert api.keys("job:*") == []
+    assert site(api, discovery="sitemap_first").status_code == 202

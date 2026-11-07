@@ -11,7 +11,7 @@ das seitenweise Lesen der Jobs. Einen einzelnen Bereich einer Website beschreibt
 ## Die Website erfassen
 
 `POST /v1/site-structure` erfasst eine Website: ihre Sitemaps (die `Sitemap:`-Zeilen der robots.txt,
-sonst `/sitemap.xml`; Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren Linkgraphen ab der
+sonst `/sitemap.xml`, `/sitemap_index.xml` oder `/wp-sitemap.xml`; Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren Linkgraphen ab der
 Startseite, `depth` Klicks tief (Standard 2, höchstens `SITE_MAX_DEPTH`), für höchstens `max_pages`
 Seiten (Standard 100, höchstens `SITE_MAX_PAGES`). Die Antwort ist 202 mit einem Job der Art `site`;
 die Extract-Worker crawlen, und jede Seite, robots.txt und Sitemap-Datei, die sie finden, wird zu
@@ -59,7 +59,9 @@ Seiten werden nur über HTTP geholt, mit dem User-Agent des Dienstes, den Grenze
 Prüfungen von `compliance`; die Einträge behalten Titel, Status, Metadaten und Qualität, aber
 keinen Text (`content: null`). Der Crawl bleibt auf dem Host der Startseite (ein führendes `www.`
 zählt nicht); `scope: "path"` hält ihn unter dem Verzeichnis der Start-URL, `sitemaps: false`
-lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Ein Crawl wird
+lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Mit `discovery: "sitemap_first"` liest der
+Crawl nur die Startseite, wenn robots.txt eine Sitemap nennt oder eine der drei Adressen antwortet,
+und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap folgt er den Links wie sonst. Ein Crawl wird
 zusammen mit Ihren Batches auf `BATCH_MAX_OPEN_PER_CLIENT` angerechnet.
 
 ### Die Website-Struktur lesen
@@ -78,7 +80,8 @@ führt (siehe [Seitentypen und Linkkategorien](#seitentypen-und-linkkategorien))
 - Den anderen wird nicht gefolgt: `depth` (tiefer als gewünscht), `listed` (Links im Kopf und
   Iframes), `file`, `out_of_scope` (ein anderer Host oder außerhalb des Startverzeichnisses mit
   `scope: "path"`), `nofollow`, `blocked` (robots.txt oder ein TDM-Nutzungsvorbehalt unter
-  `compliance: enforce`), `max_pages` und `memory_guard`.
+  `compliance: enforce`), `max_pages`, `memory_guard` und `sitemap_first` (ein Crawl mit
+  `discovery: "sitemap_first"` hat eine Sitemap gefunden, also nennt die Sitemap die Seite).
 
 Die Einträge einer Sitemap stehen in `sitemap.entries`; eine große setzt sich in
 `sitemap_part`-Einträgen mit derselben URL fort (`part` von `parts`), und ein Index listet seine

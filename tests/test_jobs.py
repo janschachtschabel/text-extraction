@@ -1192,6 +1192,7 @@ def test_job_options_omit_unset_site() -> None:
         "depth": 3,
         "max_pages": 100,
         "sitemaps": True,
+        "discovery": "crawl",
         "scope": "path",
         "metadata": True,
         "cache": True,

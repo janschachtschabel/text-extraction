@@ -13,6 +13,9 @@ not the other way round:
   ``GUESSED_SITEMAP_PATHS`` (through its own ``_extend``, so a rerun stores the same answer); a
   guess that is blocked or fails ends the chain, a listed sitemap never guesses.
   ``unavailable`` fails ``target_http_error``, retryable, no guess.
+- **sitemap_first**: ``_sitemap_exists`` answers, for the start page of a ``discovery:
+  sitemap_first`` crawl, whether the site has a sitemap (robots.txt lists one, or a guessed
+  address answers 2xx to a probe read to ``SITEMAP_PROBE_MAX_BYTES``).
 - **sitemap**: ``Pipeline.fetch_raw`` (at most ``SITE_SITEMAP_MAX_BYTES``, cut there), then the
   inflate and the parse on the runner's own pool (one thread per pod, so sitemap parses never
   hold the threads that convert pages). The parse has a deadline (the item's budget,
@@ -77,6 +80,7 @@ __all__ = [
     "MAX_SITEMAP_NESTING",
     "SITEMAP_FILES_TRUNCATED_WARNING",
     "SITEMAP_NOT_FOUND_WARNING",
+    "SITEMAP_PROBE_MAX_BYTES",
     "SITEMAP_TRUNCATED_WARNING",
     "SITEMAP_URLS_TRUNCATED_WARNING",
     "SITE_MEMORY_GUARD_WARNING",
@@ -86,6 +90,9 @@ __all__ = [
 
 # The deepest sitemap a crawl reads: robots.txt lists depth 0, an index's children are one deeper.
 MAX_SITEMAP_NESTING = 3
+
+# How much of a guessed sitemap ``_sitemap_exists`` reads: its answer's status is what counts.
+SITEMAP_PROBE_MAX_BYTES: Final = 65_536
 
 # The addresses tried in turn when robots.txt lists no sitemap.
 GUESSED_SITEMAP_PATHS: Final = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
@@ -534,6 +541,31 @@ class SitemapItems:
             envelope = Envelope(status="success", data=data)
         outcome = _Outcome(links=[], entries=len(entries), appended=len(extended.new), caps=caps)
         return envelope, outcome
+
+    async def _sitemap_exists(
+        self, job: JobRecord, url: str, gate_refusals: Literal["fail", "raise"]
+    ) -> bool:
+        """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: its
+        robots.txt lists one, or one of ``GUESSED_SITEMAP_PATHS``, tried in turn, answers 2xx
+        (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the pipeline
+        (SSRF guard, compliance, the host's turn). An unavailable robots.txt counts as no listed
+        sitemap; a probe that fails or answers otherwise moves on to the next address."""
+        listed = await self._pipeline.robots_sitemaps(url, gate_refusals=gate_refusals)
+        if listed.state == "found" and listed.urls:
+            return True
+        for path in GUESSED_SITEMAP_PATHS:
+            guess = _origin(url) + path
+            raw = await self._pipeline.fetch_raw(
+                normalize_url(guess) or guess,
+                job_principal(job),
+                job.options.compliance,
+                max_bytes=SITEMAP_PROBE_MAX_BYTES,
+                truncate=True,
+                gate_refusals=gate_refusals,
+            )
+            if raw.fetched is not None and 200 <= raw.fetched.status < 300:
+                return True
+        return False
 
     async def _guess_next(
         self, job: JobRecord, item: QueueItem, url: str, node: SiteNode

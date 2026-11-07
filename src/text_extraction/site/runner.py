@@ -13,11 +13,14 @@ only with its last item. ``ExtractRunner`` hands every item of a ``site`` job to
   (item 0) sets the crawl's scope from its ``final_url`` and first appends the robots item (when
   ``sitemaps`` is asked), whatever its own outcome. Its answer keeps title, status, metadata and
   quality: ``content`` and ``links`` are null (D5 a), ``site`` has its depth, parent and typed
-  links with ``crawl`` and ``target``. A page whose links do not all fit ``JOB_ITEM_MAX_BYTES``
-  keeps the first ones that do (``links_truncated``), and only those are followed. A link
-  deeper than ``depth`` says ``depth`` without its compliance verdict (none is read for it).
-  A platform video page (YouTube and the like) is answered by the media path, which reads no
-  links: its item is a page with ``links`` null and nothing is followed from it.
+  links with ``crawl`` and ``target``. With ``discovery: sitemap_first`` the start page asks
+  ``SitemapItems._sitemap_exists`` (before it extends); when the site has a sitemap, the links
+  that would have become page items say ``sitemap_first`` and none is appended (the robots item
+  still is), else the crawl goes on as ``crawl``. A page whose links do not all fit
+  ``JOB_ITEM_MAX_BYTES`` keeps the first ones that do (``links_truncated``), and only those are
+  followed. A link deeper than ``depth`` says ``depth`` without its compliance verdict (none is
+  read for it). A platform video page (YouTube and the like) is answered by the media path,
+  which reads no links: its item is a page with ``links`` null and nothing is followed from it.
 - **robots** and **sitemap**: ``SitemapItems._robots`` and ``SitemapItems._sitemap``
   (``site/sitemap_items.py``), the base class of ``SiteRunner``.
 
@@ -336,6 +339,19 @@ class SiteRunner(SitemapItems):
                 blocked=blocked,
                 parent=item.index,
             )
+        if (
+            item.index == 0
+            and options.discovery == "sitemap_first"
+            and any(candidate is not None and candidate.add for _, candidate in judged)
+            and await self._sitemap_exists(job, final_url or url, gate_refusals)
+        ):
+            # The sitemap lists the pages: the links that would be followed are left alone.
+            judged = [
+                (link.model_copy(update={"crawl": "sitemap_first"}), None)
+                if link.crawl == "queued"
+                else (link, candidate)
+                for link, candidate in judged
+            ]
         page_candidates = unique_candidates(candidate for _, candidate in judged)
         if guard_high:
             page_candidates = [replace(candidate, add=False) for candidate in page_candidates]
