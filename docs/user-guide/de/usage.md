@@ -286,6 +286,10 @@ Angaben mit der Warnung `transcript_panel_unavailable`. Eine HTML-Seite, deren `
 `<audio>` ein `<track>` hat, bekommt dessen Text nach ihrem eigenen, unter `## Transcript`, und
 `data.media.embeds` listet die Player, die eine Seite einbettet, damit Sie sie einzeln extrahieren.
 
+Ein Transkript (Untertitel, Transkriptansicht oder Transkription) ist alles, was die Medien sagen.
+Darum ist auch ein kurzes ein `success`: `QUALITY_MIN_WORDS` gilt dafür nicht, und nur ein
+Transkript ganz ohne Wort ist kein Ergebnis.
+
 Mit dem ASR-Worker transkribiert `"transcribe": true` ein Video ohne Untertitel oder die URL einer
 Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine
 Transkription ist immer ein Job, die Antwort ist sofort 202. Eine hochgeladene Audio- oder
@@ -393,7 +397,12 @@ sagt die Seite das und verweist auf den `curl`-Befehl. Die Tabs:
   Ergebnis zeigt den Inhalt, die Metadaten, die Bilder, die Links und eine Zeitleiste des Ablaufs.
 - **Datei**, **Screenshot**, **Strukturiert**, **Chunks** und **Info**: die anderen einzelnen
   Aufrufe, mit derselben Ergebnisansicht; das Feld „Optionen (JSON)“ unter „Erweitert“ nimmt jedes
-  weitere Feld des REST-Bodys.
+  weitere Feld des REST-Bodys. **Extrahieren**, **Datei** und **Batch** haben „Optionale
+  Funktionen“ (OCR, personenbezogene Daten und bei Extrahieren und Batch „Transkribieren“);
+  **Strukturiert** hat eine Auswahl „Strategie“ und **Chunks** eine Auswahl „Methode“, die die
+  Strategie ihres JSON-Objekts setzen. Die LLM-Optionen (Strategie LLM, Methode semantisch,
+  „Bilder beschreiben“) sind gesperrt, solange das LLM aus ist, und sagen, wenn der Dienst keinen
+  eigenen LLM-Schlüssel hat, damit Sie Ihren eingeben.
 - **Batch**: URLs, eine pro Zeile. **Batch-Datei**: eine CSV- oder JSON-Datei mit URLs, zuerst auf
   dem Server geprüft, mit einer Vorschau vor „Batch starten“.
 - **Website-Struktur**: startet einen Crawl; wenn er abgeschlossen ist, listet „Als Baum

@@ -81,7 +81,9 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `login_wall`; `quality.browser_recommended` is `js_heavy or bot_challenge or soft_404` and is
    reported in both modes. A bot challenge, soft-404, login wall or empty content ends `failed`
    (`bot_protection`, `likely_error_page`, `login_required`, `empty_content`), fewer than
-   `QUALITY_MIN_WORDS` words ends `partial` (`content_too_short`). In `auto` mode with
+   `QUALITY_MIN_WORDS` words ends `partial` (`content_too_short`); a media transcript (subtitles,
+   transcript view, transcription; `pipeline_media.is_transcript`) needs one word only, since it is
+   all the media says (2026-11-07). In `auto` mode with
    `BROWSER_ENABLED`, a fast result escalates to the browser worker when it came from a 2xx
    response with an HTML content type (`text/html`, `application/xhtml+xml`) and
    `browser_recommended` is set (`escalation.needs_browser`). A page served without a
@@ -330,6 +332,19 @@ optional rate limit.
   `BROWSER_UNBLOCK_ENABLED`. A user key never gets it, not even where the operator's default is
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
   renders in the standard browser.
+- **Optional features for admin keys only (package 19, P19-D1 b, 2026-11-07):**
+  `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default true) keep
+  a feature the service has for admin keys (`feature_access.py`). A user key that asks for it by
+  name gets 403 `forbidden` before anything runs (`ocr: always`; `transcribe: true` or an audio
+  or video upload; `pii`; strategy `llm`, `learn_selectors`, `semantic` chunking,
+  `describe_images`). An implicit use runs as if the feature were off: the pipeline gives such
+  a key's documents no OCR hand-off (`Pipeline._ocr_kept`: the text layer with
+  `ocr_unavailable`, an image `unsupported_content_type` with the 403 text; the request's `ocr`
+  stays as sent, so the result cache is shared), and the post stage, the waits and the stored
+  LLM key use the settings the key sees (`settings_for`: `LLM_ENABLED` off), so strategy `auto`
+  leaves the fields without a value missing with `llm_unavailable`. Jobs keep the owner's role,
+  so a worker applies the same rule. A feature switched off (`*_ENABLED`) is off for
+  every key and keeps its own 400.
 
 There is no auth-free internal API: cluster-internal callers send a key like any other caller
 (only `AUTH_MODE=none` turns authentication off, for every caller at once).
@@ -859,8 +874,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   can take `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` (25 + 20 = 45 s by default),
   the fast phase and then the wait for the worker. Callers that need a shorter bound send
   `wait_seconds` or lower `DOCLING_SYNC_WAIT_SECONDS` (at 0 a sync request does not wait).
-- **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false`, compose
-  profile `docling`; it needs an image of about 2 GB and about 335 MiB of models (9 files). Without it a
+- **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false` (compose
+  starts it by default since package 19, 2026-11-07); it needs an image of about 2 GB and about 335 MiB of models (9 files). Without it a
   scan keeps its text layer (`ocr_unavailable`), and images and OpenDocument files answer
   `unsupported_content_type` ("OCR is not enabled on this service.").
 
@@ -1077,8 +1092,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   volume: one that finds the marker after its downloads keeps the other's files, and a failed
   rename is a failure only while the marker is still missing.
 - **F16, switches (D3).** `DOCLING_ENABLED` (default false). Helm renders it into every pod from
-  `workers.docling.enabled` (default false); compose reads it from `.env` (`docker compose
-  --profile docling up` with `DOCLING_ENABLED=true`).
+  `workers.docling.enabled` (default false); compose always starts the Docling worker and sets
+  it to true unless `.env` or the shell says false (package 19).
 - **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
   `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
   file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB
@@ -1842,7 +1857,8 @@ full copy of the `lg` pair, about 2.4 GB at its peak). Compose: the one-shot `nl
 volume `nlp-models`.
 
 **N15, switches.** `PII_ENABLED` (default false, as `DOCLING_ENABLED`): Helm renders it into
-every pod from `workers.nlp.enabled`, compose from `.env` with the profile `nlp`. Start-up refuses
+every pod from `workers.nlp.enabled`; compose starts the NLP worker and sets it to true unless
+`.env` says false (package 19). Start-up refuses
 `PII_ENABLED` without `JOBS_ENABLED`. Without it a request with `pii` answers 400. The settings and
 Helm values are in [configuration.md](configuration.md#pii).
 
@@ -2091,9 +2107,11 @@ byte.
 **S12, request checks** (`structured/checks.py`, on every route). 400 `invalid_request` for LLM work
 (strategy `llm`, `learn_selectors`, chunking `semantic`) while the service has no LLM
 (`LLM_ENABLED` and `JOBS_ENABLED`: "LLM features are not enabled on this service."), for `semantic`
-without `LLM_EMBEDDING_MODEL`, and for work that may call the LLM (`llm`, `auto` with a schema,
+without `LLM_EMBEDDING_MODEL`, and for work that must call the LLM (`llm`, `learn_selectors`,
 `semantic`) without any key ("No LLM key: send X-LLM-Api-Key."). `auto` is not refused on a service
-without the LLM: its fields left for the LLM stay missing (`llm_unavailable`). 422 for chunking with `format: html`
+without the LLM, nor without any key (since package 19, P19-R2: `LLM_ENABLED` is on in compose
+without a key): its fields left for the LLM stay missing (`llm_unavailable`); the post stage and
+the llm worker then run as without the LLM (`feature_access.settings_for(has_llm_key=False)`). 422 for chunking with `format: html`
 ("Chunking needs format markdown or text."), for `pii` with strategy `metadata` or `selectors`,
 `tables`, `learn_selectors` or caller `selectors` ("… reads the raw page and cannot be combined
 with pii.", D3), for `learn_selectors` with a strategy other than `llm` and `auto`, and for the
@@ -2160,7 +2178,8 @@ rate-limits before it reads the body (R16). The header `X-LLM-Api-Key` is on all
 and `LLM_VISION_MAX_IMAGE_BYTES`. Start-up refuses `LLM_ENABLED` without
 `JOBS_ENABLED`. Helm: `workers.llm.enabled` (false) renders
 `LLM_ENABLED` into every pod and deploys the llm worker (API image, no volume), `LLM_API_KEY` from
-`workers.llm.apiKey.existingSecret`; compose: the profile `llm`. The settings and Helm values are in
+`workers.llm.apiKey.existingSecret`; compose starts the llm worker and sets `LLM_ENABLED` to true
+unless `.env` says false (package 19). The settings and Helm values are in
 [configuration.md](configuration.md#llm).
 
 **Rulings made while building it** (they override the plan where they differ). R3: `auto` looks
@@ -3199,7 +3218,7 @@ the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship 
 are never logged.
 
 **Resource baselines.** The load test (`.github/workflows/load.yml`, `tests/load/`, rulings
-P11-S1 to P11-S7) runs the compose stack with every profile against a local site farm and a fake
+P11-S1 to P11-S7) runs the compose stack with every worker against a local site farm and a fake
 LLM endpoint, one scenario at a time, and samples `docker stats` every 2 s. Its reports give CPU
 (mean, p95, max) and memory (p95, max) per container and scenario, the latency and throughput of
 each scenario, the LLM bytes per call, the site jobs' duration and Valkey bytes, and the extract

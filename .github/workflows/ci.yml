@@ -341,13 +341,14 @@ jobs:
             | jq -e '[.services.api, .services.worker, .services["browser-worker"]] | all(.environment.BROWSER_UNBLOCK_ENABLED == "true")'
           rm compose.json
 
-      # The profile `docling`: the one-shot models service writes the volume, the worker reads it
-      # read-only after it; OCR is off unless the environment switches it on, then on everywhere.
-      - name: docker compose config (profile docling)
+      # The Docling services (no profile, on by default): the one-shot models service writes the
+      # volume, the worker reads it read-only after it; OCR is on unless the environment switches
+      # it off, then off everywhere.
+      - name: docker compose config (docling worker)
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile docling config --format json > compose.json
+          docker compose config --format json > compose.json
           jq -e '.services["docling-models"]
             | .build.target == "docling" and .command == ["text-extraction-docling-worker", "--download-models"]
               and .volumes == [{"type": "volume", "source": "docling-models", "target": "/models", "volume": {}}]' compose.json
@@ -356,13 +357,9 @@ jobs:
               and (.volumes | length == 1 and .[0].source == "docling-models" and .[0].read_only == true)
               and .depends_on["docling-models"].condition == "service_completed_successfully"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "false")' compose.json
-          DOCLING_ENABLED=true docker compose --profile docling config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "true")'
-          # Without the profile there is no Docling service.
-          if docker compose config --services | grep -q docling; then
-            echo "a Docling service runs without the profile" >&2; exit 1
-          fi
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "true")' compose.json
+          DOCLING_ENABLED=false docker compose config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "false")'
           rm compose.json
 
       # The ASR services (no profile, on by default): the one-shot models service writes the
@@ -392,14 +389,14 @@ jobs:
             | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "false")'
           rm compose.json
 
-      # The profile `nlp`: the one-shot models service writes the volume, the worker reads it
-      # read-only after it; the mount path wins over .env; PII handling is off unless the
-      # environment switches it on, then on everywhere.
-      - name: docker compose config (profile nlp)
+      # The NLP services (no profile, on by default): the one-shot models service writes the
+      # volume, the worker reads it read-only after it; the mount path wins over .env; PII handling
+      # is on unless the environment switches it off, then off everywhere.
+      - name: docker compose config (nlp worker)
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile nlp config --format json > compose.json
+          docker compose config --format json > compose.json
           jq -e '.services["nlp-models"]
             | .build.target == "nlp" and .command == ["text-extraction-nlp-worker", "--download-models"]
               and .volumes == [{"type": "volume", "source": "nlp-models", "target": "/models", "volume": {}}]
@@ -411,35 +408,27 @@ jobs:
               and .depends_on["nlp-models"].condition == "service_completed_successfully"
               and .stop_grace_period == "45s"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "false")' compose.json
-          PII_ENABLED=true docker compose --profile nlp config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "true")'
-          # Without the profile there is no NLP service.
-          if docker compose config --services | grep -q nlp; then
-            echo "an NLP service runs without the profile" >&2; exit 1
-          fi
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "true")' compose.json
+          PII_ENABLED=false docker compose config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "false")'
           rm compose.json
 
-      # The profile `llm`: the worker runs the API image (no model, no volume); the LLM is off
-      # unless the environment switches it on, then on everywhere.
-      - name: docker compose config (profile llm)
+      # The llm worker (no profile, on by default): it runs the API image (no model, no volume);
+      # the LLM is on unless the environment switches it off, then off everywhere.
+      - name: docker compose config (llm worker)
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile llm config --format json > compose.json
+          docker compose config --format json > compose.json
           jq -e '.services["llm-worker"]
             | .build.target == null and .image == "text-extraction:dev" and .read_only == true
               and .tmpfs == ["/tmp"] and .command == ["text-extraction-llm-worker"]
               and (.volumes // [] | length == 0)
               and .stop_grace_period == "45s"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "false")' compose.json
-          LLM_ENABLED=true docker compose --profile llm config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "true")'
-          # Without the profile there is no llm service.
-          if docker compose config --services | grep -q llm; then
-            echo "an llm service runs without the profile" >&2; exit 1
-          fi
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "true")' compose.json
+          LLM_ENABLED=false docker compose config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "false")'
           rm compose.json
 
       # MCP and the UI: on for the api service (local development) unless the environment
@@ -448,14 +437,14 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile docling --profile nlp --profile llm config --format json > compose.json
+          docker compose config --format json > compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .UI_ENABLED == "true"' compose.json
           jq -e '.services | to_entries | map(select(.key != "api")) | all(.value.environment // {} | has("MCP_ENABLED") or has("UI_ENABLED") | not)' compose.json
           MCP_ENABLED=false UI_ENABLED=false docker compose config --format json \
             | jq -e '.services.api.environment | .MCP_ENABLED == "false" and .UI_ENABLED == "false"'
           rm compose.json
 
-      # The load-test override of load.yml: it parses on top of every profile, mounts the repo's
+      # The load-test override of load.yml: it parses on top of every worker, mounts the repo's
       # tests/ (paths resolve against the first file) read-only into the farm and the fake LLM,
       # gives the farm a writable load-results/farm/ for its record,
       # publishes nothing new beyond 127.0.0.1, merges its settings into the base environment and
@@ -465,7 +454,7 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile nlp --profile llm config --format json > compose.json
+          docker compose -f docker-compose.yml -f deploy/load/compose.load.yml config --format json > compose.json
           jq -e --arg tests "$PWD/tests" '[.services.farm, .services["fake-llm"]]
             | all(.image == "text-extraction:dev" and .read_only == true
               and .volumes[0].source == $tests and .volumes[0].target == "/app/tests"
@@ -484,18 +473,18 @@ jobs:
             | length == 7 and all(.value.healthcheck | .start_period == "10m0s" and .start_interval == "5s" and .retries == 6
               and (.test | join(" ") | contains("127.0.0.1:9090/ready")))' compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "lg"' compose.json
-          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile nlp --profile llm config --format json \
+          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml config --format json \
             | jq -e '.services | .["asr-models"].environment.ASR_MODEL == "small" and .["nlp-models"].environment.PII_MODEL_SIZE == "md"
               and .api.environment.STRUCTURED_SELECTOR_PROCESSES == "4"'
           rm compose.json
 
       # The release override: every app service runs a published image and has no build section
-      # left, with every profile on (tests/test_release.py pins the default version).
+      # left, with every worker (tests/test_release.py pins the default version).
       - name: docker compose config (released images)
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.release.yml --profile docling --profile nlp --profile llm config --format json > compose.json
+          docker compose -f docker-compose.yml -f docker-compose.release.yml config --format json > compose.json
           jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
           jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 10
             and all(.value.build == null

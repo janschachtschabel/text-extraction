@@ -1,5 +1,5 @@
 {% set prefix = "structured" %}
-{% set default_structured = '{"strategy": "auto", "schema": {"type": "object", "properties": {"title": {"type": "string"}, "author": {"type": "string"}}}}' %}
+{% set default_structured = '{"schema": {"type": "object", "properties": {"title": {"type": "string"}, "author": {"type": "string"}}}}' %}
 <form id="structured-form" class="op" hx-post="/ui/run/structured" hx-target="#result" hx-swap="innerHTML">
   <label for="structured-url">URL</label>
   <input id="structured-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="structured-url-hint">
@@ -7,6 +7,12 @@
   {% include "forms/format.html" %}
   {% include "forms/mode.html" %}
   {% include "forms/access.html" %}
+  <label for="structured-strategy">{{ t("form.strategy") }}</label>
+  <select id="structured-strategy" name="strategy" aria-describedby="structured-strategy-hint">
+    {% for value in ("auto", "metadata", "selectors", "patterns", "llm") %}<option value="{{ value }}"{% if value == "auto" %} selected{% endif %}{% if value == "llm" and not features.llm %} disabled{% endif %}>{{ t("form.strategy." ~ value) }}</option>{% endfor %}
+  </select>
+  <p class="hint{% if not features.llm %} feature-off{% endif %}" id="structured-strategy-hint">{{ t(features.hint("llm", "hint.strategy", "hint.strategy_no_llm")) }}</p>
+  {% if features.llm_needs_key %}<p class="hint llm-key-hint">{{ t("hint.llm_needs_key") }}</p>{% endif %}
   <label for="structured-structured">{{ t("form.structured") }}</label>
   <textarea id="structured-structured" name="structured" rows="6" spellcheck="false" required aria-describedby="structured-structured-hint">{{ default_structured }}</textarea>
   <p class="hint" id="structured-structured-hint">{{ t("hint.structured") }}</p>

@@ -20,11 +20,12 @@ The messages never repeat a selector.
 ``check_structured_request`` (ruling S12) checks what depends on the service and on the
 combination of options, for every route that takes ``structured`` or ``chunking``: 400 for LLM
 work while the service has no LLM, for ``semantic`` chunking without ``LLM_EMBEDDING_MODEL`` and
-for LLM work without any key (neither ``X-LLM-Api-Key`` nor ``LLM_API_KEY``); 422 for chunking
+for LLM work without any key (neither ``X-LLM-Api-Key`` nor ``LLM_API_KEY``; ``auto`` then runs
+without the LLM, P19-R2); 422 for chunking
 with ``format: html``, for ``pii`` with what reads the raw page (strategies ``metadata`` and
 ``selectors``, ``tables``, ``learn_selectors``, caller ``selectors``; ruling D3 a) and for
 ``learn_selectors`` with a strategy that never calls the LLM. ``wants_llm`` says whether a request
-may need the LLM (``describe_images`` too, ruling V-S2), for the default wait and the key check;
+may need the LLM (``describe_images`` too, ruling V-S2), for the default wait and the stored key;
 ``describe_images`` has its own checks (``vision/checks.py``). ``llm_key_of`` reads the caller's key
 from the ``X-LLM-Api-Key`` header as ``asr_dispatch.asr_key_of`` reads ``X-ASR-Api-Key``.
 """
@@ -161,11 +162,9 @@ def check_structured_request(
         raise ServiceError(ErrorCode.INVALID_REQUEST, LLM_DISABLED_MESSAGE, 400)
     if semantic and settings.llm_embedding_model is None:
         raise ServiceError(ErrorCode.INVALID_REQUEST, SEMANTIC_MODEL_MESSAGE, 400)
-    if (
-        wants_llm(structured, chunking, settings)
-        and llm_key is None
-        and settings.llm_api_key is None
-    ):
+    # Strategy `auto` is no LLM work it must have: without any key it runs without the LLM
+    # (`llm_unavailable`), as on a service without one (P19-R2).
+    if llm_feature and llm_key is None and settings.llm_api_key is None:
         raise ServiceError(ErrorCode.INVALID_REQUEST, LLM_KEY_MISSING_MESSAGE, 400)
     if chunking is not None and req_format == "html":
         raise ServiceError(ErrorCode.INVALID_REQUEST, CHUNKING_FORMAT_MESSAGE, 422)

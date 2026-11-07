@@ -89,6 +89,7 @@ from text_extraction.extract_api import (
     timed,
 )
 from text_extraction.extract_models import ExtractResult
+from text_extraction.feature_access import check_feature_access, settings_for
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.llm_dispatch import UploadInput
@@ -341,8 +342,11 @@ async def run_upload(
         # What the route's bounded read keeps: the limit and one byte. The pipeline answers
         # `too_large` for it before it reads the rest, hashes or converts anything.
         data = data[: limit + 1]
-    if key is None and _transcribed(data, content_type, settings):
-        check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
+    if _transcribed(data, content_type, settings):
+        # 403 while transcription is for admin keys only (P19-R4).
+        check_feature_access(principal, settings, media_upload=True)
+        if key is None:
+            check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
     return await answer_upload(
         state,
         principal,
@@ -369,16 +373,28 @@ def check_upload_request(
     ``chunking`` (ruling S12) and ``describe_images`` (ruling V-S2). Returns the caller's ASR
     and LLM keys (None without the header). Shared with ``POST /v1/chunk``
     (``structured_api.py``)."""
+    # 403 for a feature the service keeps for admin keys (P19-R4); the LLM checks see it
+    # switched off for such a key. An audio or video upload is checked once its bytes are read.
+    check_feature_access(
+        principal,
+        settings,
+        ocr=form.ocr,
+        pii=form.pii,
+        structured=form.structured,
+        chunking=form.chunking,
+        describe=form.describe_images,
+    )
+    seen = settings_for(settings, principal)
     check_ocr_request(form.ocr, settings)
     check_pii_request(form.pii, form.format, False, settings)
     check_selector_access(form.structured, principal)
     key = asr_key_of(asr_header)
     caller_llm_key = llm_key_of(llm_header)
     check_structured_request(
-        form.structured, form.chunking, form.pii, form.format, settings, llm_key=caller_llm_key
+        form.structured, form.chunking, form.pii, form.format, seen, llm_key=caller_llm_key
     )
     check_describe_request(
-        form.describe_images, form.pii, form.metadata, settings, llm_key=caller_llm_key
+        form.describe_images, form.pii, form.metadata, seen, llm_key=caller_llm_key
     )
     return key, caller_llm_key
 
@@ -402,8 +418,10 @@ async def answer_upload(
     shares this flow: no word-count gate (``Pipeline.extract_upload``). ``state`` is the public
     app's state. The caller has run ``principal_for`` and ``check_rate`` (``run_upload``)."""
     settings: Settings = state.settings
-    # Only a request that may need the LLM keeps the caller's key with its jobs.
-    llm = wants_llm(form.structured, form.chunking, settings, describe=form.describe_images)
+    # The features the caller may use (P19-R4): only a request that may need the LLM keeps the
+    # caller's key with its jobs.
+    seen = settings_for(settings, principal, has_llm_key=llm_key is not None)
+    llm = wants_llm(form.structured, form.chunking, seen, describe=form.describe_images)
     job_llm_key = llm_key if llm else None
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
@@ -449,6 +467,7 @@ async def answer_upload(
         structured=form.structured,
         chunking=form.chunking,
         describe=form.describe_images,
+        principal=principal,
     )
 
 

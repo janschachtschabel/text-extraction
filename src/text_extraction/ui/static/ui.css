@@ -601,6 +601,17 @@ fieldset.custom-capture:disabled :is(input, select) {
   opacity: 0.6;
 }
 
+/* An optional feature the service does not offer this key (package 19): the control is greyed,
+   and its hint says why. */
+:is(select, input):disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint.feature-off {
+  font-style: italic;
+}
+
 label.inline {
   display: inline-flex;
   gap: 0.35rem;

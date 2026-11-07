@@ -20,8 +20,12 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from text_extraction.compliance import ComplianceMode
+from text_extraction.documents.routing import ocr_available
+from text_extraction.feature_access import Feature, allowed
 from text_extraction.file_api import PATH as FILE_PATH
-from text_extraction.settings import Settings
+from text_extraction.pii_dispatch import pii_available
+from text_extraction.pipeline_media import asr_available
+from text_extraction.settings import Settings, llm_available
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
 from text_extraction.ui.i18n import Message, MessageError
@@ -35,6 +39,15 @@ CHECKED: Final = "on"
 ACCESS_FIELD: Final = "access"
 ACCESS_DEFAULT: Final = "default"
 _ACCESS_ORDER: Final[tuple[ComplianceMode, ...]] = ("enforce", "report", "ignore")
+# The choices of the optional features (package 19, P19-R3), each with the value that sends
+# nothing (the API's default): OCR, personal data, the structured strategy, the chunking method.
+OCR_CHOICES: Final = ("auto", "never", "always")
+PII_CHOICES: Final = ("", "mask", "redact", "hash", "annotate")
+STRATEGY_CHOICES: Final = ("auto", "metadata", "selectors", "patterns", "llm")
+METHOD_CHOICES: Final = ("recursive", "fixed", "markdown", "sentence", "semantic")
+# The strategy and the method that need the LLM.
+LLM_STRATEGIES: Final = frozenset({"llm"})
+LLM_METHODS: Final = frozenset({"semantic"})
 
 # The screenshot form's "Capture" choice: each preset is the REST fields it sets (a field it does
 # not name stays at its default); ``custom`` reads the form's own fields instead.
@@ -236,6 +249,51 @@ def _box(fields: Fields, form: Mapping[str, str], name: str, *, default: bool) -
     fields[name] = _Field(value, set_by_user=value != default)
 
 
+def _picked(form: Mapping[str, str], name: str, choices: tuple[str, ...]) -> str:
+    """The value of the select ``name``: one of ``choices`` (the first, its default, when the
+    form sends none)."""
+    value = _text(form, name) or choices[0]
+    if value not in choices:
+        raise OptionsError(Message("options.unknown_choice", {"name": name, "value": value}), name)
+    return value
+
+
+def _optional_choice(
+    fields: Fields, form: Mapping[str, str], name: str, choices: tuple[str, ...]
+) -> None:
+    """A select that sends nothing at its default (the first of ``choices``)."""
+    value = _picked(form, name, choices)
+    if value != choices[0]:
+        fields[name] = _Field(value, set_by_user=True)
+
+
+def _features(fields: Fields, form: Mapping[str, str], *, transcribe: bool) -> None:
+    """OCR, personal data and (``transcribe``) "Transcribe": each only when chosen."""
+    _optional_choice(fields, form, "ocr", OCR_CHOICES)
+    _optional_choice(fields, form, "pii", PII_CHOICES)
+    if transcribe and _text(form, "transcribe") == CHECKED:
+        fields["transcribe"] = _Field(True, set_by_user=True)
+
+
+def _with_choice(
+    fields: Fields, form: Mapping[str, str], name: str, select: str, choices: tuple[str, ...]
+) -> None:
+    """The select ``select`` sets ``strategy`` in the JSON object ``name``: at its default it
+    leaves a strategy the JSON names, otherwise the JSON must name none or the same one."""
+    value = _picked(form, select, choices)
+    given = fields.get(name)
+    if given is None:
+        if value != choices[0]:
+            fields[name] = _Field({"strategy": value}, set_by_user=True)
+        return
+    named = given.value.get("strategy")
+    if value == choices[0] or named == value:
+        return
+    if named is not None:
+        raise OptionsError(Message("options.given_twice", {"name": "strategy"}), select)
+    given.value["strategy"] = value
+
+
 def _whole_number(form: Mapping[str, str], name: str, default: int) -> int:
     value = _text(form, name)
     if not value:
@@ -308,6 +366,62 @@ def access_value(offer: AccessOffer, mode: ComplianceMode | None) -> str:
     return mode
 
 
+@dataclass(frozen=True)
+class FeatureOffer:
+    """The optional features the forms offer to a caller (package 19): each is True while the
+    service has it. ``llm_needs_key``: the service has no ``LLM_API_KEY``, so LLM work needs the
+    caller's key (the key field)."""
+
+    ocr: bool
+    pii: bool
+    transcribe: bool
+    llm: bool
+    llm_needs_key: bool
+    semantic: bool = False  # semantic chunking: the LLM and LLM_EMBEDDING_MODEL
+    # The features the service has but keeps for admin keys (``*_ALLOW_USERS``, P19-D1 b).
+    admin_only: frozenset[str] = frozenset()
+
+    def hint(self, feature: str, on: str, off: str) -> str:
+        """The hint key of ``feature``: ``on`` while offered, the admin-only text while the
+        service keeps it for admin keys, else ``off`` (switched off)."""
+        if getattr(self, feature):
+            return on
+        return _ADMIN_ONLY_HINTS[feature] if feature in self.admin_only else off
+
+
+_ADMIN_ONLY_HINTS: Final[dict[str, str]] = {
+    "ocr": "hint.ocr_admin_only",
+    "pii": "hint.pii_admin_only",
+    "transcribe": "hint.transcribe_admin_only",
+    "llm": "hint.llm_admin_only",
+}
+
+
+def feature_offer(role: str, settings: Settings) -> FeatureOffer:
+    """The features the forms offer to a caller of ``role``: what the service has and the role
+    may use (``feature_access.allowed``)."""
+    has = {
+        "ocr": ocr_available(settings),
+        "pii": pii_available(settings),
+        "transcribe": asr_available(settings) and settings.media_enabled,
+        "llm": llm_available(settings),
+    }
+    switch: dict[str, Feature] = {"ocr": "ocr", "pii": "pii", "transcribe": "asr", "llm": "llm"}
+    admin_only = frozenset(
+        name for name, on in has.items() if on and not allowed(switch[name], role, settings)
+    )
+    offered = {name: on and name not in admin_only for name, on in has.items()}
+    return FeatureOffer(
+        ocr=offered["ocr"],
+        pii=offered["pii"],
+        transcribe=offered["transcribe"],
+        llm=offered["llm"],
+        llm_needs_key=offered["llm"] and settings.llm_api_key is None,
+        semantic=offered["llm"] and settings.llm_embedding_model is not None,
+        admin_only=admin_only,
+    )
+
+
 def _no_constant(name: str) -> Any:
     """``NaN`` and ``Infinity`` are not JSON."""
     raise ValueError(name)
@@ -349,6 +463,7 @@ def _extract_fields(form: Mapping[str, str]) -> Fields:
     if _text(form, "describe_images") == CHECKED:
         max_images = _whole_number(form, "max_images", DEFAULT_MAX_IMAGES)
         fields["describe_images"] = _Field({"max_images": max_images}, set_by_user=True)
+    _features(fields, form, transcribe=True)
     _wait(fields, form)
     return fields
 
@@ -357,6 +472,7 @@ def _file_fields(form: Mapping[str, str]) -> Fields:
     fields: Fields = {}
     _choice(fields, form, "format", "markdown")
     _box(fields, form, "metadata", default=True)
+    _features(fields, form, transcribe=False)  # audio and video uploads are always transcribed
     _wait(fields, form)
     return fields
 
@@ -414,6 +530,7 @@ def _structured_fields(form: Mapping[str, str]) -> Fields:
     _choice(fields, form, "mode", "auto")
     _access(fields, form)
     _object(fields, form, "structured", Message("options.label.structured"))
+    _with_choice(fields, form, "structured", "strategy", STRATEGY_CHOICES)
     _wait(fields, form)
     return fields
 
@@ -430,6 +547,7 @@ def _chunk_fields(form: Mapping[str, str]) -> Fields:
         _access(fields, form)
     _choice(fields, form, "format", "markdown")
     _object(fields, form, "chunking", Message("options.label.chunking"))
+    _with_choice(fields, form, "chunking", "method", METHOD_CHOICES)
     _wait(fields, form)
     return fields
 
@@ -446,6 +564,7 @@ def _batch_fields(form: Mapping[str, str]) -> Fields:
     _choice(fields, form, "mode", "auto")
     _access(fields, form)
     _box(fields, form, "metadata", default=True)
+    _features(fields, form, transcribe=True)
     return fields
 
 

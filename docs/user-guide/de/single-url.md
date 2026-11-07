@@ -20,6 +20,13 @@ Antwort, auf die es ankommt. Eigene Dateien, Audio und Video beschreibt
 - „Screenshot mitliefern“: die ganze Seite als PNG, im Browser aufgenommen; die Anfrage dauert
   daher länger. Das Kästchen ist bei „Browser-Fallback: nie“ und solange der Browser aus ist
   gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Reiter Screenshot.
+- „Optionale Funktionen“: „OCR (Texterkennung)“ (automatisch, nie, immer), „Personenbezogene
+  Daten“ (unverändert lassen, maskieren, schwärzen, hashen, nur markieren) und „Audio und Video
+  ohne Untertitel transkribieren“. Standardmäßig ist nichts gewählt. Eine Funktion, die der Dienst
+  ausgeschaltet hat, ist gesperrt, und ihr Hinweis nennt den Schalter (`DOCLING_ENABLED`,
+  `PII_ENABLED`, `ASR_ENABLED`, `LLM_ENABLED`); ebenso eine Funktion, die der Dienst
+  Admin-Schlüsseln vorbehält, solange Sie mit einem Nutzer-Schlüssel angemeldet sind
+  (`OCR_ALLOW_USERS`, `PII_ALLOW_USERS`, `ASR_ALLOW_USERS`, `LLM_ALLOW_USERS`).
 - „Optionen (JSON)“ unter „Erweitert“ (ein zugeklappter Abschnitt, mit „Sekunden warten, bevor
   daraus ein Job wird“) nimmt jedes weitere Feld des REST-Bodys, etwa `{"links": true}`.
 

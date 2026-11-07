@@ -273,6 +273,10 @@ details with the warning `transcript_panel_unavailable`. An HTML page whose `<vi
 has a `<track>` gets that text after its own, under `## Transcript`, and `data.media.embeds` lists
 the players a page embeds, for you to extract one by one.
 
+A transcript (subtitles, the transcript view or a transcription) is all that the media says, so
+a short one is a `success`: `QUALITY_MIN_WORDS` does not apply to it, and only a transcript
+without any word is no result.
+
 With the ASR worker, `"transcribe": true` transcribes a video without subtitles or an audio or
 video file URL. A video with subtitles still answers at once; a transcription is always a job,
 answered 202 at once. An uploaded audio or video file is always transcribed (the bytes decide), up
@@ -372,7 +376,11 @@ which saves the whole envelope. An answer too large for the download says so and
   shows the content, the metadata, the images, the links and a timeline of what happened.
 - **File**, **Screenshot**, **Structured**, **Chunk** and **Info**: the other single calls, with
   the same result view; the "Options (JSON)" box under "Advanced" takes any further field of the
-  REST body.
+  REST body. **Extract**, **File** and **Batch** have "Optional features" (OCR, personal data,
+  and for Extract and Batch "Transcribe"); **Structured** has a "Strategy" select and **Chunk** a
+  "Method" select, which set the strategy of their JSON object. The LLM choices (strategy LLM,
+  method semantic, "Describe images") are disabled while the LLM is off, and say when the service
+  has no LLM key of its own, so that you enter yours.
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
 - **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by

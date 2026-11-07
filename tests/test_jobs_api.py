@@ -1386,3 +1386,20 @@ def test_job_json_has_run_field(api: Api) -> None:
         "claimed_at",
     }
     assert "run" in spec["components"]["schemas"]["JobItem"]["properties"]
+
+
+def test_a_user_batch_keeps_no_llm_key_while_the_llm_is_for_admins(
+    make_api: Callable[..., Api],
+) -> None:
+    """P19-R4: strategy ``auto`` of a user key without the LLM never calls it, so the caller's
+    key is not stored; an admin key's is."""
+    api = make_api(**llm_overrides(llm_allow_users=False))
+    auto = {"schema": LLM_SCHEMA, "strategy": "auto"}
+
+    user = api.batch([PAGE], headers=LLM_HEADERS, structured=auto)
+    assert user.status_code == 202, user.text
+    assert api.keys("job:*:llm_key") == []
+
+    admin = api.batch([PAGE], headers={**ROOT, "X-LLM-Api-Key": LLM_KEY}, structured=auto)
+    assert admin.status_code == 202, admin.text
+    assert len(api.keys("job:*:llm_key")) == 1

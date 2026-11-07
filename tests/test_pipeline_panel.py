@@ -586,3 +586,17 @@ def test_a_video_without_subtitles_is_not_rendered() -> None:
 
     assert renderer.calls == []
     assert data_of(envelope).media is not None
+
+
+def test_a_short_transcript_view_is_a_success() -> None:
+    """A transcript from the transcript view is judged as one: fewer words than
+    ``QUALITY_MIN_WORDS`` is the whole video, no ``content_too_short``."""
+    draft, valkey = draft_of(blocked_probe(), url=YT_SHORT)
+    renderer = watch()
+    harness = Harness(blocked_probe(), renderer=renderer, valkey=valkey, quality_min_words=500)
+
+    answer = harness.run(url=YT_SHORT, draft=draft)
+
+    assert answer.status == "success"
+    assert answer.error is None
+    assert data_of(answer).word_count < 500

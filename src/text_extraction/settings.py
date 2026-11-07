@@ -243,6 +243,7 @@ class Settings(BaseSettings):
     document_memory_limit_mb: int = Field(default=2048, ge=256)  # address space of one child
     # Docling worker (OCR). Off by default: the API image has neither Docling nor Tesseract.
     docling_enabled: bool = False
+    ocr_allow_users: bool = True  # may non-admin keys use OCR? (package 19)
     docling_timeout_seconds: float = Field(default=300, ge=30, le=1800)  # one conversion
     # How long a sync request waits for the Docling worker before it answers without OCR.
     docling_sync_wait_seconds: float = Field(default=20, ge=0, le=25)
@@ -280,6 +281,7 @@ class Settings(BaseSettings):
     media_transcript_panel_enabled: bool = True
     # ASR worker (speech recognition). Off by default: the API image has no models.
     asr_enabled: bool = False
+    asr_allow_users: bool = True  # may non-admin keys have media transcribed?
     asr_backend: Literal["local", "openai"] = "local"
     asr_model: Literal["small", "large-v3-turbo"] = "large-v3-turbo"  # the model manifest's names
     asr_models_path: Path = Path("/models")  # volume with the Whisper models, one folder each
@@ -299,6 +301,7 @@ class Settings(BaseSettings):
     # PII worker (personal data in results). Off by default: the API image has neither Presidio
     # nor spaCy nor models.
     pii_enabled: bool = False
+    pii_allow_users: bool = True  # may non-admin keys send `pii`?
     # Entity types handled when a request names none, comma-separated in the env var.
     pii_default_entities: Annotated[list[EntityType], NoDecode] = [
         "PERSON",
@@ -325,6 +328,7 @@ class Settings(BaseSettings):
     # LLM (structured output with an LLM, semantic chunking): an OpenAI-compatible endpoint that
     # is the operator's, not a caller's target (no SSRF guard). Off by default.
     llm_enabled: bool = False
+    llm_allow_users: bool = True  # may non-admin keys use the LLM?
     llm_base_url: str = "https://api.openai.com/v1"  # https unless llm_allow_http
     llm_allow_http: bool = False  # local development and tests
     llm_model: str = Field(default="gpt-6-luna", min_length=1)

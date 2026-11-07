@@ -17,12 +17,14 @@
     {#- Named by the box only while it shows: without the browser here, else by ui.js while the
     mode is "fast". #}
     <p class="hint" id="extract-screenshot-fast-hint"{% if browser_enabled %} hidden{% endif %}>{{ t("hint.screenshot_needs_browser") }}</p>
-    <label class="inline"><input type="checkbox" name="describe_images" value="on" aria-describedby="extract-describe-images-hint"> {{ t("form.describe_images") }}</label>
-    <p class="hint" id="extract-describe-images-hint">{{ t("hint.describe_images") }}</p>
+    <label class="inline"><input type="checkbox" name="describe_images" value="on"{% if not features.llm %} disabled{% endif %} aria-describedby="extract-describe-images-hint"> {{ t("form.describe_images") }}</label>
+    <p class="hint{% if not features.llm %} feature-off{% endif %}" id="extract-describe-images-hint">{{ t(features.hint("llm", "hint.describe_images", "hint.llm_off")) }}</p>
+    {% if features.llm_needs_key %}<p class="hint llm-key-hint">{{ t("hint.llm_needs_key") }}</p>{% endif %}
   </fieldset>
   <label for="extract-max-images">{{ t("form.max_images") }}</label>
-  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5" aria-describedby="extract-max-images-hint">
+  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5"{% if not features.llm %} disabled{% endif %} aria-describedby="extract-max-images-hint">
   <p class="hint" id="extract-max-images-hint">{{ t("hint.max_images") }}</p>
+  {% with with_transcribe=true, chosen=none %}{% include "forms/features.html" %}{% endwith %}
   {% include "forms/common.html" %}
   <button type="submit">{{ t("form.extract") }}</button>
 </form>

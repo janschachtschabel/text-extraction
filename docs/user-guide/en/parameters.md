@@ -30,13 +30,13 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `screenshot` | boolean | `false` | Also capture a screenshot, a PNG unless `screenshot_options` says otherwise. Not with `mode: fast`. |
 | `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
 | `screenshot_options` | object | unset | Viewport size, image format and size of the screenshot: `viewport` (`{"width", "height"}`, default 1920×1080), `format` (`png`, `jpeg` or `webp`), `quality` (1 to 100, only for `jpeg` and `webp`) and `width` (scales down, at most the viewport's width). Needs `screenshot`, so it is refused with `mode: fast`. |
-| `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. |
-| `transcribe` | boolean | `false` | Transcribe audio and video without subtitles (always a job). |
+| `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. `always` answers 403 for a user key while OCR is for admin keys only (`OCR_ALLOW_USERS=false`). |
+| `transcribe` | boolean | `false` | Transcribe audio and video without subtitles (always a job). 403 for a user key while transcription is for admin keys only (`ASR_ALLOW_USERS=false`); so is an audio or video upload. |
 | `languages` | list of language codes | empty | Preferred subtitle and transcription languages, at most 5, such as `["de", "en"]`. |
-| `pii` | mode or object | unset | Handle personal data: `mask`, `redact`, `hash` or `annotate`. See [`pii`](#pii). |
+| `pii` | mode or object | unset | Handle personal data: `mask`, `redact`, `hash` or `annotate`. See [`pii`](#pii). 403 for a user key while it is for admin keys only (`PII_ALLOW_USERS=false`). |
 | `structured` | object | unset | Fill the fields of a JSON schema from the page. See [`structured`](#structured). |
 | `chunking` | object | unset | Split the content into chunks. See [`chunking`](#chunking). |
-| `describe_images` | object | unset | Describe the page's images with the LLM. See [`describe_images`](#describe_images). |
+| `describe_images` | object | unset | Describe the page's images with the LLM. See [`describe_images`](#describe_images). While the LLM is for admin keys only (`LLM_ALLOW_USERS=false`), a user key gets 403 for it, for strategy `llm`, `learn_selectors` and `semantic` chunking; its strategy `auto` runs without the LLM. |
 
 <!-- request: POST /v1/extract -->
 ```json

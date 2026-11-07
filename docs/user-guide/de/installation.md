@@ -44,8 +44,9 @@ uv run pre-commit install    # install the git hooks
 ## Docker Compose
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker, einen ASR-Worker und ein Valkey mit Passwort. Es schaltet den Browsermodus, die
-Transkription, den MCP-Server und die Spielwiese ein.
+Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM) und ein
+Valkey mit Passwort. Es schaltet den Browsermodus, OCR, die Transkription, die Behandlung
+personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
@@ -69,7 +70,7 @@ MCP-Endpunkt unter http://localhost:8080/mcp.
 Statt die Images selbst zu bauen, kann Compose eine veröffentlichte Version von
 `ghcr.io/janschachtschabel/text-extraction` starten (linux/amd64). Die Datei
 `docker-compose.release.yml` ersetzt jeden Build durch das veröffentlichte Image; `.env` bleibt
-gleich, und die Profile funktionieren wie unten beschrieben.
+gleich, und die Schalter funktionieren wie unten beschrieben.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
@@ -82,34 +83,46 @@ denn ein Image, das schon auf dem Rechner liegt, wird nicht erneut geladen). Die
 
 ### Optionale Worker
 
-Die schwereren Teile laufen in eigenen Workern, die standardmäßig aus sind. Jeder hat ein
-Compose-Profil und einen Schalter in `.env`:
+Die schwereren Teile laufen in eigenen Workern. Compose startet sie alle, und jeder hat einen
+Schalter in `.env`, der standardmäßig `true` ist:
 
-| Worker | Schalter in `.env` | Profil | Was er hinzufügt |
+| Worker | Schalter in `.env` | Dienste | Was er hinzufügt |
 | --- | --- | --- | --- |
-| Docling | `DOCLING_ENABLED=true` | `docling` | OCR für Scans und Bilder, OpenDocument-Dateien (ein Image von etwa 2 GB, Modelle von etwa 335 MiB) |
-| NLP | `PII_ENABLED=true` | `nlp` | Behandlung personenbezogener Daten mit Presidio und spaCy (Modelle von etwa 1 GB für `lg`, 115 MB für `md`) |
-| LLM | `LLM_ENABLED=true` | `llm` | Strukturierte Ausgabe mit einem LLM, semantisches Chunking und Bildbeschreibungen |
+| Docling | `DOCLING_ENABLED` | `docling-models`, `docling-worker` | OCR für Scans und Bilder, OpenDocument-Dateien (ein Image von etwa 2 GB, Modelle von etwa 335 MiB) |
+| ASR | `ASR_ENABLED` | `asr-models`, `asr-worker` | Spracherkennung für Audio und Video (das Whisper-Modell, etwa 1,6 GB; `ASR_MODEL=small`, etwa 0,5 GB) |
+| NLP | `PII_ENABLED` | `nlp-models`, `nlp-worker` | Behandlung personenbezogener Daten mit Presidio und spaCy (Modelle von etwa 1 GB für `lg`, 115 MB für `md`) |
+| LLM | `LLM_ENABLED` | `llm-worker` | Strukturierte Ausgabe mit einem LLM, semantisches Chunking und Bildbeschreibungen |
 
-Die Spracherkennung für Audio und Video (der ASR-Worker) ist standardmäßig an: `docker compose up`
-startet sie, und ihr erster Start lädt das Whisper-Modell (etwa 1,6 GB; `ASR_MODEL=small`,
-etwa 0,5 GB). Um ohne sie zu starten, setzen Sie `ASR_ENABLED=false` in `.env` und starten mit
-`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`. Eine `.env`, die aus einer
-älteren `.env.example` kopiert ist, enthält noch `ASR_ENABLED=false`: Setzen Sie es auf `true`.
+Der erste Start lädt die Modelle in Volumes (zusammen etwa 3 GB); mit allen Workern braucht der
+Stack im Leerlauf etwa 6 GiB Arbeitsspeicher. Um ohne einen Worker zu starten, setzen Sie seinen
+Schalter in `.env` auf `false` und lassen seine Dienste weg, zum Beispiel
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. Eine `.env`, die
+aus einer älteren `.env.example` kopiert ist, hat die Schalter noch auf `false`: Setzen Sie sie auf `true`.
 
-Starten Sie ein Profil mit `docker compose --profile docling up --build` (mehrere: je ein
-`--profile`). Der erste Start lädt die Modelle in ein Volume. Der LLM-Worker braucht
-`LLM_BASE_URL`, `LLM_MODEL` und `LLM_API_KEY` eines OpenAI-kompatiblen Endpunkts (und
-`LLM_EMBEDDING_MODEL` für semantisches Chunking);
-`docker compose run --rm llm-worker text-extraction-llm-worker --check` sendet ihm eine winzige
-Extraktion. Für `pii: hash` mit demselben Hash in jedem Ergebnis setzen Sie `PII_HASH_KEY`
-(`openssl rand -hex 32`).
+Der LLM-Worker braucht `LLM_BASE_URL` und `LLM_MODEL` eines OpenAI-kompatiblen Endpunkts und einen
+Schlüssel: `LLM_API_KEY` in `.env` oder den `X-LLM-Api-Key` des Aufrufers (das Schlüsselfeld der
+Spielwiese); ohne beides antwortet eine Anfrage, die LLM-Arbeit ausdrücklich verlangt, mit 400, und
+die Strategie `auto` läuft ohne das LLM.
+`LLM_EMBEDDING_MODEL` ist für semantisches Chunking;
+`docker compose run --rm llm-worker text-extraction-llm-worker --check` sendet dem Endpunkt eine
+winzige Extraktion. Für `pii: hash` mit demselben Hash in jedem Ergebnis setzen Sie
+`PII_HASH_KEY` (`openssl rand -hex 32`).
 
 Solange ein Schalter aus ist, antwortet eine Anfrage, die seinen Worker braucht, mit 400: `pii`
 ohne `PII_ENABLED`, die Strategie `llm`, `learn_selectors` und `semantic`-Chunking ohne
 `LLM_ENABLED`, `describe_images` ohne `LLM_ENABLED`, `transcribe` ohne `ASR_ENABLED` und
 `ocr: always` ohne `DOCLING_ENABLED`. Mit `ocr: auto` (der Vorgabe) liefert ein Scan ohne
 `DOCLING_ENABLED` nur seine Textebene, mit der Warnung `ocr_unavailable`.
+
+Um eine Funktion Admin-Schlüsseln vorzubehalten, setzen Sie ihren zweiten Schalter auf `false`:
+`OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` oder `LLM_ALLOW_USERS` (alle standardmäßig
+`true`). Ein Nutzer-Schlüssel, der die Funktion anfordert, bekommt dann 403 `forbidden`:
+`ocr: always`, `transcribe` oder das Hochladen von Audio oder Video, `pii` sowie die Strategie
+`llm`, `learn_selectors`, `semantic`-Chunking oder `describe_images`. Wo ein Nutzer-Schlüssel sie
+nicht ausdrücklich anfordert, läuft die Anfrage ohne die Funktion: Ein Scan bekommt kein OCR
+(`ocr_unavailable`), und die Strategie `auto` fragt für die noch fehlenden Felder kein LLM (Warnung `llm_unavailable`).
+Die Spielwiese zeigt eine solche Auswahl deaktiviert, mit einem Hinweis. Admin-Schlüssel dürfen
+jede Funktion nutzen, die der Dienst hat.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).

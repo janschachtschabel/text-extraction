@@ -199,6 +199,7 @@ from text_extraction.extract_models import (
     ServerErrorInfo,
     Timings,
 )
+from text_extraction.feature_access import allowed, forbidden_message
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, split_content_type
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
@@ -255,6 +256,7 @@ from text_extraction.pipeline_media import (
     asr_available,
     asr_failed,
     cached_details_only,
+    is_transcript,
     no_speech,
     panel_result,
     transcribed,
@@ -485,6 +487,7 @@ class _Run:
     validators: Validators = field(default_factory=Validators)  # of the fast fetch's answer
     ocr_handoff: OcrHandoff | None = None
     ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
+    ocr_kept: bool = False  # OCR is for admin keys only, and the caller is none (P19-R4)
     # What the fast fetch asks for: the request URL, or the file a render ended on (F18), which
     # is fetched only to convert a document.
     target: str = ""
@@ -594,6 +597,7 @@ class _UploadRun:
     warnings: list[str] = field(default_factory=list)
     ocr_handoff: OcrHandoff | None = None
     ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
+    ocr_kept: bool = False  # OCR is for admin keys only, and the caller is none (P19-R4)
     asr_handoff: TranscriptionHandoff | None = None
     asr_needed: AsrNeeded | None = None  # likewise
     short_ok: bool = False  # a page of fewer words than QUALITY_MIN_WORDS is no "too short"
@@ -845,7 +849,8 @@ class Pipeline:
             admin=principal.role == "admin",
             draft=draft if req.mode == "auto" else None,
             artifacts=artifacts,
-            ocr_handoff=ocr_handoff,
+            ocr_handoff=None if self._ocr_kept(principal) else ocr_handoff,
+            ocr_kept=self._ocr_kept(principal),
             target=req.url,
             asr_handoff=asr_handoff,
             owner=principal.name,
@@ -913,7 +918,8 @@ class Pipeline:
             req=_upload_options(form),
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
-            ocr_handoff=ocr_handoff,
+            ocr_handoff=None if self._ocr_kept(principal) else ocr_handoff,
+            ocr_kept=self._ocr_kept(principal),
             asr_handoff=asr_handoff,
             short_ok=short_ok,
         )
@@ -1191,6 +1197,12 @@ class Pipeline:
             media=media_target(req.url) if meta.source == "platform" else None,
             owner=principal.name,
         )
+
+    def _ocr_kept(self, principal: Principal) -> bool:
+        """Whether the service has OCR but keeps it for admin keys and ``principal`` is none
+        (``OCR_ALLOW_USERS``, P19-R4): its documents get no OCR hand-off, as if OCR were off,
+        and a document that needs it says so (``ocr_unavailable``, or the 403 text)."""
+        return ocr_available(self._settings) and not allowed("ocr", principal.role, self._settings)
 
     # --- hooks of the site crawl (P9-S10) -------------------------------------------------------
 
@@ -1712,7 +1724,11 @@ class Pipeline:
             # While the service has OCR, only a render's extraction (which hands nothing on, or
             # compares with a draft) ends here without it.
             message = (
-                OCR_NOT_HANDED_MESSAGE if ocr_available(self._settings) else OCR_DISABLED_MESSAGE
+                forbidden_message("ocr")
+                if run.ocr_kept
+                else OCR_NOT_HANDED_MESSAGE
+                if ocr_available(self._settings)
+                else OCR_DISABLED_MESSAGE
             )
             outcome = without_ocr(outcome, run, message=message)
         # The validators fit the request URL only; a file a render ended on is not revalidated.
@@ -2175,6 +2191,8 @@ class Pipeline:
         if run.ocr_handoff is not None:
             run.ocr_needed = outcome  # `extract_upload` hands it over once the deadline is off
             return without_ocr(outcome, run)  # its stand-in until then
+        if run.ocr_kept:
+            return without_ocr(outcome, run, message=forbidden_message("ocr"))
         if ocr_available(self._settings):
             return without_ocr(outcome, run, message=OCR_NOT_HANDED_REASON)
         return without_ocr(outcome, run)
@@ -2845,8 +2863,10 @@ class Pipeline:
         self, result: ExtractResult, *, min_words: int | None = None
     ) -> Envelope[ExtractResult]:
         """The envelope for a finished result: the quality verdict decides the status.
-        ``min_words`` replaces ``QUALITY_MIN_WORDS`` (an upload with ``short_ok``)."""
-        min_words = self._settings.quality_min_words if min_words is None else min_words
+        ``min_words`` replaces ``QUALITY_MIN_WORDS`` (an upload with ``short_ok``); a media
+        transcript (``is_transcript``) needs one word only, since it is all the media says."""
+        if min_words is None:
+            min_words = 1 if is_transcript(result) else self._settings.quality_min_words
         verdict = quality_error(result.quality, min_words) if result.quality else None
         if verdict is None:
             return Envelope(status="success", data=result)

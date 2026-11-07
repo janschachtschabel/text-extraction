@@ -1627,3 +1627,17 @@ def test_a_transient_platform_error_on_a_zdf_page_is_no_reason_to_fall_back(erro
     assert data_of(second).cache == "miss"
     assert harness.probes() == 2
     assert harness.keys("res:*") == []
+
+
+def test_a_short_subtitle_track_is_a_success() -> None:
+    """A transcript is what the video says: one shorter than ``QUALITY_MIN_WORDS`` is the whole
+    of it, no ``content_too_short`` (2026-11-07, a 27-word video)."""
+    short = probe(track=track("manual_subtitles", "en", body=vtt(SENTENCES[:1])))
+    harness = Harness(media=short)
+
+    envelope = harness.run()
+
+    assert envelope.status == "success"
+    assert envelope.error is None
+    assert data_of(envelope).word_count < harness.settings.quality_min_words
+    assert data_of(envelope).fingerprint is not None

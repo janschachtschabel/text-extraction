@@ -427,6 +427,21 @@ class TranscribedContent:
     language: str | None
 
 
+_TRANSCRIPTS: Final = frozenset({"manual_subtitles", "auto_subtitles", "asr", "transcript_panel"})
+
+
+def is_transcript(result: ExtractResult) -> bool:
+    """Whether ``result``'s content is a media transcript and nothing else: subtitles, the
+    transcript view or a transcription, of a platform video, a media file or an upload. Such
+    content is all the media says, so ``QUALITY_MIN_WORDS`` does not judge it (a short clip is
+    complete, not ``content_too_short``); without any word it is still ``empty_content``. A
+    page with its ``<track>`` texts appended (``html5``) is a page and is judged as one."""
+    media = result.media
+    return (
+        media is not None and media.platform != "html5" and media.transcript_source in _TRANSCRIPTS
+    )
+
+
 def transcribed_content(
     fmt: OutputFormat, transcription: Transcription, title: str | None
 ) -> TranscribedContent:

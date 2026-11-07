@@ -188,6 +188,7 @@ from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import needs_browser, transcript_panel_applies, unblock_for
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
+from text_extraction.feature_access import settings_for
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
@@ -779,7 +780,9 @@ class Worker:
                 job.options.structured,
                 job.options.chunking,
                 pii,
-                settings=self._settings,
+                # The features the job's owner may use (P19-R4): strategy `auto` of a key
+                # without the LLM runs without it.
+                settings=settings_for(self._settings, job_principal(job)),
                 threads=self._post_pool,
                 hop=self._llm_hop(job, item),
                 describe=job.options.describe_images,

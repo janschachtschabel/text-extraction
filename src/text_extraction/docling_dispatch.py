@@ -86,6 +86,7 @@ from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
+from text_extraction.feature_access import settings_for
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import InputBudgetExceeded, JobRecord, JobStore
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
@@ -347,7 +348,9 @@ class DoclingHandoff:
                 llm=wants_llm(
                     self._options.structured,
                     self._options.chunking,
-                    dispatcher.settings,
+                    settings_for(
+                        dispatcher.settings, self._principal, has_llm_key=self._llm_key is not None
+                    ),
                     describe=self._options.describe_images,
                 ),
             )

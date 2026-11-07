@@ -19,6 +19,12 @@ Open the **Extract** tab, enter the URL and press "Extract".
 - "Also take a screenshot": the whole page as a PNG, taken in the browser, so the request takes
   longer. The box is disabled with "Browser fallback: never" and while the browser is off; its
   hint says why. Format and size are on the Screenshot tab.
+- "Optional features": "OCR (text recognition)" (automatic, never, always), "Personal data"
+  (leave as is, mask, redact, hash, mark only) and "Transcribe audio and video without
+  subtitles". Nothing is chosen by default. A feature the service has switched off is disabled,
+  and its hint names the switch (`DOCLING_ENABLED`, `PII_ENABLED`, `ASR_ENABLED`, `LLM_ENABLED`);
+  so is a feature the service keeps for admin keys while you are signed in with a user key
+  (`OCR_ALLOW_USERS`, `PII_ALLOW_USERS`, `ASR_ALLOW_USERS`, `LLM_ALLOW_USERS`).
 - "Options (JSON)", under "Advanced" (a closed section, with "Wait seconds before it becomes a
   job"), takes any further field of the REST body, such as `{"links": true}`.
 

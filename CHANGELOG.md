@@ -16,12 +16,38 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `.env.example` is `true`; `ASR_ENABLED=false` with `--scale asr-models=0 --scale asr-worker=0`
   switches it off. The service's own default and the Helm chart (`workers.asr.enabled`) are
   unchanged. An existing `.env` with `ASR_ENABLED=false` keeps transcription off: set it to `true`.
+- docker compose starts every optional worker by default (package 19): the Docling, NLP and llm
+  workers have no profiles any more (`docling`, `nlp`, `llm` are gone), and `DOCLING_ENABLED`,
+  `PII_ENABLED` and `LLM_ENABLED` are `true` in compose and `.env.example`. Each switch at `false`,
+  with `--scale` of the feature's services to 0, switches a feature off. The LLM still needs a key
+  (`LLM_API_KEY` or the caller's `X-LLM-Api-Key`). The Helm chart is unchanged.
+
+### Added
+
+- `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default `true`)
+  keep a feature for admin keys (package 19): a user key that asks for it gets 403 `forbidden`
+  (`ocr: always`; `transcribe` or an audio or video upload; `pii`; strategy `llm`,
+  `learn_selectors`, `semantic` chunking, `describe_images`); such a key's documents get no OCR
+  (`ocr_unavailable`) and strategy `auto` runs without the LLM (`llm_unavailable`). The playground disables
+  such a choice with a hint.
+- Strategy `auto` with a schema and no LLM key at all (neither `X-LLM-Api-Key` nor `LLM_API_KEY`)
+  runs without the LLM (`llm_unavailable`) instead of answering 400: compose now switches the LLM
+  on without a key, and the playground's default Structured request must work. LLM work that
+  names the LLM (`llm`, `learn_selectors`, `semantic`, `describe_images`) still answers 400.
+- The playground offers the optional features as choices (package 19): "Optional features" in
+  Extract, File and Batch (OCR automatic/never/always, personal data, "Transcribe" for Extract and
+  Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by
+  default; a feature the service has switched off is disabled with a hint naming its switch, and
+  the LLM choices say when the caller's LLM key is needed.
 
 ### Fixed
 
 - The playground names switched-off transcription ("Transcription is switched off in this
   service") instead of "This kind of content cannot be converted" when an audio or video upload
   or `transcribe: true` meets a service without ASR.
+- A short transcript is a `success`, not `partial` with `content_too_short`: subtitles, the
+  transcript view and a transcription are all that the media says, so `QUALITY_MIN_WORDS` does
+  not apply to them (a 27-word video was marked partial).
 
 ## [0.1.6] - 2026-11-07
 

@@ -49,7 +49,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `COMPLIANCE_DEFAULT` | `enforce` | Compliance mode when a request does not choose one: `enforce` blocks what robots.txt, TDMRep, ai.txt or `noai` forbid; `report` only reports it; `ignore` skips the checks. |
 | `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. |
 | `COMPLIANCE_CACHE_SECONDS` | `3600` | How long robots.txt, `tdmrep.json` and ai.txt of an origin are cached in Valkey. 0 switches the cache off. A file that could not be fetched (5xx, 429, network error) is cached at most 300 s, so a short outage does not block a site for the whole period. Minimum 0. |
-| `QUALITY_MIN_WORDS` | `50` | Fewest words (tokens with a letter or digit) the extracted content must have. Fewer ends as `partial` with `content_too_short`; no words at all is `failed` with `empty_content`. 0 switches the length check off. Minimum 0. |
+| `QUALITY_MIN_WORDS` | `50` | Fewest words (tokens with a letter or digit) the extracted content must have. Fewer ends as `partial` with `content_too_short`; no words at all is `failed` with `empty_content`. 0 switches the length check off. Minimum 0. A media transcript (subtitles, transcript view, transcription) needs one word only: it is all the media says. |
 | `RESULT_CACHE_TTL_SECONDS` | `3600` | How long a stored extraction result counts as fresh and is served without asking the site, measured from the time it was produced. 0 means a stored result is never served unchecked; it can still be revalidated. A fresh hit skips the compliance checks too: it carries the compliance report of the extraction that produced it, so a new robots.txt or TDM opt-out reaches cached results only after up to `RESULT_CACHE_TTL_SECONDS` plus `COMPLIANCE_CACHE_SECONDS`. Setting this above `COMPLIANCE_CACHE_SECONDS` lengthens that lag. Minimum 0. |
 | `RESULT_STORE_TTL_SECONDS` | `86400` | How long a result stays in Valkey so a stale one can be revalidated with ETag/Last-Modified or the raw-content hash instead of being extracted again. 0 stores no results. Results over 2 MB as JSON are never stored. Minimum 0. |
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. Minimum 0. |
@@ -239,9 +239,10 @@ and holds no models: they come from a volume (Helm: a PVC filled by an init cont
 the volume `docling-models` filled by the one-shot service `docling-models`). All images start
 `tini` as PID 1, which forwards signals and reaps orphaned child processes.
 
-docker compose starts the Docling worker only with the profile `docling`:
-`docker compose --profile docling up -d --wait` with `DOCLING_ENABLED=true` in `.env` (compose
-passes `DOCLING_ENABLED` from `.env` or the shell to every service, default false). The service
+docker compose always starts the Docling worker (no profile): OCR is on by default there (compose
+passes `DOCLING_ENABLED` from `.env` or the shell to every service, default true). To switch it
+off, set `DOCLING_ENABLED=false` in `.env` and start with
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. The service
 `docling-models` runs `--download-models` into the volume first (it needs the internet once), then
 `docling-worker` mounts it read-only; its stop grace period is 45 s.
 
@@ -357,7 +358,8 @@ worker. Docling is off by default: without it a scan keeps its text layer and an
 | `DOCUMENT_MAX_UNCOMPRESSED_BYTES` | `200000000` | Largest total size of all entries of a ZIP-based document (DOCX, PPTX, XLSX, EPUB, ODT, ODS, ODP) once unpacked, in bytes. A document over it, with more than 10,000 entries or with an entry that unpacks to over 100 times its size fails with `too_large`. Minimum 1024. |
 | `DOCUMENT_CONCURRENCY` | `2` | Conversion child processes per pod; each converts one document at a time. A request waits for a free one within its time budget. Minimum 1. |
 | `DOCUMENT_MEMORY_LIMIT_MB` | `2048` | Address space limit (`RLIMIT_AS`) of one conversion child, in MiB. A child that exceeds it answers `too_large`. Minimum 256. Keep `DOCUMENT_CONCURRENCY` x this below the container's memory limit minus what the process itself needs; the Helm chart renders it that way from the memory limit (768 with the defaults) unless set in `config`. |
-| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod. |
+| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod; docker compose sets it to true unless `.env` or the shell says false. |
+| `OCR_ALLOW_USERS` | `true` | Whether user keys may use OCR. `false` keeps it for admin keys (as `COMPLIANCE_ALLOW_OVERRIDE` does for the compliance mode): a user key's `ocr: always` answers 403 `forbidden` ("OCR is for admin keys only on this service."); its documents get no OCR, as if it were off (the text layer with `ocr_unavailable`; an image answers `unsupported_content_type`), and the playground disables the choice with a hint. No effect while `DOCLING_ENABLED` is off or with `AUTH_MODE=none` (every caller is admin). |
 | `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. Docling itself stops at 0.9 of it and answers the pages it read (warning `pages_partial`). 30 to 1800. |
 | `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
 | `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker, or of an upload that became a job (`wait_seconds`), stay in Valkey, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
@@ -419,6 +421,7 @@ neither Whisper nor models); docker compose starts the ASR worker and switches i
 | `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds (a platform video's info and its download together), within the item's `ASR_TIMEOUT_SECONDS`: the download gets this or what is left of the item's budget, whichever is less. A download that runs out of it fails with `timeout`, retryable (out of the item's budget: not retryable). A media file's download holds its host's turn at the outbound gate, so with `ASR_ENABLED` a turn's lease lasts at least this long plus 30 s. 30 to 3600. |
 | `MEDIA_TRANSCRIPT_PANEL_ENABLED` | `true` | Use YouTube's new transcript view in the browser when the subtitles could not be read (`auto` requests, needs `BROWSER_ENABLED`). Default `true`. |
 | `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request` and an audio or video upload `unsupported_content_type` (the playground names the switched-off transcription). The Helm chart sets it from `workers.asr.enabled` on every pod; docker compose sets it to true unless `.env` or the shell says false. |
+| `ASR_ALLOW_USERS` | `true` | Whether user keys may use transcription. `false` keeps it for admin keys (as `COMPLIANCE_ALLOW_OVERRIDE` does for the compliance mode): a user key's `transcribe: true` or audio or video upload answers 403 `forbidden` ("Transcription is for admin keys only on this service."), and the playground disables the choice with a hint. No effect while `ASR_ENABLED` is off or with `AUTH_MODE=none` (every caller is admin). |
 | `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. The client is the OpenAI SDK, as for the LLM: it never sends the headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID`, and with `ASR_ENABLED=true` and `openai` start-up refuses `OPENAI_CUSTOM_HEADERS` and `OPENAI_LOG` when set and not empty (exit code 2; see LLM). |
 | `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
 | `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |
@@ -489,7 +492,8 @@ time. A result that could not be processed answers `failed`/`pii_failed` with it
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`; start-up refuses `PII_ENABLED=true` without it. Off, a request with `pii` answers 400 `invalid_request`. The Helm chart sets it from `workers.nlp.enabled` on every pod. docker compose: `.env` together with the profile `nlp`. |
+| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`; start-up refuses `PII_ENABLED=true` without it. Off, a request with `pii` answers 400 `invalid_request`. The Helm chart sets it from `workers.nlp.enabled` on every pod. docker compose starts the NLP worker and sets it to true unless `.env` or the shell says false (then also `--scale nlp-models=0 --scale nlp-worker=0`). |
+| `PII_ALLOW_USERS` | `true` | Whether user keys may use PII handling. `false` keeps it for admin keys (as `COMPLIANCE_ALLOW_OVERRIDE` does for the compliance mode): a user key's `pii` answers 403 `forbidden` ("PII handling is for admin keys only on this service."), and the playground disables the choice with a hint. No effect while `PII_ENABLED` is off or with `AUTH_MODE=none` (every caller is admin). |
 | `PII_DEFAULT_ENTITIES` | `PERSON,EMAIL_ADDRESS,PHONE_NUMBER,IBAN_CODE,CREDIT_CARD,IP_ADDRESS` | Entity types handled when a request names none: a comma-separated list of `PERSON`, `LOCATION`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, without repeats. Places, organisations and URLs are left out by default: teaching material is full of them and they are rarely personal data. An empty, unknown or repeated entry makes the service exit with code 2. |
 | `PII_SCORE_THRESHOLD` | `0.4` | Least confidence of an entity, 0 to 1, when a request names none (`score_threshold`). Lower finds more and mistakes more. |
 | `PII_FALLBACK_LANGUAGE` | `en` | The model (`de` or `en`) for names in a language that has none of its own, with the warning `pii_language_unsupported`. The patterns (e-mail, phone, IBAN, card, IP) work in any language. |
@@ -557,6 +561,7 @@ transcription client is the same SDK). Neither the chart nor docker compose sets
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it, and with `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` set (exit code 2). |
+| `LLM_ALLOW_USERS` | `true` | Whether user keys may use the LLM. `false` keeps it for admin keys (as `COMPLIANCE_ALLOW_OVERRIDE` does for the compliance mode): a user key's strategy `llm`, `learn_selectors`, `semantic` chunking or `describe_images` answers 403 `forbidden` ("The LLM is for admin keys only on this service."); its strategy `auto` runs without the LLM (missing fields stay missing, warning `llm_unavailable`) and its `X-LLM-Api-Key` is not stored with a job, and the playground disables the choice with a hint. No effect while `LLM_ENABLED` is off or with `AUTH_MODE=none` (every caller is admin). |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible endpoint (`<base>/chat/completions`, `<base>/embeddings`). https only unless `LLM_ALLOW_HTTP=true`; anything else makes the service exit with code 2 (the URL is not echoed, it may carry credentials). |
 | `LLM_ALLOW_HTTP` | `false` | Also accept an `http` URL: a local model server in development, tests. Never in production. |
 | `LLM_MODEL` | `gpt-6-luna` | Model name sent with every chat request. Chosen by the operator, never per request. |
@@ -589,7 +594,8 @@ same name. The other `LLM_*` settings and `SELECTOR_LEARN_TTL_SECONDS`,
 `STRUCTURED_SELECTOR_PROCESSES`, `STRUCTURED_SELECTOR_MEMORY_MB` and `POST_CONCURRENCY` are service
 defaults (the chart sets the last four under `config` with these values): set them under
 `config` (for example `config.LLM_TIMEOUT_SECONDS`, and `config.LLM_ALLOW_HTTP` for an `http` URL).
-docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm worker's
+docker compose starts the llm worker and sets `LLM_ENABLED` to true unless `.env` or the shell
+says false (then also `--scale llm-worker=0`); the llm worker's
 `stop_grace_period` (45 s) must stay at least `LLM_GRACEFUL_SECONDS` + 10 s: raise both together.
 
 | Key | Default | Variable or effect |
@@ -1204,7 +1210,7 @@ read the queue and exports no queue gauge.
 
 The Helm chart's requests and limits come from measurement under load, not from estimates (ops
 guide, section 5.3). The load test (`.github/workflows/load.yml`, `tests/load/`) starts the
-compose stack with every profile (one container per service) plus a local site farm and a fake
+compose stack with every worker (one container per service) plus a local site farm and a fake
 OpenAI-compatible server, runs each scenario alone, and samples `docker stats` every 2 s. A
 scenario's numbers come only from the samples inside its window (its first request to its last
 answer plus a settle time). CPU is in % of one core. Memory is `MemUsage` in MiB: cgroup usage
