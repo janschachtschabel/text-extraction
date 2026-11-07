@@ -665,12 +665,19 @@ below).
 older cannot read results with the page types `event` or `learning_material` or with a link that
 says `crawl: sitemap_first`: such a result fails in an old API pod that reads it (the results of a
 job, or a sync request that waits for a browser or Docling worker), for extract and batch jobs as
-well as site jobs. They also refuse site jobs with `discovery: sitemap_first` (their site options
-forbid unknown fields; 0.1.6 stores `discovery` in every site job, from 0.1.7 on only when it is
-`sitemap_first`). Update the API pods before the workers, and send site jobs with
-`discovery: sitemap_first` only once every pod runs the new release. From 0.1.7 on, readers map
-an unknown page type to `other`, an unknown link category to `content` and an unknown `crawl`
-value to `listed`, so new values that a later release adds need no order.
+well as site jobs. Their site options also forbid unknown fields, so they refuse a stored site job
+that carries `discovery`. Update the API pods before the workers in both cases; what else waits
+depends on the target:
+
+- **To 0.1.6:** 0.1.6 stores `discovery` in every site job, also at its default `crawl`, so a
+  0.1.5 pod refuses every site job a 0.1.6 pod creates. Create site jobs only once every pod runs
+  0.1.6.
+- **To 0.1.7 or later:** `discovery` is stored only when it is `sitemap_first` (it is left out
+  at the default `crawl`, `_options_json` in `jobs.py`), so only site jobs with
+  `discovery: sitemap_first` wait until every pod runs the new release.
+
+From 0.1.7 on, readers map an unknown page type to `other`, an unknown link category to `content`
+and an unknown `crawl` value to `listed`, so new values that a later release adds need no order.
 
 **Capacity of the extract workers.**
 
