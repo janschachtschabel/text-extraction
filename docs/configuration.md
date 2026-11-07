@@ -1214,8 +1214,8 @@ the service, not the politeness limits: it sets `OUTBOUND_MIN_DELAY_MS=0` (no pe
 of the farm, one host with no network latency. The latencies below are therefore the service's
 own processing time. Under the defaults a batch takes at least (URLs per host) ×
 `OUTBOUND_MIN_DELAY_MS` per host, and at least (URLs per host) × fetch time /
-`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 1,000 s (about
-17 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 500 s (about
+8 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
 requests a minute.
 
 Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10-31:
