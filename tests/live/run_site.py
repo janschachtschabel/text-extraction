@@ -20,9 +20,10 @@ import statistics
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -229,6 +230,43 @@ def tally(
     )
 
 
+# The service's own per-client rate limit (429 `rate_limited`) is waited out, not reported.
+RETRY_AFTER_FALLBACK_SECONDS = 10.0
+RETRY_AFTER_CAP_SECONDS = 60.0
+MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _is_rate_limited(response: httpx.Response) -> bool:
+    if response.status_code != 429:
+        return False
+    try:
+        return bool((response.json().get("error") or {}).get("code") == "rate_limited")
+    except (ValueError, AttributeError):
+        return False
+
+
+def _retry_after(response: httpx.Response) -> float:
+    try:
+        seconds = float(response.headers["Retry-After"])
+    except (KeyError, ValueError):
+        return RETRY_AFTER_FALLBACK_SECONDS
+    if seconds != seconds or seconds < 0:  # NaN or negative
+        return RETRY_AFTER_FALLBACK_SECONDS
+    return min(seconds, RETRY_AFTER_CAP_SECONDS)
+
+
+async def _patient(send: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+    """The answer of ``send``; a 429 `rate_limited` is retried after its `Retry-After` seconds
+    (10 without a usable one, at most 60), up to 5 times, then returned as it is."""
+    response = await send()
+    for _ in range(MAX_RATE_LIMIT_RETRIES):
+        if not _is_rate_limited(response):
+            break
+        await asyncio.sleep(_retry_after(response))
+        response = await send()
+    return response
+
+
 def _refusal(response: httpx.Response) -> str:
     try:
         error = response.json().get("error") or {}
@@ -246,7 +284,8 @@ async def _items(
     offset: int | None = 0
     job: dict[str, Any] = {}
     while offset is not None:
-        response = await get_job(client, status_url, {"offset": offset, "limit": page_size})
+        params = {"offset": offset, "limit": page_size}
+        response = await _patient(partial(get_job, client, status_url, params))
         response.raise_for_status()
         job = response.json()["data"]
         items += job.get("items") or []
@@ -277,13 +316,13 @@ async def crawl(
         "cache": False,
     }
     try:
-        response = await client.post("/v1/site-structure", json=body)
+        response = await _patient(lambda: client.post("/v1/site-structure", json=body))
         if response.status_code != 202:
             return SiteReport.refused(url, _refusal(response))
         status_url = response.json()["data"]["status_url"]
         error: str | None = None
         while True:
-            polled = await get_job(client, status_url, {"limit": 1})
+            polled = await _patient(lambda: get_job(client, status_url, {"limit": 1}))
             polled.raise_for_status()
             if polled.json()["data"]["state"] == "completed":
                 break

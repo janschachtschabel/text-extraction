@@ -318,6 +318,67 @@ def test_crawl_sends_the_documented_request_and_pages_the_items() -> None:
     ]
 
 
+def limited_then(
+    transport: httpx.MockTransport, times: int, *, method: str = "POST"
+) -> tuple[httpx.MockTransport, list[int]]:
+    """``transport``, but its first ``times`` requests of ``method`` get the service's own 429."""
+    left = times
+    answered: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal left
+        if request.method == method and left > 0:
+            left -= 1
+            answered.append(429)
+            error = {"code": "rate_limited", "message": "x", "retryable": True}
+            return httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"status": "failed", "error": error}
+            )
+        return transport.handle_request(request)
+
+    return httpx.MockTransport(handler), answered
+
+
+def test_the_services_own_429_is_waited_out() -> None:
+    transport, _ = fake_service(ITEMS)
+    limited, answered = limited_then(transport, 1)
+
+    report = crawl_with(limited)
+
+    assert answered == [429]
+    assert report == tally(START, JOB, ITEMS)
+
+
+def test_a_429_on_a_poll_is_waited_out_too() -> None:
+    transport, _ = fake_service(ITEMS, states=["running", "completed"])
+    limited, answered = limited_then(transport, 2, method="GET")
+
+    report = crawl_with(limited)
+
+    assert answered == [429, 429]
+    assert report == tally(START, JOB, ITEMS)
+
+
+def test_a_429_that_does_not_end_is_reported_as_a_refusal() -> None:
+    transport, _ = fake_service(ITEMS)
+    limited, answered = limited_then(transport, 6)
+
+    report = crawl_with(limited)
+
+    assert len(answered) == 6  # the first send and five retries
+    assert report == SiteReport.refused(START, "HTTP 429 rate_limited")
+
+
+def test_retry_after_is_capped_and_has_a_fallback() -> None:
+    def answer(headers: dict[str, str]) -> httpx.Response:
+        return httpx.Response(429, headers=headers)
+
+    assert run_site._retry_after(answer({"Retry-After": "3"})) == 3
+    assert run_site._retry_after(answer({"Retry-After": "600"})) == 60
+    assert run_site._retry_after(answer({})) == 10
+    assert run_site._retry_after(answer({"Retry-After": "soon"})) == 10
+
+
 def test_a_refused_request_is_reported_not_raised() -> None:
     transport, _ = fake_service(ITEMS, accept=503)
 

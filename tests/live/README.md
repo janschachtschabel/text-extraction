@@ -135,10 +135,16 @@ the job every `--poll-seconds` until it is `completed` (a read that ends in a tr
 sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
-sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at `/sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and `crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and one by `crawl` decision; and the
-warnings and error codes of the items. A request the service refuses (a 4xx or 5xx) or a job that
-does not complete within `--job-timeout` is reported in the State column, with what the job had
-so far. The exit code is always 0: the run is a report.
+sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at
+`/sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no
+page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and
+`crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and
+one by `crawl` decision; and the warnings and error codes of the items. A request the service
+refuses (a 4xx or 5xx) or a job that does not complete within `--job-timeout` is reported in the
+State column, with what the job had so far. The service's own per-client rate limit (429
+`rate_limited`, on the request or a read of the job) is waited out: the harness waits `Retry-After`
+seconds (10 without a usable one, at most 60 per wait) and sends again, at most 5 times per
+request, then reports the refusal. The exit code is always 0: the run is a report.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
