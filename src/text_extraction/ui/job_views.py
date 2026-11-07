@@ -56,6 +56,7 @@ from text_extraction.ui.forms import (
     access_offer,
     access_value,
     build_body,
+    feature_offer,
 )
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Code, Message, count_message
@@ -565,6 +566,7 @@ def _preview(
         "chosen": chosen,
         "access": access_offer(role, settings),
         "browser_enabled": settings.browser_enabled,
+        "features": feature_offer(role, settings),
         **_problems(listed.invalid),
     }
     return templates.TemplateResponse(request, "batch_preview.html", context)
@@ -870,6 +872,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "unchecked_origins": [Code(origin) for origin in tree.unchecked],
         "unchecked_more": tree.unchecked_more,
         "browser_enabled": settings.browser_enabled,
+        "features": feature_offer(principal.role, settings),
     }
     html = await asyncio.to_thread(templates.get_template("tree.html").render, context)
     return HTMLResponse(html)

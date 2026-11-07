@@ -26,10 +26,7 @@ WORKFLOW = REPO / ".github" / "workflows" / "load.yml"
 OVERRIDE = REPO / "deploy" / "load" / "compose.load.yml"
 BASE = REPO / "docker-compose.yml"
 CI = REPO / ".github" / "workflows" / "ci.yml"
-COMPOSE_ARGS = (
-    "-f docker-compose.yml -f deploy/load/compose.load.yml"
-    ""
-)
+COMPOSE_ARGS = "-f docker-compose.yml -f deploy/load/compose.load.yml"
 SELECTOR_SCENARIO = "structured-selectors-200"
 TEST_SERVICES = {"farm", "fake-llm"}
 

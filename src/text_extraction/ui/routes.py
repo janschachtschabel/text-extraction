@@ -38,6 +38,7 @@ from text_extraction.ui.forms import (
     OptionsError,
     access_offer,
     build_body,
+    feature_offer,
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
@@ -134,6 +135,7 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "help_url": partial(help_url, settings),
         "access": access_offer(role, settings),
         "browser_enabled": settings.browser_enabled,
+        "features": feature_offer(role, settings),
     }
 
 

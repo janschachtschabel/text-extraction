@@ -1,0 +1,23 @@
+{#- The optional features (package 19): OCR, personal data and, with ``with_transcribe``,
+"Transcribe". Nothing is chosen by default; a feature the service does not offer is disabled,
+with a hint that says so. ``chosen`` presets them (a batch preview). -#}
+{% set picked = chosen or {} %}
+<fieldset class="choice features">
+  <legend>{{ t("form.features") }}</legend>
+  <label for="{{ prefix }}-ocr">{{ t("form.ocr") }}</label>
+  <select id="{{ prefix }}-ocr" name="ocr"{% if not features.ocr %} disabled{% endif %} aria-describedby="{{ prefix }}-ocr-hint">
+    {% for value in ("auto", "never", "always") %}<option value="{{ value }}"{% if (picked["ocr"] or "auto") == value %} selected{% endif %}>{{ t("form.ocr." ~ value) }}</option>{% endfor %}
+  </select>
+  <p class="hint{% if not features.ocr %} feature-off{% endif %}" id="{{ prefix }}-ocr-hint">{{ t("hint.ocr" if features.ocr else "hint.ocr_off") }}</p>
+  <label for="{{ prefix }}-pii">{{ t("form.pii") }}</label>
+  <select id="{{ prefix }}-pii" name="pii"{% if not features.pii %} disabled{% endif %} aria-describedby="{{ prefix }}-pii-hint">
+    {% for value in ("", "mask", "redact", "hash", "annotate") %}<option value="{{ value }}"{% if (picked["pii"] or "") == value %} selected{% endif %}>{{ t("form.pii." ~ (value or "off")) }}</option>{% endfor %}
+  </select>
+  <p class="hint{% if not features.pii %} feature-off{% endif %}" id="{{ prefix }}-pii-hint">{{ t("hint.pii" if features.pii else "hint.pii_off") }}</p>
+  {% if with_transcribe %}
+  <label class="inline"><input type="checkbox" name="transcribe" value="on"{% if not features.transcribe %} disabled{% elif picked["transcribe"] == "on" %} checked{% endif %} aria-describedby="{{ prefix }}-transcribe-hint"> {{ t("form.transcribe") }}</label>
+  <p class="hint{% if not features.transcribe %} feature-off{% endif %}" id="{{ prefix }}-transcribe-hint">{{ t("hint.transcribe" if features.transcribe else "hint.transcribe_off") }}</p>
+  {% else %}
+  <p class="hint{% if not features.transcribe %} feature-off{% endif %}" id="{{ prefix }}-transcribe-hint">{{ t("hint.transcribe_upload" if features.transcribe else "hint.transcribe_off") }}</p>
+  {% endif %}
+</fieldset>

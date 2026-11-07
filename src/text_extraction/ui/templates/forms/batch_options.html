@@ -6,4 +6,5 @@
   <label class="inline"><input type="checkbox" name="metadata" value="on" aria-describedby="{{ prefix }}-metadata-hint"{% if not chosen or chosen["metadata"] == "on" %} checked{% endif %}> {{ t("form.metadata") }}</label>
   <p class="hint" id="{{ prefix }}-metadata-hint">{{ t("hint.metadata") }}</p>
 </fieldset>
+{% with with_transcribe=true %}{% include "forms/features.html" %}{% endwith %}
 {% with with_wait=false %}{% include "forms/advanced.html" %}{% endwith %}
