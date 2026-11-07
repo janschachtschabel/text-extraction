@@ -2469,12 +2469,13 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   `sitemaps` is asked. It reads robots.txt through the compliance checker's cache (or loads it in
   the host's turn, in every compliance mode): its `Sitemap:` lines (relative ones resolved, at most
   `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them guesses in
-  turn (`guessed: true`, `GUESSED_SITEMAP_PATHS`): `<origin>/sitemap.xml`, then
+  turn (`guessed: true`, `GUESSED_SITEMAP_PATHS`, the position stored as `SiteNode.guess`): `<origin>/sitemap.xml`, then
   `/sitemap_index.xml`, then `/wp-sitemap.xml`. The robots item appends only the first; a guess
   that answers 404 or 410 (`format: absent`, `sitemap_not_found`) appends the next through its own
   `extend` (so a rerun appends nothing twice), the first that answers is parsed and ends the
   chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
-  sitemap that robots.txt lists never guesses. Every sitemap result carries `sitemap.type_hint`
+  sitemap that robots.txt lists never guesses; under the memory guard the next guess is not appended
+  (`site_memory_guard` on the absent item). Every sitemap result carries `sitemap.type_hint`
   (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
   WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
   fails the item `target_http_error`, retryable, without a guess.

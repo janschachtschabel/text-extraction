@@ -572,6 +572,7 @@ async def test_unlisted_sitemap_tries_three_addresses_in_turn() -> None:
     ]
     assert len(guessed) == 5
     contexts = [await crawl.sites.context(job_id, item.index) for item in guessed[:3]]
+    assert all(context.node is not None for context in contexts)
     assert [context.node.guess for context in contexts if context.node] == [0, 1, 2]
     assert [site(item).parent for item in guessed[1:3]] == [guessed[0].index, guessed[1].index]
     assert [site(item).depth for item in guessed[:3]] == [0, 0, 0]
@@ -657,6 +658,7 @@ async def test_rerun_of_a_missing_guess_appends_the_next_one_once() -> None:
     await crawl.step()  # robots
     await die_after_extend(crawl, f"{SITE}/sitemap.xml")
     assert len(await crawl.items(job_id)) == 4  # the next guess is appended, never queued
+    crawl.guard.high = True  # the rerun runs under the memory guard
 
     await crawl.crawl()
 
@@ -664,6 +666,24 @@ async def test_rerun_of_a_missing_guess_appends_the_next_one_once() -> None:
     assert await crawl.state(job_id) == "completed"
     assert [item.url for item in items[2:]] == [f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml"]
     assert all(item.state == "done" for item in items)
+
+
+@scenario
+async def test_memory_guard_ends_the_guess_chain_with_a_warning() -> None:
+    crawl = Crawl(
+        {ROOT: page(ROOT), ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain")}
+    )
+    job_id = await crawl.start(depth=0)
+    await crawl.step()  # the start page
+    await crawl.step()  # robots
+    crawl.guard.high = True
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items) == ["page", "robots", "sitemap"]
+    assert {"sitemap_not_found", "site_memory_guard"} <= set(data(items[2]).warnings)
+    assert await crawl.state(job_id) == "completed"
 
 
 @scenario

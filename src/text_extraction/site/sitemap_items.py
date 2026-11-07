@@ -385,8 +385,9 @@ class SitemapItems:
 
         if fetched.status in (404, 410) and node.guessed:
             info = SitemapInfo(format="absent", guessed=True)
-            envelope = Envelope(status="success", data=result(info, [SITEMAP_NOT_FOUND_WARNING]))
-            return envelope, await self._guess_next(job, item, url, node)
+            more, outcome = await self._guess_next(job, item, url, node)
+            absent = [SITEMAP_NOT_FOUND_WARNING, *more]
+            return Envelope(status="success", data=result(info, absent)), outcome
         if not 200 <= fetched.status < 300:
             retryable = fetched.status >= 500 or fetched.status == 429
             message = f"The sitemap answered with HTTP status {fetched.status}."
@@ -536,27 +537,36 @@ class SitemapItems:
 
     async def _guess_next(
         self, job: JobRecord, item: QueueItem, url: str, node: SiteNode
-    ) -> _Outcome:
+    ) -> tuple[list[str], _Outcome]:
         """Append the next guessed sitemap after a guess that answered 404 or 410, while one is
-        left. A rerun's ``_extend`` answers from the stored batch, so nothing is appended twice."""
+        left; the warnings it adds to the absent item and the item's outcome. Like ``_robots`` it
+        always calls ``_extend`` (``add`` off under the memory guard), so a rerun finds the stored
+        answer and re-queues the child, and nothing is appended twice."""
         following = (node.guess if node.guess is not None else 0) + 1
-        if following >= len(GUESSED_SITEMAP_PATHS) or (
-            self._guard is not None and self._guard.high
-        ):
-            return _Outcome(links=[])
+        if following >= len(GUESSED_SITEMAP_PATHS):
+            return [], _Outcome(links=[])
         address = _origin(url) + GUESSED_SITEMAP_PATHS[following]
         target = normalize_url(address) or address
+        guard_high = self._guard is not None and self._guard.high
         candidate = Candidate(
             key=seen_key(target),
             url=target,
             node=SiteNode(
                 role="sitemap", depth=0, parent=item.index, guessed=True, guess=following
             ),
-            add=True,
+            add=not guard_high,
         )
         extended = await self._extend(job, item, [candidate], max_pages=0)
-        caps = {"files"} if extended.capped and extended.indexes[0] is None else set()
-        return _Outcome(links=[], appended=len(extended.new), caps=caps)
+        warnings: list[str] = []
+        caps: set[str] = set()
+        if extended.answer(0) == (None, True):
+            if extended.capped:
+                warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
+                caps.add("files")
+            else:
+                warnings.append(SITE_MEMORY_GUARD_WARNING)
+                caps.add("memory")
+        return warnings, _Outcome(links=[], appended=len(extended.new), caps=caps)
 
     def _fit_children(self, shell: ExtractResult, parsed: ParsedSitemap) -> list[SitemapChild]:
         """The leading children of an index that let its item fit ``JOB_ITEM_MAX_BYTES``."""
