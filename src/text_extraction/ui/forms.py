@@ -457,6 +457,9 @@ def _site_fields(form: Mapping[str, str]) -> Fields:
         fields[name] = _Field(value, set_by_user=value != default)
     _choice(fields, form, "scope", "host")
     _box(fields, form, "sitemaps", default=True)
+    # The form's radios always post a choice (its preset is "Fast: sitemap first"); a post without
+    # one is not from the form and reads as the API's default.
+    _choice(fields, form, "discovery", "crawl")
     _access(fields, form)
     return fields
 

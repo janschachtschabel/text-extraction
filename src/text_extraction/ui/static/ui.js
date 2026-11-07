@@ -874,6 +874,26 @@
     }
   });
 
+  // "Fast: sitemap first" needs the sitemaps: without them it is disabled and "Thorough" is chosen.
+  // Reading them again enables it, but leaves the choice as it is.
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (!(box instanceof HTMLInputElement) || box.name !== "sitemaps" || !box.form) {
+      return;
+    }
+    var fast = box.form.querySelector("input[name=discovery][value=sitemap_first]");
+    if (!fast) {
+      return;
+    }
+    fast.disabled = !box.checked;
+    if (!box.checked && fast.checked) {
+      var thorough = box.form.querySelector("input[name=discovery][value=crawl]");
+      if (thorough) {
+        thorough.checked = true;
+      }
+    }
+  });
+
   document.addEventListener("change", function (event) {
     var box = event.target;
     if (!(box instanceof HTMLInputElement) || !box.closest(".tree")) {

@@ -220,7 +220,7 @@ with the baselines of 2026-09-28, which were measured on the same 4,000 URLs: fa
 mode 80 % ok. Run three manual dispatches of the live workflow, each with `url_set: wlo_4000`,
 one with `mode: auto`, one with `fast` and one with `browser`, **one after another, never
 together**. Each run is a service of its own with its own Valkey, so its per-host outbound limits
-(`OUTBOUND_MIN_DELAY_MS` 1,000 ms between request starts, `OUTBOUND_MAX_CONCURRENCY_PER_HOST` 2)
+(`OUTBOUND_MIN_DELAY_MS` 500 ms between request starts, `OUTBOUND_MAX_CONCURRENCY_PER_HOST` 2)
 know nothing of the others: three runs at once would send three times the normal rate to each
 WLO host, for hours. Start the next run when the previous one finished, for example:
 

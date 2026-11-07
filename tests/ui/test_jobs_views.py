@@ -27,7 +27,7 @@ from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem, JobProgress, JobView
 from text_extraction.jobs import JobStore
-from text_extraction.ui.forms import OPERATIONS
+from text_extraction.ui.forms import OPERATIONS, build_body
 from text_extraction.ui.forward import forward
 from text_extraction.ui.i18n import LANGUAGE_HEADER
 from text_extraction.ui.results import render_result
@@ -1469,3 +1469,32 @@ def test_tree_failed_page_that_is_blocked_for_another_reason_stays_failed(
     box = box_of(root, BLOCKED_ONE)
     assert box.get("data-blocked") == "robots"
     assert box.get("data-failed") is not None
+
+
+# --- "Fast" or "Thorough" (package 18) ---------------------------------------------------------
+
+
+def test_site_form_offers_fast_sitemap_first_as_the_preset(client: TestClient) -> None:
+    root = tree(run(client, "login").text)
+
+    form = "//form[@hx-post='/ui/run/site-structure']"
+    (fieldset,) = root.xpath(f"{form}//fieldset[@class='choice'][.//input[@name='discovery']]")
+    assert texts(fieldset, "./legend") == ["How to read the site"]
+    fast, thorough = fieldset.xpath(".//input[@name='discovery']")
+    assert (fast.get("value"), fast.get("checked") is not None) == ("sitemap_first", True)
+    assert (thorough.get("value"), thorough.get("checked") is not None) == ("crawl", False)
+    for radio, label, hint in (
+        (fast, "Fast: sitemap first", "Reads robots.txt, the sitemaps and the start page."),
+        (thorough, "Thorough: follow links", "Follows links up to the depth and page count below."),
+    ):
+        assert texts(radio.getparent(), ".") == [label]
+        (note,) = fieldset.xpath(f".//p[@id='{radio.get('aria-describedby')}']")
+        assert note.text_content().startswith(hint)
+
+
+def test_site_form_sends_the_chosen_discovery() -> None:
+    posted = {"url": PAGE, "sitemaps": "on", "discovery": "sitemap_first"}
+    assert build_body("site-structure", posted)["discovery"] == "sitemap_first"
+    assert build_body("site-structure", {**posted, "discovery": "crawl"})["discovery"] == "crawl"
+    # A post without the choice is not from the form: the API's default.
+    assert build_body("site-structure", {"url": PAGE})["discovery"] == "crawl"

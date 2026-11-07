@@ -136,7 +136,7 @@ den [Secrets](../../configuration.md#secrets).
 | `FETCH_TIMEOUT_SECONDS` | `20` | Zeit für einen Abruf einer Seite. |
 | `FETCH_MAX_BYTES` | `20000000` | Höchstens so viele Bytes einer Seite oder Datei. |
 | `OUTBOUND_MAX_CONCURRENCY_PER_HOST` | `2` | Höchstens so viele gleichzeitige Anfragen an einen Host. |
-| `OUTBOUND_MIN_DELAY_MS` | `1000` | Mindestabstand zwischen zwei Anfragen an einen Host. |
+| `OUTBOUND_MIN_DELAY_MS` | `500` | Mindestabstand zwischen zwei Anfragen an einen Host. |
 | `OUTBOUND_BACKOFF_SECONDS` | `30` | Die Pause nach einem 429 oder 503 eines Hosts ohne `Retry-After`. |
 | `JOBS_ENABLED` | `true` | Jobs: Batches, Website-Strukturen, `wait_seconds` und Screenshots. |
 | `JOB_TTL_SECONDS` | `86400` | Wie lange ein Job und seine Ergebnisse aufbewahrt werden. |

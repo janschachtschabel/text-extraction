@@ -42,3 +42,7 @@ def test_env_example_loads(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.setenv(name, value)
     settings = Settings()
     assert settings.auth_mode == "api_key"
+
+
+def test_env_example_spaces_requests_to_one_host_by_500_ms() -> None:
+    assert _active()["OUTBOUND_MIN_DELAY_MS"] == "500"

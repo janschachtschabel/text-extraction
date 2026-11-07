@@ -148,3 +148,25 @@ def test_section_of_blocked_urls_cannot_be_ticked(docs_blocked: tuple[str, str])
         assert not section.is_checked()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
     assert console == []
+
+
+def test_unticking_sitemaps_disables_the_fast_choice(ui: tuple[str, str]) -> None:
+    url, _origin = ui
+    with browsing(url) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        panel = page.locator("#panel-site-structure")
+        fast = panel.locator("input[name=discovery][value=sitemap_first]")
+        thorough = panel.locator("input[name=discovery][value=crawl]")
+        sitemaps = panel.locator("input[name=sitemaps]")
+        expect(fast).to_be_checked()
+
+        sitemaps.uncheck()
+        expect(fast).to_be_disabled()
+        expect(thorough).to_be_checked()
+
+        sitemaps.check()
+        expect(fast).to_be_enabled()
+        expect(thorough).to_be_checked()  # the user's choice stays
+        assert console == []

@@ -536,7 +536,7 @@ def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = load_settings()
 
     assert settings.outbound_max_concurrency_per_host == 2
-    assert settings.outbound_min_delay_ms == 1000
+    assert settings.outbound_min_delay_ms == 500
     assert settings.outbound_max_crawl_delay_seconds == 10
     assert settings.outbound_max_wait_seconds == 10
     assert settings.outbound_backoff_seconds == 30
