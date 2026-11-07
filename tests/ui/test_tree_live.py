@@ -6,12 +6,14 @@ only)."""
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from tests.ui.conftest import run, running
 from tests.ui.site_items import page_item, sitemap_item
@@ -26,7 +28,9 @@ from tests.ui.test_jobs_views import (
     texts,
     tree,
 )
+from text_extraction import compliance
 from text_extraction.compliance import OriginRules
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobItem
@@ -388,7 +392,7 @@ def test_a_live_refresh_judges_only_the_urls_not_judged_before(
     assert len(second.xpath("//input[@data-blocked]")) == 3
 
 
-def test_the_tree_is_judged_on_the_conversion_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_tree_is_judged_on_a_pool_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     threads: list[str] = []
     real = tree_module.mark_blocked
 
@@ -403,7 +407,79 @@ def test_the_tree_is_judged_on_the_conversion_pool(monkeypatch: pytest.MonkeyPat
         client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
 
     assert len(threads) == 1
-    assert threads[0].startswith("convert")
+    assert threads[0].startswith("tree")
+
+
+def hold_tree_pool(client: TestClient) -> ConversionPool:
+    """The app's tree pool with its one slot taken (nothing gives it back)."""
+    pool = cast(FastAPI, client.app).state.ui_tree_pool
+    assert isinstance(pool, ConversionPool)
+    assert asyncio.run(pool._slots.acquire())  # free: taken at once, bound to no loop
+    return pool
+
+
+def test_a_busy_tree_pool_answers_soon_with_the_origins_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(job_views, "TREE_JUDGE_SECONDS", 0.05)
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+        hold_tree_pool(client)
+        items = rules_site()
+        fake_reads(monkeypatch, len(items), fresh(items))
+        started = time.monotonic()
+        response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+        elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert elapsed < 5
+    root = tree(response.text)
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
+    assert [log for log in logs if log["event"] == "tree_judge_timeout"]
+
+
+def test_a_tree_without_rules_to_judge_does_not_wait_for_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+        hold_tree_pool(client)
+
+        async def none(url: str, **kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", none)
+        items = rules_site()
+        fake_reads(monkeypatch, len(items), fresh(items))
+        response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+
+    assert response.status_code == 200
+    assert texts(tree(response.text), "//p[@class='tree-unchecked']")
+    assert not [log for log in logs if log["event"] == "tree_judge_timeout"]
+
+
+def test_without_protegos_reader_the_tree_leaves_the_origin_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(compliance, "_PROTEGO_PARSER", "protego._no_such_module")
+    compliance._protego_grouping.cache_clear()
+    try:
+        with running(rules_fetcher()) as client:
+            items = rules_site()
+            fake_reads(monkeypatch, len(items), fresh(items))
+            response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+    finally:
+        monkeypatch.undo()
+        compliance._protego_grouping.cache_clear()
+
+    root = tree(response.text)
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
 
 
 def test_the_memo_keeps_at_most_its_judgements_and_drops_the_oldest(

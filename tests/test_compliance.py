@@ -11,6 +11,7 @@ from protego import Protego
 from pytest_httpserver import HTTPServer
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from structlog.testing import capture_logs
 
 from text_extraction import compliance
 from text_extraction.auth import Principal
@@ -1706,3 +1707,45 @@ def test_tdmrep_json_is_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     assert report.tdm_reserved is True
     assert threads
     assert threading.main_thread().name not in threads
+
+
+def test_capped_rules_without_protegos_reader_are_none_and_logged_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A protego release without the reader the capped copy uses: the tree gets no rules (its
+    origin is unchecked) and fetches nothing for them; real checks still work."""
+    monkeypatch.setattr(compliance, "_PROTEGO_PARSER", "protego._no_such_module")
+    compliance._protego_grouping.cache_clear()
+    try:
+        checker, fetcher, _ = make_checker(origin_files())
+        with capture_logs() as logs:
+            for _ in range(2):
+                capped = asyncio.run(checker.origin_rules(PAGE, cached_only=False, max_rules=10))
+                assert capped is None
+        assert fetcher.calls == []
+        unavailable = [log for log in logs if log["event"] == "compliance_capped_rules_unavailable"]
+        assert len(unavailable) == 1
+        assert unavailable[0]["log_level"] == "warning"
+        assert compliance.capped_rules_available() is False
+        assert asyncio.run(checker.origin_rules(PAGE, cached_only=False)) is not None
+    finally:
+        monkeypatch.undo()
+        compliance._protego_grouping.cache_clear()
+    assert compliance.capped_rules_available() is True
+
+
+def test_capped_copies_have_a_cache_of_their_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compliance, "_CAPPED_RULES_CACHE_SIZE", 2)
+    checker, _, _ = make_checker({})
+
+    async def run() -> None:
+        whole = compliance._Entry("found", "User-agent: *\nDisallow: /whole\n")
+        await checker._rules(whole)
+        for number in range(5):
+            entry = compliance._Entry("found", f"User-agent: *\nDisallow: /{number}\n")
+            await checker._rules(entry, 1000)
+
+    asyncio.run(run())
+
+    assert len(checker._capped_cache) == 2
+    assert len(checker._rules_cache) == 1  # the capped copies never push out a fetch's parse

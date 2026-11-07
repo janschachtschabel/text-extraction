@@ -160,6 +160,7 @@ from text_extraction.compliance import (
     OriginRules,
     RobotsSitemaps,
     blocking_code,
+    capped_rules_available,
     compliance_block,
     origin_of,
     resolve_mode,
@@ -1333,9 +1334,11 @@ class Pipeline:
         the 10 s budget of an origin's files). None when they are not cached and
         ``cached_only``, or the gate refuses the turn or its backend fails; it never raises. It
         reads in every compliance mode. ``max_rules`` asks for the capped copy
-        (``ComplianceChecker.origin_rules``)."""
+        (``ComplianceChecker.origin_rules``), None while that copy cannot be made."""
         if origin_of(url) is None:  # not an http(s) URL: no origin, no rules
             return None
+        if max_rules is not None and not capped_rules_available():
+            return None  # no turn taken for rules that could not be used
         cached = await self._checker.origin_rules(url, cached_only=True, max_rules=max_rules)
         if cached is not None or cached_only:
             return cached

@@ -697,13 +697,16 @@ def _add_all(builder: TreeBuilder, items: Iterable[JobItem]) -> None:
 
 # The site tree judges the leaves of at most this many origins (the origins the job contacted
 # first, then most leaves first) against their rule files, all loads together within this many
-# seconds; judging the leaves then takes at most TREE_JUDGE_SECONDS on the conversion pool (the
-# origins not judged in time are unchecked). The tree judges with a capped copy of the rules: at
+# seconds; judging the leaves then takes at most TREE_JUDGE_SECONDS on the UI's one tree thread
+# (the origins not judged in time are unchecked), and a view that cannot get that thread within
+# TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS shows every origin with rules as unchecked. The
+# tree judges with a capped copy of the rules: at
 # most TREE_RULES_MAX_RULES rules per user agent of robots.txt and ai.txt and as many tdmrep.json
 # entries, the first ones (third audit S1; a real fetch still reads the whole file).
 TREE_RULES_MAX_ORIGINS: Final = 20
 TREE_RULES_SECONDS: Final = 12
 TREE_JUDGE_SECONDS: Final = 1.0
+TREE_JUDGE_GRACE_SECONDS: Final = 0.5
 TREE_RULES_MAX_RULES: Final = 1000
 
 # The tree of a running job fetches itself again after this many seconds (``live=1``).
@@ -819,9 +822,12 @@ async def _tree_rules(
     origin the job contacted from the cache or loaded in its host's turn, any other (a sitemap
     may list URLs on any host) from the cache alone. An origin whose rules fail, time out or are
     not cached counts as not read (``SiteTree.unchecked``), one past the cap as not tried
-    (``SiteTree.unchecked_more``). The leaves are judged on the conversion ``pool`` within
-    ``TREE_JUDGE_SECONDS``. With ``reuse_for`` (a job id: a live refresh) the rules read and the
-    URLs judged at the refreshes before for the same origins are reused for
+    (``SiteTree.unchecked_more``). The leaves are judged on ``pool`` (the UI's own one thread,
+    never the conversion pool, so a tree does not queue behind conversions) within
+    ``TREE_JUDGE_SECONDS``; when the judgement has not ended ``TREE_JUDGE_GRACE_SECONDS`` after
+    that (the thread is busy with another tree), every origin with rules is unchecked. Without
+    any rules nothing waits for the pool. With ``reuse_for`` (a job id: a live refresh) the
+    rules read and the URLs judged at the refreshes before for the same origins are reused for
     ``TREE_RULES_REUSE_SECONDS`` (an origin whose rules were not read is read again, a URL not
     judged yet is judged)."""
     contacted = tree.contacted
@@ -852,7 +858,17 @@ async def _tree_rules(
         for load in pending:
             load.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-    marked = await pool.run(_judge, tree, rules, judged)
+    if all(known is None for known in rules.values()):
+        return mark_blocked(tree, rules)  # nothing to judge
+    try:
+        marked = await asyncio.wait_for(
+            pool.run(_judge, tree, rules, judged), TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS
+        )
+    except TimeoutError:
+        # Not judged in time (the thread was busy): no mark is computed here, every origin with
+        # rules is unchecked, and nothing is remembered.
+        _log.warning("tree_judge_timeout", origins=len(rules))
+        return mark_blocked(tree, rules, deadline=0)
     if key:
         # What was read is kept with the judgements made under it; an origin that failed or ran
         # late is tried again at the next refresh, the others are not.
@@ -904,7 +920,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     tree: SiteTree = await asyncio.to_thread(builder.tree)
     tree = await _tree_rules(
         request.app.state.pipeline,
-        request.app.state.conversion_pool,
+        request.app.state.ui_tree_pool,
         tree,
         job_id if live else None,
     )

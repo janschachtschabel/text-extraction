@@ -46,8 +46,9 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   itself visited (a site that a sitemap or a link merely names is read from the cache, else shown
   as not checked), the tree judges with the first 1,000 rules of each robots.txt and ai.txt user
   agent and the first 1,000 tdmrep.json entries (a fetch still reads the whole file), the
-  judgement runs on the conversion pool within 1 s, and a live refresh judges only the URLs that
-  are new. A hostile 500 KiB rule file cost a view about 5 s of CPU, at every refresh. tdmrep.json
+  judgement runs on a thread of its own within 1 s (a view that cannot get it shows the sites as
+  not checked instead of waiting behind conversions), and a live refresh judges only the URLs
+  that are new. A hostile 500 KiB rule file cost a view about 5 s of CPU, at every refresh. tdmrep.json
   is parsed off the event loop. A sitemap entry without a type no longer clears the type a link
   text gave a URL in the tree.
 - `discovery: sitemap_first` no longer trusts a `Sitemap:` line in robots.txt blindly: the first

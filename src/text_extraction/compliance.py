@@ -62,31 +62,23 @@ names why a report would block, and ``origin_of`` gives a URL's origin.
 
 import asyncio
 import contextlib
+import functools
 import hashlib
+import importlib
 import json
 import math
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import InitVar, dataclass, field
 from enum import Enum
 from html.parser import HTMLParser
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import urljoin, urlsplit
 
 import structlog
 from protego import Protego
-
-# protego's own directive reader and names: the capped copy of a file (``_capped_rules``) must
-# group the lines exactly as protego does.
-from protego._protego import (
-    _ALLOW_DIRECTIVE,
-    _DISALLOW_DIRECTIVE,
-    _SITE_WIDE_DIRECTIVES,
-    _USER_AGENT_DIRECTIVE,
-    _extract_directive,
-)
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -110,8 +102,10 @@ _UNAVAILABLE_TTL_SECONDS = 300
 # Only the head of a page can carry the meta tags we read.
 _META_SCAN_CHARS = 262_144
 _MAX_POLICY_CHARS = 2048
-# Parsed robots.txt / ai.txt files kept in this process.
+# Parsed robots.txt / ai.txt files kept in this process; the site tree's capped copies are kept
+# apart, so they never push out the parse a fetch needs.
 _RULES_CACHE_SIZE = 256
+_CAPPED_RULES_CACHE_SIZE = 64
 _ROBOTS_PATH = "/robots.txt"
 _TDMREP_PATH = "/.well-known/tdmrep.json"
 _AI_TXT_PATH = "/ai.txt"
@@ -403,6 +397,7 @@ class ComplianceChecker:
         # Parsed rules by SHA-256 of their text: a 500 KB file takes a while to parse, and the
         # same text from the Valkey cache must not be parsed again on every request.
         self._rules_cache: OrderedDict[str, Protego | None] = OrderedDict()
+        self._capped_cache: OrderedDict[str, Protego | None] = OrderedDict()
         # Loads in flight by cache key; concurrent checks of one origin wait for the same one.
         self._loading: dict[str, asyncio.Task[_Entry]] = {}
         # Checks waiting for each load in flight.
@@ -486,7 +481,10 @@ class ComplianceChecker:
         are loaded one after another within one 10 s budget, as ``before_fetch`` does, so call
         it in the host's turn. It reads in every compliance mode. With ``max_rules`` the rules
         are a capped copy (see the module's text): at most that many rules per user agent of
-        robots.txt and ai.txt and that many tdmrep.json entries, the first ones."""
+        robots.txt and ai.txt and that many tdmrep.json entries, the first ones; None (nothing
+        read) while that copy cannot be made (`capped_rules_available`)."""
+        if max_rules is not None and not capped_rules_available():
+            return None
         origin = _origin(url)
         if cached_only:
             keys = [_cache_key(kind, origin) for kind in ("robots", "tdmrep", "ai")]
@@ -551,15 +549,17 @@ class ComplianceChecker:
         if entry.state != "found":
             return None
         digest = hashlib.sha256(entry.body.encode()).hexdigest()
+        cache, size = self._rules_cache, _RULES_CACHE_SIZE
         if max_rules is not None:
             digest = f"{digest}:{max_rules}"
-        if digest in self._rules_cache:
-            self._rules_cache.move_to_end(digest)
-            return self._rules_cache[digest]
+            cache, size = self._capped_cache, _CAPPED_RULES_CACHE_SIZE
+        if digest in cache:
+            cache.move_to_end(digest)
+            return cache[digest]
         rules = await asyncio.to_thread(_parse_rules, entry.body, max_rules)
-        self._rules_cache[digest] = rules
-        if len(self._rules_cache) > _RULES_CACHE_SIZE:
-            self._rules_cache.popitem(last=False)
+        cache[digest] = rules
+        if len(cache) > size:
+            cache.popitem(last=False)
         return rules
 
     # --- reading the origin files --------------------------------------------------------------
@@ -794,6 +794,41 @@ def _parse_rules(text: str, max_rules: int | None = None) -> Protego | None:
 _LEFT_OUT_RULES = "Disallow:"
 
 
+# protego's own directive reader and names, which the capped copy needs to group the lines
+# exactly as protego does. They are internal to protego, so they are read when first needed and
+# a release without them leaves the site tree's origins unchecked rather than the service down.
+_PROTEGO_PARSER = "protego._protego"
+
+
+class _Grouping(NamedTuple):
+    extract: Callable[[str], tuple[str, str] | None]
+    user_agent: frozenset[str]
+    rules: frozenset[str]  # Allow and Disallow, with protego's tolerated spellings
+    site_wide: frozenset[str]
+
+
+@functools.cache
+def _protego_grouping() -> _Grouping | None:
+    """protego's directive reader and names; None (logged once) when this release has none."""
+    try:
+        parser = importlib.import_module(_PROTEGO_PARSER)
+        return _Grouping(
+            parser._extract_directive,
+            frozenset(parser._USER_AGENT_DIRECTIVE),
+            frozenset(parser._ALLOW_DIRECTIVE | parser._DISALLOW_DIRECTIVE),
+            frozenset(parser._SITE_WIDE_DIRECTIVES),
+        )
+    except (ImportError, AttributeError, TypeError) as error:
+        _log.warning("compliance_capped_rules_unavailable", error_type=type(error).__name__)
+        return None
+
+
+def capped_rules_available() -> bool:
+    """Whether the capped copy of the rules (``origin_rules`` with ``max_rules``) can be made:
+    this protego release has the directive reader it needs."""
+    return _protego_grouping() is not None
+
+
 def _capped_rules(text: str, max_rules: int) -> str:
     """``text`` with at most ``max_rules`` Allow/Disallow lines for each user agent, the first
     ones in file order; the rest of a group (user agents, crawl delays, sitemaps) stays. The
@@ -801,31 +836,34 @@ def _capped_rules(text: str, max_rules: int) -> str:
     a new group; groups naming the same agent add up), and a rule is kept only while every
     agent of its group is below the cap, so no agent's rules can grow past it. A run of left-out
     rules becomes one ``_LEFT_OUT_RULES`` line, so the groups stay as they were. Comments and
-    blank lines are dropped."""
+    blank lines are dropped. Needs protego's reader (`capped_rules_available`)."""
+    grouping = _protego_grouping()
+    if grouping is None:
+        raise RuntimeError("protego's directive reader is not available")
     lines: list[str] = []
     counts: dict[str, int] = {}
     group: list[str] = []
     previous: str | None = None
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
-        parsed = _extract_directive(line) if line else None
+        parsed = grouping.extract(line) if line else None
         if parsed is None:
             continue
         name, value = parsed
         if (
-            name in _USER_AGENT_DIRECTIVE
+            name in grouping.user_agent
             and previous is not None
-            and previous not in _USER_AGENT_DIRECTIVE
+            and previous not in grouping.user_agent
         ):
             group = []
-        if name not in _SITE_WIDE_DIRECTIVES:
+        if name not in grouping.site_wide:
             previous = name
-        if name in _USER_AGENT_DIRECTIVE and value:
+        if name in grouping.user_agent and value:
             agent = value.lower()
             for key in (agent, agent.replace("*", "") if agent != "*" else ""):
                 if key and key not in group:
                     group.append(key)
-        elif name in _ALLOW_DIRECTIVE | _DISALLOW_DIRECTIVE and value and group:
+        elif name in grouping.rules and value and group:
             if any(counts.get(key, 0) >= max_rules for key in group):
                 if lines[-1] != _LEFT_OUT_RULES:
                     lines.append(_LEFT_OUT_RULES)
