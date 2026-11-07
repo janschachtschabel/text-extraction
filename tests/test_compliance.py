@@ -1709,6 +1709,45 @@ def test_tdmrep_json_is_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     assert threading.main_thread().name not in threads
 
 
+def test_tdmrep_json_of_the_same_body_is_parsed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real = compliance._parse_tdmrep
+
+    def counting(body: str) -> Any:
+        calls.append(body)
+        return real(body)
+
+    monkeypatch.setattr(compliance, "_parse_tdmrep", counting)
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        first = await checker.before_fetch(f"{ORIGIN}/tdm/a", "enforce")
+        second = await checker.before_fetch(f"{ORIGIN}/tdm/b", "enforce")
+        capped = await checker.origin_rules(PAGE, cached_only=False, max_rules=1000)
+        assert first.tdm_reserved is True
+        assert second.tdm_reserved is True
+        assert capped is not None
+
+    asyncio.run(run())
+
+    assert len(calls) == 1
+
+
+def test_the_tdmrep_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compliance, "_TDM_CACHE_SIZE", 2)
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        for index in range(4):
+            body = json.dumps([{"location": f"/x{index}", "tdm-reservation": 1}])
+            entry = compliance._Entry(state="found", body=body)
+            assert await checker._tdm_entries(entry, None)
+
+    asyncio.run(run())
+
+    assert len(checker._tdm_cache) == 2
+
+
 def test_capped_rules_without_protegos_reader_are_none_and_logged_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

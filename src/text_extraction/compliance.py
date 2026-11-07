@@ -106,6 +106,8 @@ _MAX_POLICY_CHARS = 2048
 # apart, so they never push out the parse a fetch needs.
 _RULES_CACHE_SIZE = 256
 _CAPPED_RULES_CACHE_SIZE = 64
+# Parsed tdmrep.json files kept in this process (whole; a capped copy is a slice of one).
+_TDM_CACHE_SIZE = 256
 _ROBOTS_PATH = "/robots.txt"
 _TDMREP_PATH = "/.well-known/tdmrep.json"
 _AI_TXT_PATH = "/ai.txt"
@@ -398,6 +400,7 @@ class ComplianceChecker:
         # same text from the Valkey cache must not be parsed again on every request.
         self._rules_cache: OrderedDict[str, Protego | None] = OrderedDict()
         self._capped_cache: OrderedDict[str, Protego | None] = OrderedDict()
+        self._tdm_cache: OrderedDict[str, tuple[_TdmEntry, ...] | None] = OrderedDict()
         # Loads in flight by cache key; concurrent checks of one origin wait for the same one.
         self._loading: dict[str, asyncio.Task[_Entry]] = {}
         # Checks waiting for each load in flight.
@@ -469,7 +472,7 @@ class ComplianceChecker:
             ai,
             await self._rules(robots, max_rules),
             await self._rules(ai, max_rules),
-            await _tdm_entries(tdmrep, max_rules),
+            await self._tdm_entries(tdmrep, max_rules),
         )
 
     async def origin_rules(
@@ -561,6 +564,25 @@ class ComplianceChecker:
         if len(cache) > size:
             cache.popitem(last=False)
         return rules
+
+    async def _tdm_entries(
+        self, entry: _Entry, max_rules: int | None
+    ) -> "tuple[_TdmEntry, ...] | None":
+        """The parsed entries of a found tdmrep.json, with ``max_rules`` the first that many;
+        None for any other entry. Cached by SHA-256 of the text like ``_rules``; a miss is
+        parsed in a worker thread, off the event loop."""
+        if entry.state != "found":
+            return None
+        digest = hashlib.sha256(entry.body.encode()).hexdigest()
+        if digest in self._tdm_cache:
+            self._tdm_cache.move_to_end(digest)
+            entries = self._tdm_cache[digest]
+        else:
+            entries = await asyncio.to_thread(_parse_tdmrep, entry.body)
+            self._tdm_cache[digest] = entries
+            if len(self._tdm_cache) > _TDM_CACHE_SIZE:
+                self._tdm_cache.popitem(last=False)
+        return entries if entries is None or max_rules is None else entries[:max_rules]
 
     # --- reading the origin files --------------------------------------------------------------
 
@@ -972,15 +994,6 @@ def _parse_tdmrep(body: str) -> "tuple[_TdmEntry, ...] | None":
             continue
         parsed.append(_TdmEntry(location, reserved, _policy(entry.get("tdm-policy"))))
     return tuple(parsed)
-
-
-async def _tdm_entries(entry: _Entry, max_rules: int | None) -> "tuple[_TdmEntry, ...] | None":
-    """The parsed entries of a found tdmrep.json (parsed in a worker thread, off the event
-    loop), with ``max_rules`` the first that many; None for any other entry."""
-    if entry.state != "found":
-        return None
-    entries = await asyncio.to_thread(_parse_tdmrep, entry.body)
-    return entries if entries is None or max_rules is None else entries[:max_rules]
 
 
 def _match_tdmrep(entries: "tuple[_TdmEntry, ...]", url: str) -> _TdmMatch | None:

@@ -61,7 +61,7 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   judgement runs on a thread of its own within 1 s (a view that cannot get it shows the sites as
   not checked instead of waiting behind conversions), and a live refresh judges only the URLs
   that are new. A hostile 500 KiB rule file cost a view about 5 s of CPU, at every refresh. tdmrep.json
-  is parsed off the event loop. A sitemap entry without a type no longer clears the type a link
+  is parsed off the event loop and once per file text, like robots.txt. A sitemap entry without a type no longer clears the type a link
   text gave a URL in the tree.
 - `discovery: sitemap_first` no longer trusts a `Sitemap:` line in robots.txt blindly: the first
   listed sitemap is probed like the guessed addresses, and one that answers 404 or is no sitemap
