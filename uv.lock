@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -10,36 +10,36 @@ resolution-markers = [
 [options]
 
 [options.exclude-newer-package]
-setuptools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-pandas = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-doclang = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-dnspython = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-sse-starlette = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-odfdo = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-preshed = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-weasel = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-caio = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-transformers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-pluggy = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-confection = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cymem = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cachetools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-wrapt = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-thinc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-srsly = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-ibm-models = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-jiter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-xlsxwriter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cyclopts = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-griffelib = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-joserfc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-core = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-parse = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-smart-open = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-phonenumbers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-murmurhash = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 blis = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cachetools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+caio = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+confection = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cyclopts = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cymem = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+dnspython = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+doclang = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-core = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-ibm-models = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-parse = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+griffelib = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+jiter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+joserfc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+murmurhash = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+odfdo = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pandas = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+phonenumbers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pluggy = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+preshed = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 pycparser = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+setuptools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+smart-open = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+srsly = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+sse-starlette = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+thinc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+transformers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+weasel = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+wrapt = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+xlsxwriter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 
 [[package]]
 name = "accelerate"
@@ -831,19 +831,19 @@ wheels = [
 
 [[package]]
 name = "fastmcp"
-version = "4.1.2"
+version = "4.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastmcp-slim", extra = ["client", "server"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/4d/06d37a333c3764ab300ad7ff84a30be33c9effffba624ea91f3944123656/fastmcp-4.1.2.tar.gz", hash = "sha256:1b70a8467ac4dd6416c7c101cd54562f089b55e6636a196b4a20bdac3ccb0284", size = 42736167, upload-time = "2026-10-20T14:01:37.982Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/f4/79169f9a2419e1f541b3b39b1bda1c57569b4c7c1ac4b606750c81471ad1/fastmcp-4.1.3.tar.gz", hash = "sha256:a1f79e9db929a1603c75331df603f74530fc236aa711e0ee2e185821c6d9888d", size = 42755717, upload-time = "2026-10-20T22:32:28.005Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4d/64/0e708271721e001979ab5d91fc5e86bf4e74bff34dfb6c94ff83565945a3/fastmcp-4.1.2-py3-none-any.whl", hash = "sha256:3d5eddfe624b002ebcf202d5a55ff13bdce6925ce58bfcaeb28bc2e3bbee1830", size = 8151, upload-time = "2026-10-20T14:01:33.947Z" },
+    { url = "https://files.pythonhosted.org/packages/97/7f/27c501d98b5681ca4f6c21a7d741b3e732e962c5e4c3b4db6dd1ffdf4fd8/fastmcp-4.1.3-py3-none-any.whl", hash = "sha256:b983d8acc44ab1143e0c86fd6da843f25043ee0aeb64ab983b36c527bd1d33e9", size = 8153, upload-time = "2026-10-20T22:32:22.881Z" },
 ]
 
 [[package]]
 name = "fastmcp-slim"
-version = "4.1.2"
+version = "4.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mcp-types" },
@@ -854,9 +854,9 @@ dependencies = [
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/30/c9/f4d0a0a39c64f7647e61c591377468a3afee7a6786a354a405c7c44db2fb/fastmcp_slim-4.1.2.tar.gz", hash = "sha256:4b703ddbd35165ebf03b2cc560688f458f3fe4db11e635074fcc303496734154", size = 748928, upload-time = "2026-10-20T14:01:10.582Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/86/01705c74106297c021e5f8a22ed051adb43061cc779cf543dc05a4d47aba/fastmcp_slim-4.1.3.tar.gz", hash = "sha256:d95277db0979e4cbfa84528cf9016ae079494b41ed8e88cc909fee8233db6035", size = 749467, upload-time = "2026-10-20T22:30:58.047Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/66/a1/12e7d2ac4d76ee82c4b5606bbe0732162e3c4367b4aba6884a6f4d183eb3/fastmcp_slim-4.1.2-py3-none-any.whl", hash = "sha256:58a4e547a0f85cfee2d2219677ed31c0f1c4911741a5c91a1ee5fbf69dde35fa", size = 930447, upload-time = "2026-10-20T14:01:08.667Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/ff/a7feaeb130a2003700789ce32e933b4c2ae00fc7c264642e57ab12e4684f/fastmcp_slim-4.1.3-py3-none-any.whl", hash = "sha256:81af8699331c33d438caf85b6947f36df6e2f04118e6f318ca00374fd9afea9a", size = 931046, upload-time = "2026-10-20T22:30:56.182Z" },
 ]
 
 [package.optional-dependencies]
@@ -871,6 +871,7 @@ client = [
 ]
 server = [
     { name = "authlib" },
+    { name = "certifi" },
     { name = "cyclopts" },
     { name = "exceptiongroup" },
     { name = "griffelib" },
@@ -1840,7 +1841,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.36.0"
+version = "3.37.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1850,9 +1851,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0d/4f/d06c2dbbe2b4f8798f6d54da77a206875f25fbf31b96ea56ea339b30dad6/openai-3.36.0.tar.gz", hash = "sha256:fbe1df6490985247e542639098cd3c1170cfbd7bbce5fb5bdfe06cc4746c9dbc", size = 2296783, upload-time = "2026-10-21T15:54:34.03Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0a/66/d4c48dc690e36b297c178636d8434050ac92df9db8a4c89d9bd451cccc95/openai-3.37.0.tar.gz", hash = "sha256:670bd6f699000d43a2073bcf94374a55bb133bfe5de0d084d47eb9bb9f6a8e5d", size = 2325534, upload-time = "2026-10-22T20:04:39.602Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/a9/3db339b9dd01f8cfc7ac7b6a693cb155a4b06ce070046ee4c5a9ad0c4e95/openai-3.36.0-py3-none-any.whl", hash = "sha256:bf99f3be1048df0de9c3a2d66e7328cb7febddd5d84264192b19aebe0d1e34ad", size = 2292466, upload-time = "2026-10-21T15:54:31.178Z" },
+    { url = "https://files.pythonhosted.org/packages/56/73/c605f0cee1882e453a4b7fc2f17f4a42a7d4c1ed2304aff4b163ffade819/openai-3.37.0-py3-none-any.whl", hash = "sha256:d9f5b000f52397a7f9f946012744c5bc4c962eed3c100385252464c273a63e57", size = 2303939, upload-time = "2026-10-22T20:04:37.707Z" },
 ]
 
 [[package]]
@@ -1942,21 +1943,21 @@ wheels = [
 
 [[package]]
 name = "patchright"
-version = "1.64.1"
+version = "1.64.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "greenlet" },
     { name = "pyee" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/a0/19b2d80eedc22fd8935ee3a7c0ee627eed6443a521f62d98e5b950f23694/patchright-1.64.1-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:cfbff95e926b1a1a61339dc59da2e8f0236c2bc13c508959432532bbabeafbbd", size = 44337731, upload-time = "2026-10-15T17:43:16.171Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/49/1ba8f64f2f4e1ad430af213ef3bbc3ac44d9e106f4ec20d3078a2f7e8b01/patchright-1.64.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5cf5aa747646a2824cf4ca88a4f0a6c758865c4575c74cdef250d92b6fd76d44", size = 43004006, upload-time = "2026-10-15T17:43:20.641Z" },
-    { url = "https://files.pythonhosted.org/packages/ee/63/b0e9a748c3b4d5f5bf5a671406a618c79f8e174718443a22517364a59e3d/patchright-1.64.1-py3-none-macosx_11_0_universal2.whl", hash = "sha256:08a4ad197d3f2e3739206255e11b7bff5948190fe6540f54be5fb4629f2361ff", size = 44337732, upload-time = "2026-10-15T17:43:25.204Z" },
-    { url = "https://files.pythonhosted.org/packages/11/1a/2822f0f5a530d47161cc78fa35381023831e1068749378ecff3eb54a766d/patchright-1.64.1-py3-none-manylinux1_x86_64.whl", hash = "sha256:ff5f7e2f46b6cb26008e401a2c52d6ff09c1c09ba4b24e2c75bc501f62a3f084", size = 48276484, upload-time = "2026-10-15T17:43:29.858Z" },
-    { url = "https://files.pythonhosted.org/packages/df/10/f00d4eba7f3b944a77cfcf04ce25262123021c9b56dfb0e0234d6546c724/patchright-1.64.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2654f77810ad02980124bd8a7bc8d28658787b1583a94bcb2529faa612773992", size = 47962034, upload-time = "2026-10-15T17:43:34.585Z" },
-    { url = "https://files.pythonhosted.org/packages/2e/8d/b098f1f4056f07e90a89a556e292fef48b345ed5bd52bb6eb112de1c96cc/patchright-1.64.1-py3-none-win32.whl", hash = "sha256:b630a5d8e80608d93d533ca278628a709d09bf5dc0b2a921c05b5a8baadbf503", size = 38665410, upload-time = "2026-10-15T17:43:38.584Z" },
-    { url = "https://files.pythonhosted.org/packages/82/a5/f0d454cecbaef15c35574268ce6a4327f370788bb8e2da3a216cf5f9908f/patchright-1.64.1-py3-none-win_amd64.whl", hash = "sha256:3cd3e7e1e94034e3f3a732ef7d6f87376dc7d27a9b598de51565051acabf3428", size = 38665415, upload-time = "2026-10-15T17:43:42.697Z" },
-    { url = "https://files.pythonhosted.org/packages/81/ee/b192304784a40ebe18c4a713a0027ab245063ec5b7137562806be7a413d0/patchright-1.64.1-py3-none-win_arm64.whl", hash = "sha256:2b7aa403c2b0223adf210753277aae53f489ebe4208d78192450fb01b67d0f53", size = 34582882, upload-time = "2026-10-15T17:43:46.719Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/4f/85a72d6ce8f49d7241d4d876880f7ac7595e90b49ad2c5f9d2d5a04fedfe/patchright-1.64.2-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:a1e3b1eebdaa3f66c472aba6d277f589c1f885ca7149a88c3e2e28a8982386f2", size = 44498833, upload-time = "2026-10-22T19:54:28.642Z" },
+    { url = "https://files.pythonhosted.org/packages/80/1a/d03526d13eca26f057f55fd7f47a5495c9138e2883a0fa7cc30575338ca4/patchright-1.64.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c36a071c259f6e99f5b69ec5a2c4993ea3c274b04d324eed914e5937b0d7c218", size = 43145100, upload-time = "2026-10-22T19:54:31.86Z" },
+    { url = "https://files.pythonhosted.org/packages/57/d3/a505cd32ed5c73f1910deff202eb1bf66687f0bc095af03901d4d034ef16/patchright-1.64.2-py3-none-macosx_11_0_universal2.whl", hash = "sha256:7771a19f12656aa9a1f817475ae57f38c7b4fd6616d4c3fea89fdf60eac20c84", size = 44498835, upload-time = "2026-10-22T19:54:35.092Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/76/0dd1fbe35c279e52d4e0e1414592381eb938a79345ea2dd008597259ac6a/patchright-1.64.2-py3-none-manylinux1_x86_64.whl", hash = "sha256:808f97f4813772474e333d569337e30ef6bcf641e9fd98a25b49ac15d8770605", size = 48461798, upload-time = "2026-10-22T19:54:38.583Z" },
+    { url = "https://files.pythonhosted.org/packages/54/5d/e5da55a16f40daca201ee7b0db277f6748bc084ca7d9aacbe37d711130d3/patchright-1.64.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:eec87f61800b2733182c4d1104c2344dd4df997bfb26ca3a80de5f8130619447", size = 48140862, upload-time = "2026-10-22T19:54:42.21Z" },
+    { url = "https://files.pythonhosted.org/packages/17/f7/9e07f8d5e8afddefb426e868e9deb67526fa0880ddc99e38eabcae0193a5/patchright-1.64.2-py3-none-win32.whl", hash = "sha256:cec5b2c2946ff662be63c1c6b94de8ec1bc96e3478cd512742e535357a995b53", size = 38791699, upload-time = "2026-10-22T19:54:46.113Z" },
+    { url = "https://files.pythonhosted.org/packages/df/00/4499f5ddc048fcc1672cbfaee41f08ea21adf3a4f9418d1af64c22cf5394/patchright-1.64.2-py3-none-win_amd64.whl", hash = "sha256:46d2a444d5c97bab24243521fe4a515fc6fd9433ff6536aee87f8bc3ab250cad", size = 38791701, upload-time = "2026-10-22T19:54:49.673Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/85/b4c176316a8da67f27049558d54a17dbe8d7599c3428510aedde2b249919/patchright-1.64.2-py3-none-win_arm64.whl", hash = "sha256:b472d3394d7ed5c31307ee4dff11813c8e90dbe5345c9357e8967d5a8826bdc9", size = 34683740, upload-time = "2026-10-22T19:54:52.941Z" },
 ]
 
 [[package]]
@@ -2611,15 +2612,15 @@ wheels = [
 
 [[package]]
 name = "reportlab"
-version = "5.0.1"
+version = "5.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "charset-normalizer" },
     { name = "pillow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4a/51/dbe28534ae12c852f61be91f039f343305fd1f34f1c66b8de75afae7a525/reportlab-5.0.1.tar.gz", hash = "sha256:ebd13154be1c8515e665de70bd2d303ae9ddc3ef47e44afd5116441ca0283a26", size = 3945711, upload-time = "2026-08-20T13:48:16.461Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/22/c18474be40b9bbb52fdb7051177d4d25f1ea59fada17eb181026411e93b1/reportlab-5.1.0.tar.gz", hash = "sha256:6878200464527e87672d19e9f7cfc6bb890e3a6931e74ac6a1a8d1754aa55671", size = 4109612, upload-time = "2026-10-22T07:26:43.307Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/cb/dacbc268cb68d0428ea2cbd85266195a9ab3e677449589ddae59bd7542ac/reportlab-5.0.1-py3-none-any.whl", hash = "sha256:1c36e6bb0e71780c72331eba60da7f602e8d4389a8723825af71342e49d791e8", size = 1957258, upload-time = "2026-08-20T13:48:14.026Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/3c/bf68d44f160b44685fc714f746a954c71d0091b3dc4fd3c8670154b44841/reportlab-5.1.0-py3-none-any.whl", hash = "sha256:59fdbaec5efe437095ad1d7292ec9a271c8ca2d3ec75e889c6e61400929b90df", size = 2018647, upload-time = "2026-10-22T07:26:40.754Z" },
 ]
 
 [[package]]
@@ -3098,7 +3099,7 @@ requires-dist = [
     { name = "extruct", specifier = ">=0.18.0" },
     { name = "fastapi", specifier = ">=0.162.0" },
     { name = "faster-whisper", marker = "extra == 'asr'", specifier = "==1.2.1" },
-    { name = "fastmcp", specifier = "==4.1.2" },
+    { name = "fastmcp", specifier = "==4.1.3" },
     { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "jinja2", specifier = "==3.1.6" },
@@ -3107,9 +3108,9 @@ requires-dist = [
     { name = "markdown-it-py", specifier = "==4.2.0" },
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xls", "xlsx"], specifier = "==0.1.9" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "openai", specifier = "==3.36.0" },
+    { name = "openai", specifier = "==3.37.0" },
     { name = "opencv-python-headless", marker = "extra == 'docling'", specifier = "==4.14.0.94" },
-    { name = "patchright", marker = "extra == 'browser'", specifier = "==1.64.1" },
+    { name = "patchright", marker = "extra == 'browser'", specifier = "==1.64.2" },
     { name = "pillow", specifier = "==13.0.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.64" },
     { name = "presidio-analyzer", marker = "extra == 'nlp'", specifier = "==2.2.364" },
@@ -3143,7 +3144,7 @@ dev = [
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "mypy" },
     { name = "openpyxl", specifier = "==3.1.5" },
-    { name = "patchright", specifier = "==1.64.1" },
+    { name = "patchright", specifier = "==1.64.2" },
     { name = "playwright", specifier = ">=1.64" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -3151,7 +3152,7 @@ dev = [
     { name = "python-docx", specifier = "==1.2.0" },
     { name = "python-pptx", specifier = "==1.0.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
-    { name = "reportlab", specifier = "==5.0.1" },
+    { name = "reportlab", specifier = "==5.1.0" },
     { name = "ruff" },
     { name = "xlwt", specifier = "==1.3.0" },
 ]
