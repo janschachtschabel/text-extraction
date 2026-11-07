@@ -14,7 +14,7 @@ service's own defaults in `settings.py` stay off (a bare `uv run` has no workers
 
 ## Decisions
 
-- **P19-D1, how to forbid a feature** (card in the thread, recommended b): (a) the existing
+- **P19-D1, how to forbid a feature** (Jan chose b on 2026-11-07, 18:55): (a) the existing
   `DOCLING_ENABLED`, `PII_ENABLED`, `LLM_ENABLED`, `ASR_ENABLED` switch a feature off for everyone;
   (b) also one switch per feature that keeps it for admin keys and refuses it for user keys:
   `OCR_ALLOW_USERS`, `PII_ALLOW_USERS`, `LLM_ALLOW_USERS`, `ASR_ALLOW_USERS` (default true), after
@@ -43,8 +43,12 @@ service's own defaults in `settings.py` stay off (a bare `uv run` has no workers
   answer 403 `forbidden` ("<feature> is for admin keys only on this service."): `ocr: always`,
   `pii`, `transcribe: true`, strategy `llm`, `learn_selectors`, `describe_images`, `semantic`
   chunking, an audio or video upload. Implicit uses behave as if the feature were off for that
-  request: `ocr: auto` keeps the text layer (warning `ocr_unavailable`), strategy `auto` does not
-  escalate to the LLM. The job options carry the allowed set, so workers apply the same rule.
+  request: `ocr: auto` is stored as `never` (the text layer), strategy `auto` does not ask the
+  LLM (`llm_unavailable`). Jobs keep the owner's role, so workers apply the same rule
+  (`feature_access.settings_for` in the post stage).
+- **P19-R6, transcripts and `QUALITY_MIN_WORDS`** (Jan's 27-word MP4, 2026-11-07): a media
+  transcript (subtitles, transcript view, transcription) needs one word only; it is all the media
+  says (`pipeline_media.is_transcript`).
 - **P19-R5, te-ui-test:** Jan's `.env` needs the four switches set to `true` (the PC guard blocks
   Claude's edit unless Jan approves in the thread); then `docker compose up -d --wait --build`.
 

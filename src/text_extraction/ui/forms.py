@@ -21,6 +21,7 @@ from typing import Any, Final, Literal
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.documents.routing import ocr_available
+from text_extraction.feature_access import Feature, allowed
 from text_extraction.file_api import PATH as FILE_PATH
 from text_extraction.pii_dispatch import pii_available
 from text_extraction.pipeline_media import asr_available
@@ -376,18 +377,46 @@ class FeatureOffer:
     transcribe: bool
     llm: bool
     llm_needs_key: bool
+    # The features the service has but keeps for admin keys (``*_ALLOW_USERS``, P19-D1 b).
+    admin_only: frozenset[str] = frozenset()
+
+    def hint(self, feature: str, on: str, off: str) -> str:
+        """The hint key of ``feature``: ``on`` while offered, the admin-only text while the
+        service keeps it for admin keys, else ``off`` (switched off)."""
+        if getattr(self, feature):
+            return on
+        return _ADMIN_ONLY_HINTS[feature] if feature in self.admin_only else off
+
+
+_ADMIN_ONLY_HINTS: Final[dict[str, str]] = {
+    "ocr": "hint.ocr_admin_only",
+    "pii": "hint.pii_admin_only",
+    "transcribe": "hint.transcribe_admin_only",
+    "llm": "hint.llm_admin_only",
+}
 
 
 def feature_offer(role: str, settings: Settings) -> FeatureOffer:
-    """The features the forms offer to a caller of ``role``."""
-    del role  # every role is offered the same features (P19-D1)
-    llm = llm_available(settings)
+    """The features the forms offer to a caller of ``role``: what the service has and the role
+    may use (``feature_access.allowed``)."""
+    has = {
+        "ocr": ocr_available(settings),
+        "pii": pii_available(settings),
+        "transcribe": asr_available(settings) and settings.media_enabled,
+        "llm": llm_available(settings),
+    }
+    switch: dict[str, Feature] = {"ocr": "ocr", "pii": "pii", "transcribe": "asr", "llm": "llm"}
+    admin_only = frozenset(
+        name for name, on in has.items() if on and not allowed(switch[name], role, settings)
+    )
+    offered = {name: on and name not in admin_only for name, on in has.items()}
     return FeatureOffer(
-        ocr=ocr_available(settings),
-        pii=pii_available(settings),
-        transcribe=asr_available(settings) and settings.media_enabled,
-        llm=llm,
-        llm_needs_key=llm and settings.llm_api_key is None,
+        ocr=offered["ocr"],
+        pii=offered["pii"],
+        transcribe=offered["transcribe"],
+        llm=offered["llm"],
+        llm_needs_key=offered["llm"] and settings.llm_api_key is None,
+        admin_only=admin_only,
     )
 
 

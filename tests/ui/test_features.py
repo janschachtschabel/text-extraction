@@ -8,7 +8,7 @@ import lxml.html
 import pytest
 
 from tests.fakes import PAGE
-from tests.ui.conftest import make_settings, running
+from tests.ui.conftest import USER_KEY, make_settings, running
 from text_extraction.ui.forms import OptionsError, build_body, feature_offer
 from text_extraction.ui.i18n import translate
 
@@ -181,3 +181,28 @@ def test_feature_texts_in_both_languages(language: str) -> None:
         root = tree(client.get(f"/ui?lang={language}").text)
     labels = texts(root, "//form[@id='extract-form']//label[@for='extract-pii']")
     assert labels == [translate(language, "form.pii")]  # type: ignore[arg-type]
+
+
+def test_offer_leaves_out_what_the_role_may_not_use() -> None:
+    """P19-D1 b: a feature kept for admin keys is not offered to a user key, with its own hint."""
+    closed = make_settings(**ALL_ON, ocr_allow_users=False, llm_allow_users=False)
+    user = feature_offer("user", closed)
+    assert (user.ocr, user.pii, user.transcribe, user.llm) == (False, True, True, False)
+    assert user.admin_only == {"ocr", "llm"}
+    assert not user.llm_needs_key
+    assert user.hint("ocr", "hint.ocr", "hint.ocr_off") == "hint.ocr_admin_only"
+    assert user.hint("pii", "hint.pii", "hint.pii_off") == "hint.pii"
+    admin = feature_offer("admin", closed)
+    assert (admin.ocr, admin.llm, admin.admin_only) == (True, True, frozenset())
+    off = feature_offer("user", make_settings(ocr_allow_users=False))
+    assert off.hint("ocr", "hint.ocr", "hint.ocr_off") == "hint.ocr_off"  # off for everyone
+
+
+def test_a_user_key_sees_the_admin_only_hint() -> None:
+    hx = {"HX-Request": "true", "Authorization": f"Bearer {USER_KEY}"}
+    with running(**ALL_ON, pii_allow_users=False) as client:
+        root = tree(client.post("/ui/run/login?lang=en", headers=hx).text)
+    (control,) = root.xpath("//form[@id='extract-form']//select[@name='pii']")
+    assert control.get("disabled") is not None
+    hints = texts(root, "//form[@id='extract-form']//*[contains(@class, 'feature-off')]")
+    assert translate("en", "hint.pii_admin_only") in hints

@@ -108,6 +108,15 @@ While a switch is off, a request that needs its worker answers 400: `pii` withou
 `ocr: always` without `DOCLING_ENABLED`. With `ocr: auto` (the default) a scan without
 `DOCLING_ENABLED` answers its text layer with the warning `ocr_unavailable`.
 
+To keep a feature for admin keys, set its second switch to `false`: `OCR_ALLOW_USERS`,
+`ASR_ALLOW_USERS`, `PII_ALLOW_USERS` or `LLM_ALLOW_USERS` (all `true` by default). A user key
+that asks for the feature then gets 403 `forbidden`: `ocr: always`, `transcribe` or an audio or
+video upload, `pii`, and the strategy `llm`, `learn_selectors`, `semantic` chunking or
+`describe_images`. Where a user key does not ask by name, the request runs without the feature:
+`ocr: auto` reads no scans, and the strategy `auto` asks no LLM for the fields still missing
+(warning `llm_unavailable`). The playground shows such a choice as disabled, with a hint. Admin
+keys may always use every feature the service has.
+
 Maximum extraction (for sites that allowed extraction by contract) needs
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; see [Site rules](site-rules.md#maximum-extraction).
 

@@ -332,6 +332,17 @@ optional rate limit.
   `BROWSER_UNBLOCK_ENABLED`. A user key never gets it, not even where the operator's default is
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
   renders in the standard browser.
+- **Optional features for admin keys only (package 19, P19-D1 b, 2026-11-07):**
+  `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default true) keep
+  a feature the service has for admin keys (`feature_access.py`). A user key that asks for it by
+  name gets 403 `forbidden` before anything runs (`ocr: always`; `transcribe: true` or an audio
+  or video upload; `pii`; strategy `llm`, `learn_selectors`, `semantic` chunking,
+  `describe_images`). An implicit use runs as if the feature were off: the request's
+  `ocr: auto` is stored as `never`, and the post stage runs with the settings the key sees
+  (`settings_for`: `LLM_ENABLED` off), so strategy `auto` leaves the fields without a value
+  missing with `llm_unavailable`, and needs no LLM key. Jobs keep the owner's role, so a
+  worker's post stage applies the same rule. A feature switched off (`*_ENABLED`) is off for
+  every key and keeps its own 400.
 
 There is no auth-free internal API: cluster-internal callers send a key like any other caller
 (only `AUTH_MODE=none` turns authentication off, for every caller at once).

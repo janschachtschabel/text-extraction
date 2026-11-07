@@ -11,7 +11,7 @@
   <select id="structured-strategy" name="strategy" aria-describedby="structured-strategy-hint">
     {% for value in ("auto", "metadata", "selectors", "patterns", "llm") %}<option value="{{ value }}"{% if value == "auto" %} selected{% endif %}{% if value == "llm" and not features.llm %} disabled{% endif %}>{{ t("form.strategy." ~ value) }}</option>{% endfor %}
   </select>
-  <p class="hint{% if not features.llm %} feature-off{% endif %}" id="structured-strategy-hint">{{ t("hint.strategy" if features.llm else "hint.strategy_no_llm") }}</p>
+  <p class="hint{% if not features.llm %} feature-off{% endif %}" id="structured-strategy-hint">{{ t(features.hint("llm", "hint.strategy", "hint.strategy_no_llm")) }}</p>
   {% if features.llm_needs_key %}<p class="hint llm-key-hint">{{ t("hint.llm_needs_key") }}</p>{% endif %}
   <label for="structured-structured">{{ t("form.structured") }}</label>
   <textarea id="structured-structured" name="structured" rows="6" spellcheck="false" required aria-describedby="structured-structured-hint">{{ default_structured }}</textarea>

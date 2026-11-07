@@ -40,6 +40,7 @@ from text_extraction.extract_api import (
     check_transcribe_request,
 )
 from text_extraction.extract_models import ExtractResult, with_own_fault_data
+from text_extraction.feature_access import check_feature_access, restricted_ocr, settings_for
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
@@ -329,6 +330,19 @@ async def start_batch(
         if not settings.browser_enabled:
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
         queue = state.browser_queue
+    # 403 for a feature the service keeps for admin keys (P19-R4); `ocr: auto` of such a key is
+    # `never`, and the LLM checks see the LLM switched off for it.
+    check_feature_access(
+        principal,
+        settings,
+        ocr=body.ocr,
+        pii=body.pii,
+        transcribe=body.transcribe,
+        structured=body.structured,
+        chunking=body.chunking,
+        describe=body.describe_images,
+    )
+    seen = settings_for(settings, principal)
     check_ocr_request(body.ocr, settings)  # 400 for `ocr: always` while there is no OCR
     key = asr_key_of(asr_key)
     # 400 while there is no ASR (M9), or no key for an external endpoint (M11).
@@ -340,11 +354,11 @@ async def start_batch(
     caller_llm_key = llm_key_of(llm_key)
     # 400 without LLM, embedding model or key; 422 for the combinations of S12.
     check_structured_request(
-        body.structured, body.chunking, body.pii, body.format, settings, llm_key=caller_llm_key
+        body.structured, body.chunking, body.pii, body.format, seen, llm_key=caller_llm_key
     )
     # 400 without LLM or key, 422 with pii or without metadata (V-S2).
     check_describe_request(
-        body.describe_images, body.pii, body.metadata, settings, llm_key=caller_llm_key
+        body.describe_images, body.pii, body.metadata, seen, llm_key=caller_llm_key
     )
     llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
     options = JobOptions(
@@ -354,7 +368,7 @@ async def start_batch(
         links=body.links,
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
-        ocr=body.ocr,
+        ocr=restricted_ocr(body.ocr, principal, settings),
         transcribe=body.transcribe,
         languages=body.languages,
         pii=body.pii,

@@ -113,6 +113,16 @@ ohne `PII_ENABLED`, die Strategie `llm`, `learn_selectors` und `semantic`-Chunki
 `ocr: always` ohne `DOCLING_ENABLED`. Mit `ocr: auto` (der Vorgabe) liefert ein Scan ohne
 `DOCLING_ENABLED` nur seine Textebene, mit der Warnung `ocr_unavailable`.
 
+Um eine Funktion Admin-Schlüsseln vorzubehalten, setzen Sie ihren zweiten Schalter auf `false`:
+`OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` oder `LLM_ALLOW_USERS` (alle standardmäßig
+`true`). Ein Nutzer-Schlüssel, der die Funktion anfordert, bekommt dann 403 `forbidden`:
+`ocr: always`, `transcribe` oder das Hochladen von Audio oder Video, `pii` sowie die Strategie
+`llm`, `learn_selectors`, `semantic`-Chunking oder `describe_images`. Wo ein Nutzer-Schlüssel sie
+nicht ausdrücklich anfordert, läuft die Anfrage ohne die Funktion: `ocr: auto` liest keine Scans,
+und die Strategie `auto` fragt für die noch fehlenden Felder kein LLM (Warnung `llm_unavailable`).
+Die Spielwiese zeigt eine solche Auswahl deaktiviert, mit einem Hinweis. Admin-Schlüssel dürfen
+jede Funktion nutzen, die der Dienst hat.
+
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).
 

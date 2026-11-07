@@ -1386,3 +1386,17 @@ def test_job_json_has_run_field(api: Api) -> None:
         "claimed_at",
     }
     assert "run" in spec["components"]["schemas"]["JobItem"]["properties"]
+
+
+def test_a_users_batch_stores_ocr_never_while_ocr_is_for_admins(
+    make_api: Callable[..., Api],
+) -> None:
+    """P19-R4: ``ocr: auto`` of a user key is ``never`` while ``OCR_ALLOW_USERS`` is off; an
+    admin key's stays ``auto``."""
+    api = make_api(docling_enabled=True, ocr_allow_users=False)
+    users = api.batch([PAGE]).json()["data"]["id"]
+    admins = api.batch([PAGE], headers=ROOT).json()["data"]["id"]
+
+    records = [stored_job(api, users), stored_job(api, admins)]
+
+    assert [record.options.ocr for record in records if record is not None] == ["never", "auto"]

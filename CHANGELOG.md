@@ -24,6 +24,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Added
 
+- `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default `true`)
+  keep a feature for admin keys (package 19): a user key that asks for it gets 403 `forbidden`
+  (`ocr: always`; `transcribe` or an audio or video upload; `pii`; strategy `llm`,
+  `learn_selectors`, `semantic` chunking, `describe_images`); `ocr: auto` of such a key works as
+  `never` and strategy `auto` runs without the LLM (`llm_unavailable`). The playground disables
+  such a choice with a hint.
 - The playground offers the optional features as choices (package 19): "Optional features" in
   Extract, File and Batch (OCR automatic/never/always, personal data, "Transcribe" for Extract and
   Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by
