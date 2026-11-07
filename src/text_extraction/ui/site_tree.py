@@ -20,7 +20,7 @@ or a linked-only URL the guess of ``page_types.guess_type`` (ruling P18-R1: from
 sitemap's ``type_hint``, a link's text and region, or ``content`` by default), always
 ``type_guessed`` with its ``type_reason``; only a URL with no name and an id shape stays without
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
-strongest. The first link that names a URL sets its title (``title_from_link``); a crawled
+strongest, unless that guess is ``content`` by default and a weaker source gives a reason. The first link that names a URL sets its title (``title_from_link``); a crawled
 page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
 type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
@@ -205,8 +205,13 @@ class _Found:
         if not self.title:
             self.title, self.title_from_link = other.title, other.title_from_link
         if self.status is None:  # not a crawled page (only a page has a status)
-            # A crawled page's own verdict, even none, wins over a type from a URL.
-            if other.status is not None or self.page_type is None:
+            # A crawled page's own verdict, even none, wins over a type from a URL; between
+            # guesses, a weaker source's reason beats a stronger source's bare default.
+            if (
+                other.status is not None
+                or self.page_type is None
+                or (self.type_reason == "default" and other.type_reason not in (None, "default"))
+            ):
                 self.page_type, self.type_guessed = other.page_type, other.type_guessed
                 self.type_reason = other.type_reason
             self.status, self.error_code = other.status, other.error_code

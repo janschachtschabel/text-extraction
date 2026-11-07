@@ -649,6 +649,20 @@ def test_a_sitemap_entry_also_linked_keeps_the_sitemaps_guess_and_gets_the_link_
     assert (node.title, node.title_from_link) == ("Thema X", True)
 
 
+def test_a_default_guess_gives_way_to_a_stronger_reason_from_another_source() -> None:
+    items = [
+        sitemap_item(0, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/thema-x/"}]),
+        page_item(
+            1, f"{ORIGIN}/", depth=0, links=((f"{ORIGIN}/thema-x/", "depth", None, "Termine"),)
+        ),
+    ]
+
+    node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/thema-x/"]
+
+    assert (node.kind, node.page_type, node.type_reason) == ("sitemap", "event", "keywords")
+    assert node.type_guessed
+
+
 def test_found_counts_and_sitemap_first_links() -> None:
     items = [
         sitemap_item(
