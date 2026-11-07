@@ -71,7 +71,7 @@ on a growing share of caption tracks. The service answers such a refusal honestl
 details (`transcript_source: metadata_only`, `partial`/`no_transcript_available`) with the warning
 `subtitles_blocked`, and a 429 goes to the outbound gate's backoff; no proxy, no PO-token plugin,
 no browser fallback. The done-when check therefore runs from Jan's line (`tests/live/urls/media.csv`
-with the compose profile `asr`); the live workflow reports the media set from GitHub's runners
+with the compose profile `asr`, which compose no longer needs since 2026-11-07); the live workflow reports the media set from GitHub's runners
 without gating it. Transcription (`transcribe: true`, uploads) is always a job, and ASR is off by
 default (`ASR_ENABLED`). Details in [architecture.md](architecture.md), "Audio and video".
 

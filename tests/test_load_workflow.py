@@ -28,7 +28,7 @@ BASE = REPO / "docker-compose.yml"
 CI = REPO / ".github" / "workflows" / "ci.yml"
 COMPOSE_ARGS = (
     "-f docker-compose.yml -f deploy/load/compose.load.yml"
-    " --profile docling --profile asr --profile nlp --profile llm"
+    " --profile docling --profile nlp --profile llm"
 )
 SELECTOR_SCENARIO = "structured-selectors-200"
 TEST_SERVICES = {"farm", "fake-llm"}

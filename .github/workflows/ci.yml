@@ -365,19 +365,19 @@ jobs:
           fi
           rm compose.json
 
-      # The profile `asr`: the one-shot models service writes the volume, the worker reads it
-      # read-only after it and keeps media on its own scratch volume (not the tmpfs); the mount
-      # paths win over .env; transcription is off unless the environment switches it on, then on
-      # everywhere.
-      - name: docker compose config (profile asr)
+      # The ASR services (no profile, on by default): the one-shot models service writes the
+      # volume, the worker reads it read-only after it and keeps media on its own scratch volume
+      # (not the tmpfs); the mount paths win over .env; transcription is on unless the environment
+      # switches it off, then off everywhere.
+      - name: docker compose config (asr worker)
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile asr config --format json > compose.json
+          docker compose config --format json > compose.json
           jq -e '.services["asr-models"]
             | .build.target == "asr" and .command == ["text-extraction-asr-worker", "--download-models"]
               and .volumes == [{"type": "volume", "source": "asr-models", "target": "/models", "volume": {}}]
-              and .environment.ASR_MODELS_PATH == "/models"' compose.json
+              and .environment.ASR_MODELS_PATH == "/models" and .profiles == null' compose.json
           jq -e '.services["asr-worker"]
             | .build.target == "asr" and .read_only == true and .tmpfs == ["/tmp"]
               and (.volumes | length == 2)
@@ -385,15 +385,11 @@ jobs:
               and (.volumes[1] | .source == "asr-scratch" and .target == "/scratch")
               and .environment.ASR_SCRATCH_PATH == "/scratch" and .environment.ASR_MODELS_PATH == "/models"
               and .depends_on["asr-models"].condition == "service_completed_successfully"
-              and .stop_grace_period == "45s"
+              and .stop_grace_period == "45s" and .profiles == null
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "false")' compose.json
-          ASR_ENABLED=true docker compose --profile asr config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "true")'
-          # Without the profile there is no ASR service.
-          if docker compose config --services | grep -q asr; then
-            echo "an ASR service runs without the profile" >&2; exit 1
-          fi
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "true")' compose.json
+          ASR_ENABLED=false docker compose config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "false")'
           rm compose.json
 
       # The profile `nlp`: the one-shot models service writes the volume, the worker reads it
@@ -452,7 +448,7 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
+          docker compose --profile docling --profile nlp --profile llm config --format json > compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .UI_ENABLED == "true"' compose.json
           jq -e '.services | to_entries | map(select(.key != "api")) | all(.value.environment // {} | has("MCP_ENABLED") or has("UI_ENABLED") | not)' compose.json
           MCP_ENABLED=false UI_ENABLED=false docker compose config --format json \
@@ -469,7 +465,7 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
+          docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile nlp --profile llm config --format json > compose.json
           jq -e --arg tests "$PWD/tests" '[.services.farm, .services["fake-llm"]]
             | all(.image == "text-extraction:dev" and .read_only == true
               and .volumes[0].source == $tests and .volumes[0].target == "/app/tests"
@@ -488,7 +484,7 @@ jobs:
             | length == 7 and all(.value.healthcheck | .start_period == "10m0s" and .start_interval == "5s" and .retries == 6
               and (.test | join(" ") | contains("127.0.0.1:9090/ready")))' compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "lg"' compose.json
-          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile asr --profile nlp --profile llm config --format json \
+          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile nlp --profile llm config --format json \
             | jq -e '.services | .["asr-models"].environment.ASR_MODEL == "small" and .["nlp-models"].environment.PII_MODEL_SIZE == "md"
               and .api.environment.STRUCTURED_SELECTOR_PROCESSES == "4"'
           rm compose.json
@@ -499,7 +495,7 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.release.yml --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
+          docker compose -f docker-compose.yml -f docker-compose.release.yml --profile docling --profile nlp --profile llm config --format json > compose.json
           jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
           jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 10
             and all(.value.build == null

@@ -44,8 +44,8 @@ uv run pre-commit install    # install the git hooks
 ## Docker Compose
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker und ein Valkey mit Passwort. Es schaltet den Browsermodus, den MCP-Server und die
-Spielwiese ein.
+Browser-Worker, einen ASR-Worker und ein Valkey mit Passwort. Es schaltet den Browsermodus, die
+Transkription, den MCP-Server und die Spielwiese ein.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
@@ -90,7 +90,12 @@ Compose-Profil und einen Schalter in `.env`:
 | Docling | `DOCLING_ENABLED=true` | `docling` | OCR für Scans und Bilder, OpenDocument-Dateien (ein Image von etwa 2 GB, Modelle von etwa 335 MiB) |
 | NLP | `PII_ENABLED=true` | `nlp` | Behandlung personenbezogener Daten mit Presidio und spaCy (Modelle von etwa 1 GB für `lg`, 115 MB für `md`) |
 | LLM | `LLM_ENABLED=true` | `llm` | Strukturierte Ausgabe mit einem LLM, semantisches Chunking und Bildbeschreibungen |
-| ASR | `ASR_ENABLED=true` | `asr` | Spracherkennung für Audio und Video ohne Untertitel (das Whisper-Modell, etwa 1,6 GB) |
+
+Die Spracherkennung für Audio und Video (der ASR-Worker) ist standardmäßig an: `docker compose up`
+startet sie, und ihr erster Start lädt das Whisper-Modell (etwa 1,6 GB; `ASR_MODEL=small`,
+etwa 0,5 GB). Um ohne sie zu starten, setzen Sie `ASR_ENABLED=false` in `.env` und starten mit
+`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`. Eine `.env`, die aus einer
+älteren `.env.example` kopiert ist, enthält noch `ASR_ENABLED=false`: Setzen Sie es auf `true`.
 
 Starten Sie ein Profil mit `docker compose --profile docling up --build` (mehrere: je ein
 `--profile`). Der erste Start lädt die Modelle in ein Volume. Der LLM-Worker braucht

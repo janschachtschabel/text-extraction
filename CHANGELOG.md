@@ -9,6 +9,20 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- docker compose starts the ASR worker by default: transcription of audio and video uploads and
+  of `transcribe: true` is on without the profile `asr` (which is gone). `ASR_ENABLED` in
+  `.env.example` is `true`; `ASR_ENABLED=false` with `--scale asr-models=0 --scale asr-worker=0`
+  switches it off. The service's own default and the Helm chart (`workers.asr.enabled`) are
+  unchanged. An existing `.env` with `ASR_ENABLED=false` keeps transcription off: set it to `true`.
+
+### Fixed
+
+- The playground names switched-off transcription ("Transcription is switched off in this
+  service") instead of "This kind of content cannot be converted" when an audio or video upload
+  or `transcribe: true` meets a service without ASR.
+
 ## [0.1.6] - 2026-11-07
 
 Package 18: the site tree after the v0.1.5 test (plan

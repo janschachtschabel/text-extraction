@@ -336,6 +336,7 @@
   "error.not_found": "Nicht gefunden.",
   "result.api_details": "Details der API (Englisch)",
   "result.http_answer": "Der Dienst hat mit HTTP {status} geantwortet.",
+  "result.transcription_disabled": "Die Transkription ist in diesem Dienst ausgeschaltet: Audio und Video werden erst zu Text, wenn der Betreiber sie einschaltet (ASR_ENABLED, JOBS_ENABLED).",
   "result.download_cut": "Der Download ist bei {max} von {total} Zeichen abgeschnitten; der curl-Befehl liest alles.",
   "result.content_cut_all": "Angezeigt werden die ersten {shown} von {total} Zeichen; der Download enthält alle.",
   "result.content_cut_part": "Angezeigt werden die ersten {shown} von {total} Zeichen; der Download enthält die ersten {max}.",

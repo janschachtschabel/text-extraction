@@ -68,7 +68,8 @@ def envelope_error(body: Mapping[str, Any] | None, status: int) -> tuple[Message
     error = (body or {}).get("error")
     error = error if isinstance(error, Mapping) else {}
     message = error.get("message")
-    return error_text(error.get("code"), status), message if isinstance(message, str) else None
+    message = message if isinstance(message, str) else None
+    return error_text(error.get("code"), status, message), message
 
 
 # The id of the element that sent an htmx request (a form's id).
