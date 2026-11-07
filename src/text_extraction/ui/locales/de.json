@@ -215,6 +215,7 @@
   "tree.col.depth": "Tiefe",
   "tree.guessed": "geschätzt",
   "tree.link_title": "„{title}“",
+  "tree.changed": "geändert {date}",
   "tree.found_changed": "{found}, geändert {date}",
   "tree.summary": "{urls} · {crawled} gecrawlt · {sitemap} aus der Sitemap · {linked} nur verlinkt",
   "tree.duration": "fertig in {seconds} s",

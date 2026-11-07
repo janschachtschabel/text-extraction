@@ -1059,9 +1059,7 @@ progress {
 
 .elapsed,
 .counts,
-.depth,
-.status,
-.lastmod {
+.status {
   color: var(--muted);
   font-size: 0.9em;
 }
@@ -1169,6 +1167,7 @@ ul.tree ul {
   --tree-columns: minmax(0, 1fr) 10rem 7.5rem 8rem 4.5rem;
   max-height: 40rem;
   overflow: auto;
+  container-type: inline-size; /* the compact rows below depend on the box, not the viewport */
   border: 1px solid var(--line);
   border-radius: var(--radius-field);
   background: var(--paper);
@@ -1209,6 +1208,8 @@ ul.tree li > ul {
   display: contents;
 }
 
+/* The template clamps the level to 12: the CSP forbids an inline style, so a level is an
+   attribute and each level a rule. */
 ul.tree li[data-level="1"] { --level: 1; }
 ul.tree li[data-level="2"] { --level: 2; }
 ul.tree li[data-level="3"] { --level: 3; }
@@ -1321,6 +1322,10 @@ ul.tree .pages {
   color: var(--muted);
 }
 
+.cell-status .status {
+  font-size: inherit;
+}
+
 .node-section > .cell-name .label {
   font-weight: 600;
 }
@@ -1375,9 +1380,8 @@ ul.tree .pages {
   color: var(--error);
 }
 
-/* A type not fetched ("Type open") or without a colour of its own. */
-.type-open,
-.type-other {
+/* A type not fetched ("Type open"), "other" or one without a colour of its own. */
+.type-open {
   border-color: var(--line);
   background: var(--paper);
   color: var(--muted);
@@ -1550,9 +1554,12 @@ dl.facts.counts {
   form.previews {
     margin-top: 12px;
   }
+}
 
-  /* The tree on a phone (package 18): name and type stay in a row; found, status and depth
-     move under the name with their column names shown, and a level is indented less. */
+@container (max-width: 44rem) {
+  /* The tree in a narrow box (package 18: a phone, or a column too narrow for five columns):
+     name and type stay in a row; found, status and depth move under the name with their column
+     names shown, and a level is indented less. */
   .tree-head {
     display: none;
   }

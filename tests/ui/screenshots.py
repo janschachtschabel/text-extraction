@@ -10,6 +10,7 @@ selectors that outlive a restyling: ids, ``data-value`` and a few stable classes
 import argparse
 import contextlib
 import hashlib
+import re
 import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -19,9 +20,10 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from playwright.sync_api import Page, sync_playwright
 from pytest_httpserver import HTTPServer
+from werkzeug import Request, Response
 
 from tests.ui.test_login_browser import _chromium
-from tests.ui.test_playground_browser import serve_site, serving
+from tests.ui.test_playground_browser import PAGES, _page, serving
 from text_extraction.settings import ApiKey, Settings
 from text_extraction.ui.i18n import LANGUAGES, Language
 
@@ -41,6 +43,41 @@ STATES: Final[tuple[str, ...]] = (
 WIDTHS: Final = {1440: 900, 390: 844}  # viewport width to height
 ADMIN_KEY: Final = "admin-key-0123456789-raw-secret"
 WAIT_MS: Final = 45_000  # a job's view refreshes every 3 s
+
+
+# The shot site shows what the site tree can show: the start page links an event page one level
+# too deep (its type is guessed from the URL), a page with an id-shaped path and a generic link
+# text ("type open", a title from a link), and the sitemap lists two pages that are not crawled.
+SHOT_PAGES: Final = {
+    **PAGES,
+    "/docs/a.html": ("Docs A", ["/veranstaltungen/herbst", "/docs/12345"]),
+}
+LINK_TEXTS: Final = {"/veranstaltungen/herbst": "Herbsttagung 2026", "/docs/12345": "Mehr"}
+SITEMAP: Final = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    "<url><loc>{origin}/docs/lernmaterial-mathematik</loc><lastmod>2026-05-01</lastmod></url>"
+    "<url><loc>{origin}/category/schule</loc></url></urlset>"
+)
+
+
+def _serve_shot_site(httpserver: HTTPServer) -> str:
+    """The local site of the shots (see ``SHOT_PAGES``); its origin."""
+    origin = f"http://127.0.0.1:{httpserver.port}"
+
+    def handle(request: Request) -> Response:
+        if request.path == "/sitemap.xml":
+            return Response(SITEMAP.format(origin=origin), content_type="application/xml")
+        found = SHOT_PAGES.get(request.path)
+        if found is None:
+            return Response("Not found", status=404, content_type="text/plain")
+        html = _page(*found).decode()
+        for link, text in LINK_TEXTS.items():
+            html = html.replace(f'href="{link}">{link}</a>', f'href="{link}">{text}</a>')
+        return Response(html, content_type="text/html; charset=utf-8")
+
+    httpserver.expect_request(re.compile(".*")).respond_with_handler(handle)
+    return origin
 
 
 @contextlib.contextmanager
@@ -201,7 +238,7 @@ def capture(
     httpserver = HTTPServer(host="127.0.0.1")
     httpserver.start()
     try:
-        origin = serve_site(httpserver)
+        origin = _serve_shot_site(httpserver)
         with _scripts_without_flags(), serving(_settings()) as url, sync_playwright() as driver:
             browser = driver.chromium.launch(executable_path=executable)
             try:

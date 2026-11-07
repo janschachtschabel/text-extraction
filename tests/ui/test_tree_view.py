@@ -139,20 +139,21 @@ def test_the_summary_has_the_counts_and_the_duration(
 
 
 @pytest.mark.parametrize(
-    ("language", "label", "all_", "event_free"),
+    ("language", "label", "all_", "open_chip"),
     [
         ("en", "Filter by type", "All 5", "Type open 1"),
         ("de", "Nach Typ filtern", "Alle 5", "Typ offen 1"),
     ],
 )
 def test_the_chips_are_hidden_buttons_before_the_script_runs(
-    rendered: Any, language: str, label: str, all_: str, event_free: str
+    rendered: Any, language: str, label: str, all_: str, open_chip: str
 ) -> None:
     root = rendered(language)
 
     [group] = root.xpath("//div[@class='tree-filter']")
     assert group.get("role") == "group"
     assert group.get("aria-label") == label
+    assert group.get("hidden") is not None  # an empty group without the script is no group
     chips = group.xpath("./button")
     assert [chip.get("data-filter-type") for chip in chips] == [
         "all",
@@ -170,7 +171,7 @@ def test_the_chips_are_hidden_buttons_before_the_script_runs(
         "false",
     ]
     assert " ".join(chips[0].text_content().split()) == all_
-    assert " ".join(chips[-1].text_content().split()) == event_free
+    assert " ".join(chips[-1].text_content().split()) == open_chip
     assert root.xpath("//p[@class='tree-types']")  # the text line stays without the script
 
 

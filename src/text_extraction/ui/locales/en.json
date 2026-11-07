@@ -215,6 +215,7 @@
   "tree.col.depth": "Depth",
   "tree.guessed": "guessed",
   "tree.link_title": "“{title}”",
+  "tree.changed": "changed {date}",
   "tree.found_changed": "{found}, changed {date}",
   "tree.summary": "{urls} · {crawled} crawled · {sitemap} from the sitemap · {linked} only linked",
   "tree.duration": "finished in {seconds} s",

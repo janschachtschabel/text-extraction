@@ -95,17 +95,32 @@ def test_a_chip_filters_the_leaves_and_all_restores_them(ui: tuple[str, str]) ->
         expect(view.locator("li[data-type=imprint]")).to_be_hidden()
 
         # A hidden box keeps its state, and "Select content pages" leaves it alone.
+        home = view.locator(f"input[name=url][value='{origin}/']")
         view.locator("[data-action=tree-all]").click()
         expect(view.locator(".tree-counter")).to_have_text(f"{URLS} selected")
+        view.locator("[data-action=tree-content]").click()
+        expect(home).to_be_checked()  # hidden by the filter, so untouched
+        expect(view.locator("input[name=url]:checked")).to_have_count(URLS)
         view.locator("[data-action=tree-none]").click()
         view.locator("[data-action=tree-content]").click()
         expect(view.locator("input[name=url]:checked")).to_have_count(2)  # the events only
+
+        # Ticking a section ticks its visible leaves only while a filter is active.
+        view.locator("[data-action=tree-none]").click()
+        host = view.locator("ul.tree > li > .cell-name > label > input")
+        host.click()  # it shows indeterminate afterwards: not all its leaves are ticked
+        expect(view.locator("input[name=url]:checked")).to_have_count(2)
+        expect(home).not_to_be_checked()
+        view.locator("[data-action=tree-none]").click()
 
         _chip(view, "all").click()
         expect(view.locator("ul.tree li[hidden]")).to_have_count(0)
         expect(_chip(view, "all")).to_have_attribute("aria-pressed", "true")
         expect(_chip(view, "event")).to_have_attribute("aria-pressed", "false")
         expect(view.locator("li[data-type=home]")).to_be_visible()
+        # Without a filter a section ticks every leaf below it.
+        host.click()
+        expect(view.locator("input[name=url]:checked")).to_have_count(URLS)
     assert console == []
 
 
@@ -125,6 +140,31 @@ def test_the_type_column_lines_up_at_1440(ui: tuple[str, str]) -> None:
         head = view.locator(".tree-head .head-type").bounding_box()
         assert head is not None
         assert abs(head["x"] - min(box["x"] for box in lefts if box)) <= 1
+    assert console == []
+
+
+@pytest.mark.parametrize("width", [1024, 700])
+def test_the_name_column_keeps_its_room_at_common_widths(ui: tuple[str, str], width: int) -> None:
+    """A tree box too narrow for five columns switches to the compact rows (name and type, the
+    rest under the name) instead of squeezing the name to a few pixels."""
+    url, origin = ui
+    with browsing(url) as (page, console):
+        page.set_viewport_size({"width": width, "height": 900})
+        view = _open_tree(page, origin)
+        view.locator("[data-action=tree-unfold-all]").click()
+        names = page.evaluate(
+            "() => [...document.querySelectorAll('#result ul.tree li > .cell-name')]"
+            ".map((cell) => cell.getBoundingClientRect().width"
+            " - parseFloat(getComputedStyle(cell).paddingLeft))"
+        )
+        rem = page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)")
+        assert min(names) >= 12 * rem
+        rows = page.evaluate(
+            "() => [...document.querySelectorAll('#result ul.tree li')]"
+            ".map((row) => row.scrollWidth - row.clientWidth)"
+        )
+        assert max(rows) <= 0
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
     assert console == []
 
 

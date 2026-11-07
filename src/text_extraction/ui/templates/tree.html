@@ -3,7 +3,7 @@ reader when the type is a guess. #}
 {%- macro pill(kind, guessed, reason) -%}
 {%- set colours = {"home": "home", "content": "content", "learning_material": "content", "listing": "listing", "search": "listing", "event": "event", "imprint": "legal", "privacy": "legal", "legal": "legal", "contact": "legal", "about": "legal", "auth": "legal", "error": "error"} -%}
 {%- set why = t("tree.guessed") ~ (", " ~ t("tree.reason." ~ reason) if reason else "") -%}
-<span class="page-type type-{{ colours.get(kind, 'other') }}{% if guessed %} guessed{% endif %}"{% if guessed %} title="{{ why }}"{% endif %}>{{ t("page_type." ~ kind) }}{% if guessed %} <span aria-hidden="true">~</span><span class="visually-hidden">, {{ why }}</span>{% endif %}</span>
+<span class="page-type type-{{ colours.get(kind, 'open') }}{% if guessed %} guessed{% endif %}"{% if guessed %} title="{{ why }}"{% endif %}>{{ t("page_type." ~ kind) }}{% if guessed %} <span aria-hidden="true">~</span><span class="visually-hidden">, {{ why }}</span>{% endif %}</span>
 {%- endmacro -%}
 <section class="tree-view" aria-label="{{ t('tree.label') }}">
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
@@ -27,7 +27,7 @@ reader when the type is a guess. #}
   <form id="tree-form" class="tree-form" data-access-mode="{{ tree_mode }}" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
     {%- if tree.type_counts or tree.untyped %}
     {#- Filtering needs ui.js, which shows these buttons and hides the text line of the counts. #}
-    <div class="tree-filter" role="group" aria-label="{{ t('tree.filter') }}">
+    <div class="tree-filter" role="group" aria-label="{{ t('tree.filter') }}" hidden>
       <button type="button" class="chip" data-filter-type="all" aria-pressed="true" hidden>{{ t("tree.filter_all") }} <span class="chip-count">{{ tree.urls }}</span></button>
       {%- for name, count in tree.type_counts.items() %}
       <button type="button" class="chip" data-filter-type="{{ name }}" aria-pressed="false" hidden>{{ t("page_type." ~ name) }} <span class="chip-count">{{ count }}</span></button>
@@ -80,7 +80,7 @@ reader when the type is a guess. #}
         {%- elif node.section_type %}<span class="visually-hidden">{{ t("tree.col.type") }}: </span>{{ pill(node.section_type, node.section_guessed, none) }}{% endif %}</div>
         {%- if node.url %}
         <div class="row-meta">
-          <div class="cell-found"{% if node.lastmod %} title="{{ t('tree.found_changed', found=t(found_labels[node.kind]), date=node.lastmod) }}"{% endif %}><span class="visually-hidden">{{ t("tree.col.found") }}: </span>{{ t(found_labels[node.kind]) }}{% if node.lastmod %}<span class="visually-hidden">, {{ t("tree.found_changed", found=t(found_labels[node.kind]), date=node.lastmod) }}</span>{% endif %}</div>
+          <div class="cell-found"{% if node.lastmod %} title="{{ t('tree.found_changed', found=t(found_labels[node.kind]), date=node.lastmod) }}"{% endif %}><span class="visually-hidden">{{ t("tree.col.found") }}: </span>{{ t(found_labels[node.kind]) }}{% if node.lastmod %}<span class="visually-hidden">, {{ t("tree.changed", date=node.lastmod) }}</span>{% endif %}</div>
           <div class="cell-status"><span class="visually-hidden">{{ t("tree.col.status") }}: </span>
           {%- if node.status %}<span class="status" data-value="{{ node.status }}">{{ t(status_text(node.status)) if status_text(node.status) else code(node.status) }}</span>{% endif %}
           {%- if node.error_code %} <span class="error-code">{{ code(node.error_code) }}</span>{% endif %}

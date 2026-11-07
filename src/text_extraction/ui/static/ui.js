@@ -500,7 +500,12 @@
       return;
     }
     chips.forEach(function (chip) { chip.hidden = false; });
-    var line = form.closest(".tree-view").querySelector(".tree-types");
+    var group = form.querySelector(".tree-filter");
+    if (group) {
+      group.hidden = false;
+    }
+    var view = form.closest(".tree-view");
+    var line = view ? view.querySelector(".tree-types") : null;
     if (line) {
       line.hidden = true;
     }
@@ -535,7 +540,8 @@
     }
     var item = box.closest("li");
     item.querySelectorAll("ul input[type=checkbox]").forEach(function (inner) {
-      if (inner.disabled) {
+      // A type filter's hidden boxes keep their state (package 18).
+      if (inner.disabled || inner.closest("li[hidden]")) {
         return;
       }
       inner.checked = box.checked;
