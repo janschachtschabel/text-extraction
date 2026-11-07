@@ -114,7 +114,8 @@ only the four keys above and the item runs; nothing reads the crawl keys of a co
                           appends nothing
 - ``job:{<id>}:site``     hash: ``scope`` (``SiteScope`` JSON), the counters ``pages``,
                           ``files`` and ``entries``, and ``e:<index>`` (the sitemap entries
-                          granted to that item)
+                          granted to that item), ``probe`` (the kept verdict of the
+                          ``sitemap_first`` probe, 1 or 0)
 
 A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
 then; one with a screenshot is kept only as long as the screenshot (``shorten``).

@@ -633,3 +633,20 @@ async def test_extend_gives_runs_the_job_ttl() -> None:
     await sites.extend(job_id, 0, [page("https://example.org/a")], max_pages=10, scope=SCOPE)
 
     assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:runs") <= 3600
+
+
+@scenario
+async def test_keep_probe_verdict_keeps_the_first_and_follows_the_jobs_life() -> None:
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey)
+    meta = f"job:{{{job_id}}}:meta"
+    await valkey.pexpire(meta, 5_000)
+
+    assert await sites.keep_probe_verdict(job_id, True) is True
+    assert await sites.keep_probe_verdict(job_id, False) is True  # the first verdict wins
+    assert await sites.probe_verdict(job_id) is True
+    assert 0 < await valkey.pttl(f"job:{{{job_id}}}:site") <= 5_000  # meta's TTL, not a full one
+    gone = "f" * 32
+    with pytest.raises(JobLost):
+        await sites.keep_probe_verdict(gone, True)
+    assert not await valkey.exists(f"job:{{{gone}}}:site")  # no orphan hash

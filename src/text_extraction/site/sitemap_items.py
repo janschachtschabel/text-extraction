@@ -9,13 +9,14 @@ not the other way round:
   loaded in the host's turn, in every compliance mode), within ``EXTRACT_TIMEOUT_SECONDS``. Its
   sitemaps (at most ``SITE_MAX_SITEMAP_FILES``, else ``sitemap_files_truncated``) become items at
   depth 0, on any host (the fetch checks the address); none listed means a guess,
-  ``<origin>/sitemap.xml``, and a guess that answers 404 or 410 appends the next one of
-  ``GUESSED_SITEMAP_PATHS`` (through its own ``_extend``, so a rerun stores the same answer); a
+  ``<origin>/sitemap.xml``, and a guess that answers 404, 410 or 2xx without a sitemap (an HTML
+  page, ``looks_like_sitemap``) appends the next one of ``GUESSED_SITEMAP_PATHS`` (through its
+  own ``_extend``, so a rerun stores the same answer); a
   guess that is blocked or fails ends the chain, a listed sitemap never guesses.
   ``unavailable`` fails ``target_http_error``, retryable, no guess.
 - **sitemap_first**: ``_sitemap_exists`` answers, for the start page of a ``discovery:
   sitemap_first`` crawl, whether the site has a sitemap (robots.txt lists one, or a guessed
-  address answers 2xx to a probe read to ``SITEMAP_PROBE_MAX_BYTES``).
+  address answers 2xx with a sitemap to a probe read to ``SITEMAP_PROBE_MAX_BYTES``).
 - **sitemap**: ``Pipeline.fetch_raw`` (at most ``SITE_SITEMAP_MAX_BYTES``, cut there), then the
   inflate and the parse on the runner's own pool (one thread per pod, so sitemap parses never
   hold the threads that convert pages). The parse has a deadline (the item's budget,
@@ -586,9 +587,9 @@ class SitemapItems:
     ) -> bool:
         """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: its
         robots.txt lists one, or one of ``GUESSED_SITEMAP_PATHS``, tried in turn, answers 2xx
-        (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the pipeline
-        (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the guess
-        chain read, so a yes always leads to a sitemap item that is read: an unavailable
+        with a sitemap (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the
+        pipeline (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the
+        guess chain read, so a yes always leads to a sitemap item that is read: an unavailable
         robots.txt is no (the robots item fails without a guess); a guess answering 2xx with
         something that looks like a sitemap (``looks_like_sitemap``) is yes; a 404, a 410 or a
         2xx that is no sitemap (an HTML page) moves on to the next address; a failure or any
@@ -620,10 +621,11 @@ class SitemapItems:
     async def _guess_next(
         self, job: JobRecord, item: QueueItem, url: str, node: SiteNode
     ) -> tuple[list[str], _Outcome]:
-        """Append the next guessed sitemap after a guess that answered 404 or 410, while one is
-        left; the warnings it adds to the absent item and the item's outcome. Like ``_robots`` it
-        always calls ``_extend`` (``add`` off under the memory guard), so a rerun finds the stored
-        answer and re-queues the child, and nothing is appended twice."""
+        """Append the next guessed sitemap after a guess that answered 404, 410 or 2xx without a
+        sitemap, while one is left; the warnings it adds to the absent item and the item's
+        outcome. Like ``_robots`` it always calls ``_extend`` (``add`` off under the memory
+        guard), so a rerun finds the stored answer and re-queues the child, and nothing is
+        appended twice."""
         following = (node.guess if node.guess is not None else 0) + 1
         if following >= len(GUESSED_SITEMAP_PATHS):
             return [], _Outcome(links=[])

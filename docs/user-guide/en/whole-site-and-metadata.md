@@ -61,7 +61,7 @@ checks of `compliance`; the items keep title, status, metadata and quality but n
 `scope: "path"` keeps it under the start URL's directory, `sitemaps: false` skips the sitemaps,
 and `depth: 0` reads the start page and the sitemaps only. With `discovery: "sitemap_first"` the
 crawl reads only the start page when robots.txt lists a sitemap or one of the three addresses
-answers, and takes the other pages from the sitemap; without a sitemap it follows links as usual.
+answers with one, and takes the other pages from the sitemap; without a sitemap it follows links as usual.
 `discovery: "sitemap_first"` with `sitemaps: false` is 422. The web interface offers this as "Fast:
 sitemap first" (the preset; it needs "robots.txt and sitemaps" ticked) next to "Thorough: follow
 links"; the API default is `discovery: "crawl"`. A crawl counts towards
