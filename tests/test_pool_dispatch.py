@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
+from pydantic import SecretStr
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from text_extraction.auth import Principal
@@ -355,7 +356,10 @@ def test_handoffs_wait_longer_for_stored_options_with_llm_work(
     monkeypatch.setattr(PiiDispatcher, "wait", wait)
     # A key: without any, strategy `auto` would run without the LLM (P19-R2).
     settings = Settings(
-        auth_mode="none", docling_enabled=True, llm_enabled=llm_enabled, llm_api_key="sk-env"
+        auth_mode="none",
+        docling_enabled=True,
+        llm_enabled=llm_enabled,
+        llm_api_key=SecretStr("sk-env"),
     )
     parts = Parts(settings)
     nlp = PiiDispatcher(parts.store, nlp_queue(parts.valkey, settings), settings)
