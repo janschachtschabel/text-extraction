@@ -42,6 +42,9 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Fixed
 
+- `discovery: sitemap_first` no longer trusts a `Sitemap:` line in robots.txt blindly: the first
+  listed sitemap is probed like the guessed addresses, and one that answers 404 or is no sitemap
+  (an HTML page) counts as absent, so the page's links are crawled instead of being left unvisited.
 - Page types: a schema.org `Event`, `Course`, `Quiz` or `LearningResource` makes a page `event` or
   `learning_material` only as the page's one main entity (the `mainEntity` of its `WebPage`, its
   only such JSON-LD node, or microdata on `<body>`, `<main>` or `<article>`), and an address such

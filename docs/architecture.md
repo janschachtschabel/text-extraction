@@ -2515,8 +2515,9 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   twice), the first that answers with a sitemap is parsed and ends the chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
   sitemap that robots.txt lists never guesses; under the memory guard the next guess is not appended
   (`site_memory_guard` on the absent item). **`discovery: sitemap_first`:** after item 0's fetch,
-  `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps` (a listed sitemap: yes), else
-  probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
+  `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps`; the first listed sitemap is probed
+  like a guess (a stale listing, 404 or HTML, is no and never guesses), else
+  it probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
   `SITEMAP_PROBE_MAX_BYTES`, 64 KiB; a 2xx answer that `looks_like_sitemap` is yes, a 404, 410 or
   2xx that is no sitemap moves on, a failure or another status is no; an unavailable robots.txt
   counts as no listed sitemap), so every probe has the SSRF guard,

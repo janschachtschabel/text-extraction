@@ -585,9 +585,11 @@ class SitemapItems:
     async def _sitemap_exists(
         self, job: JobRecord, url: str, gate_refusals: Literal["fail", "raise"]
     ) -> bool:
-        """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: its
-        robots.txt lists one, or one of ``GUESSED_SITEMAP_PATHS``, tried in turn, answers 2xx
-        with a sitemap (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the
+        """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: the first
+        sitemap its robots.txt lists answers 2xx with a sitemap (a stale listing, a 404 or an HTML
+        page, is no, and a listed sitemap never guesses, like the robots item), or, with none
+        listed, one of ``GUESSED_SITEMAP_PATHS``, tried in turn, does (each read to
+        ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the
         pipeline (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the
         guess chain read, so a yes always leads to a sitemap item that is read: an unavailable
         robots.txt is no (the robots item fails without a guess); a guess answering 2xx with
@@ -597,12 +599,11 @@ class SitemapItems:
         listed = await self._pipeline.robots_sitemaps(url, gate_refusals=gate_refusals)
         if listed.state == "unavailable":
             return False
-        if listed.state == "found" and listed.urls:
-            return True
-        for path in GUESSED_SITEMAP_PATHS:
-            guess = _origin(url) + path
+
+        async def probe(address: str) -> tuple[bool, bool]:
+            """(answered with a sitemap, go on to the next address)."""
             raw = await self._pipeline.fetch_raw(
-                normalize_url(guess) or guess,
+                normalize_url(address) or address,
                 job_principal(job),
                 job.options.compliance,
                 max_bytes=SITEMAP_PROBE_MAX_BYTES,
@@ -610,11 +611,19 @@ class SitemapItems:
                 gate_refusals=gate_refusals,
             )
             if raw.fetched is None:
-                return False
+                return False, False
             status = raw.fetched.status
             if 200 <= status < 300 and looks_like_sitemap(raw.fetched.content):
+                return True, False
+            return False, status in (404, 410) or 200 <= status < 300
+
+        if listed.state == "found" and listed.urls:
+            return (await probe(listed.urls[0]))[0]
+        for path in GUESSED_SITEMAP_PATHS:
+            found, go_on = await probe(_origin(url) + path)
+            if found:
                 return True
-            if status not in (404, 410) and not 200 <= status < 300:
+            if not go_on:
                 return False
         return False
 
