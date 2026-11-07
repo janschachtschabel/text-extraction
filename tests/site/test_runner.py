@@ -1449,6 +1449,34 @@ async def test_sitemap_first_listed_sitemap_with_a_urlset_is_trusted() -> None:
     assert not fetched_urls(crawl) & set(LINKED)
 
 
+def _sitemap_index(*locs: str) -> bytes:
+    children = "".join(f"<sitemap><loc>{loc}</loc></sitemap>" for loc in locs)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{children}'
+        "</sitemapindex>"
+    ).encode()
+
+
+@pytest.mark.parametrize("form", ["index", "gzip"])
+@scenario
+async def test_sitemap_first_trusts_a_listed_index_or_gzip_sitemap(form: str) -> None:
+    import gzip
+
+    url = f"{SITE}/old-sitemap.xml"
+    body = (
+        _sitemap_index(f"{SITE}/child.xml")
+        if form == "index"
+        else gzip.compress(urlset(*LISTED).encode())
+    )
+    kind = "application/xml" if form == "index" else "application/gzip"
+    crawl, job_id = await listed_sitemap_crawl(fetched(url, body, content_type=kind))
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
 @scenario
 async def test_sitemap_first_with_guessed_sitemap() -> None:
     crawl = Crawl(
