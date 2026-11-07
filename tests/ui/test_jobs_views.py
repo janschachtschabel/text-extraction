@@ -1485,7 +1485,7 @@ def test_site_form_offers_fast_sitemap_first_as_the_preset(client: TestClient) -
     assert (thorough.get("value"), thorough.get("checked") is not None) == ("crawl", False)
     for radio, label, hint in (
         (fast, "Fast: sitemap first", "Reads robots.txt, the sitemaps and the start page."),
-        (thorough, "Thorough: follow links", "Follows links up to the depth and page count below."),
+        (thorough, "Thorough: follow links", "Follows links up to the depth and page count above."),
     ):
         assert texts(radio.getparent(), ".") == [label]
         (note,) = fieldset.xpath(f".//p[@id='{radio.get('aria-describedby')}']")
