@@ -337,11 +337,13 @@ optional rate limit.
   a feature the service has for admin keys (`feature_access.py`). A user key that asks for it by
   name gets 403 `forbidden` before anything runs (`ocr: always`; `transcribe: true` or an audio
   or video upload; `pii`; strategy `llm`, `learn_selectors`, `semantic` chunking,
-  `describe_images`). An implicit use runs as if the feature were off: the request's
-  `ocr: auto` is stored as `never`, and the post stage runs with the settings the key sees
-  (`settings_for`: `LLM_ENABLED` off), so strategy `auto` leaves the fields without a value
-  missing with `llm_unavailable`, and needs no LLM key. Jobs keep the owner's role, so a
-  worker's post stage applies the same rule. A feature switched off (`*_ENABLED`) is off for
+  `describe_images`). An implicit use runs as if the feature were off: the pipeline gives such
+  a key's documents no OCR hand-off (`Pipeline._ocr_kept`: the text layer with
+  `ocr_unavailable`, an image `unsupported_content_type` with the 403 text; the request's `ocr`
+  stays as sent, so the result cache is shared), and the post stage, the waits and the stored
+  LLM key use the settings the key sees (`settings_for`: `LLM_ENABLED` off), so strategy `auto`
+  leaves the fields without a value missing with `llm_unavailable`. Jobs keep the owner's role,
+  so a worker applies the same rule. A feature switched off (`*_ENABLED`) is off for
   every key and keeps its own 400.
 
 There is no auth-free internal API: cluster-internal callers send a key like any other caller
@@ -2105,9 +2107,11 @@ byte.
 **S12, request checks** (`structured/checks.py`, on every route). 400 `invalid_request` for LLM work
 (strategy `llm`, `learn_selectors`, chunking `semantic`) while the service has no LLM
 (`LLM_ENABLED` and `JOBS_ENABLED`: "LLM features are not enabled on this service."), for `semantic`
-without `LLM_EMBEDDING_MODEL`, and for work that may call the LLM (`llm`, `auto` with a schema,
+without `LLM_EMBEDDING_MODEL`, and for work that must call the LLM (`llm`, `learn_selectors`,
 `semantic`) without any key ("No LLM key: send X-LLM-Api-Key."). `auto` is not refused on a service
-without the LLM: its fields left for the LLM stay missing (`llm_unavailable`). 422 for chunking with `format: html`
+without the LLM, nor without any key (since package 19, P19-R2: `LLM_ENABLED` is on in compose
+without a key): its fields left for the LLM stay missing (`llm_unavailable`); the post stage and
+the llm worker then run as without the LLM (`feature_access.settings_for(has_llm_key=False)`). 422 for chunking with `format: html`
 ("Chunking needs format markdown or text."), for `pii` with strategy `metadata` or `selectors`,
 `tables`, `learn_selectors` or caller `selectors` ("… reads the raw page and cannot be combined
 with pii.", D3), for `learn_selectors` with a strategy other than `llm` and `auto`, and for the

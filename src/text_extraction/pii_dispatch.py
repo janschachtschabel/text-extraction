@@ -88,6 +88,7 @@ from redis.asyncio import Redis
 from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
+from text_extraction.feature_access import settings_for
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.pii.fields import needs_pii, withheld
@@ -256,7 +257,7 @@ class PiiHandoff(LastHopHandoff):
         self._llm = wants_llm(
             options.structured,
             options.chunking,
-            dispatcher.settings,
+            settings_for(dispatcher.settings, principal, has_llm_key=llm_key is not None),
             describe=options.describe_images,
         )
 

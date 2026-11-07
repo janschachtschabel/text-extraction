@@ -377,6 +377,7 @@ class FeatureOffer:
     transcribe: bool
     llm: bool
     llm_needs_key: bool
+    semantic: bool = False  # semantic chunking: the LLM and LLM_EMBEDDING_MODEL
     # The features the service has but keeps for admin keys (``*_ALLOW_USERS``, P19-D1 b).
     admin_only: frozenset[str] = frozenset()
 
@@ -416,6 +417,7 @@ def feature_offer(role: str, settings: Settings) -> FeatureOffer:
         transcribe=offered["transcribe"],
         llm=offered["llm"],
         llm_needs_key=offered["llm"] and settings.llm_api_key is None,
+        semantic=offered["llm"] and settings.llm_embedding_model is not None,
         admin_only=admin_only,
     )
 

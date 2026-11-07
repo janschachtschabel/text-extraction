@@ -1868,3 +1868,32 @@ def test_upload_p1_job_result_has_post_stage() -> None:
     result = view["data"]["items"][0]["result"]
     assert result["status"] == "success"
     assert result["data"]["chunks"]
+
+
+def test_a_user_key_gets_no_ocr_while_ocr_is_for_admins() -> None:
+    """P19-R4: with ``OCR_ALLOW_USERS=false`` a user key's document gets no OCR hand-off: its
+    text layer with ``ocr_unavailable``, an image the 403 text; as if OCR were off."""
+    handed: list[Any] = []
+
+    async def handoff(needed: Any) -> Any:  # pragma: no cover - must not be called
+        handed.append(needed)
+        return needed.draft
+
+    scan, _, _ = run_upload(
+        reply(needs_ocr=True), handoff=handoff, docling_enabled=True, ocr_allow_users=False
+    )
+    image, _, _ = run_upload(
+        AssertionError("not converted"),
+        PNG,
+        handoff=handoff,
+        docling_enabled=True,
+        ocr_allow_users=False,
+    )
+
+    assert handed == []
+    assert scan.status == "success"
+    assert scan.data is not None
+    assert OCR_UNAVAILABLE_WARNING in scan.data.warnings
+    assert image.error is not None
+    assert image.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert image.error.message == "OCR is for admin keys only on this service."

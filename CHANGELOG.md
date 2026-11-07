@@ -27,9 +27,13 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 - `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default `true`)
   keep a feature for admin keys (package 19): a user key that asks for it gets 403 `forbidden`
   (`ocr: always`; `transcribe` or an audio or video upload; `pii`; strategy `llm`,
-  `learn_selectors`, `semantic` chunking, `describe_images`); `ocr: auto` of such a key works as
-  `never` and strategy `auto` runs without the LLM (`llm_unavailable`). The playground disables
+  `learn_selectors`, `semantic` chunking, `describe_images`); such a key's documents get no OCR
+  (`ocr_unavailable`) and strategy `auto` runs without the LLM (`llm_unavailable`). The playground disables
   such a choice with a hint.
+- Strategy `auto` with a schema and no LLM key at all (neither `X-LLM-Api-Key` nor `LLM_API_KEY`)
+  runs without the LLM (`llm_unavailable`) instead of answering 400: compose now switches the LLM
+  on without a key, and the playground's default Structured request must work. LLM work that
+  names the LLM (`llm`, `learn_selectors`, `semantic`, `describe_images`) still answers 400.
 - The playground offers the optional features as choices (package 19): "Optional features" in
   Extract, File and Batch (OCR automatic/never/always, personal data, "Transcribe" for Extract and
   Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by

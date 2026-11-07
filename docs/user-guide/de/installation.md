@@ -101,7 +101,8 @@ aus einer älteren `.env.example` kopiert ist, hat die Schalter noch auf `false`
 
 Der LLM-Worker braucht `LLM_BASE_URL` und `LLM_MODEL` eines OpenAI-kompatiblen Endpunkts und einen
 Schlüssel: `LLM_API_KEY` in `.env` oder den `X-LLM-Api-Key` des Aufrufers (das Schlüsselfeld der
-Spielwiese); ohne beides antwortet eine Anfrage, die das LLM braucht, mit 400.
+Spielwiese); ohne beides antwortet eine Anfrage, die LLM-Arbeit ausdrücklich verlangt, mit 400, und
+die Strategie `auto` läuft ohne das LLM.
 `LLM_EMBEDDING_MODEL` ist für semantisches Chunking;
 `docker compose run --rm llm-worker text-extraction-llm-worker --check` sendet dem Endpunkt eine
 winzige Extraktion. Für `pii: hash` mit demselben Hash in jedem Ergebnis setzen Sie
@@ -118,8 +119,8 @@ Um eine Funktion Admin-Schlüsseln vorzubehalten, setzen Sie ihren zweiten Schal
 `true`). Ein Nutzer-Schlüssel, der die Funktion anfordert, bekommt dann 403 `forbidden`:
 `ocr: always`, `transcribe` oder das Hochladen von Audio oder Video, `pii` sowie die Strategie
 `llm`, `learn_selectors`, `semantic`-Chunking oder `describe_images`. Wo ein Nutzer-Schlüssel sie
-nicht ausdrücklich anfordert, läuft die Anfrage ohne die Funktion: `ocr: auto` liest keine Scans,
-und die Strategie `auto` fragt für die noch fehlenden Felder kein LLM (Warnung `llm_unavailable`).
+nicht ausdrücklich anfordert, läuft die Anfrage ohne die Funktion: Ein Scan bekommt kein OCR
+(`ocr_unavailable`), und die Strategie `auto` fragt für die noch fehlenden Felder kein LLM (Warnung `llm_unavailable`).
 Die Spielwiese zeigt eine solche Auswahl deaktiviert, mit einem Hinweis. Admin-Schlüssel dürfen
 jede Funktion nutzen, die der Dienst hat.
 

@@ -22,7 +22,7 @@
     {% if features.llm_needs_key %}<p class="hint llm-key-hint">{{ t("hint.llm_needs_key") }}</p>{% endif %}
   </fieldset>
   <label for="extract-max-images">{{ t("form.max_images") }}</label>
-  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5" aria-describedby="extract-max-images-hint">
+  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5"{% if not features.llm %} disabled{% endif %} aria-describedby="extract-max-images-hint">
   <p class="hint" id="extract-max-images-hint">{{ t("hint.max_images") }}</p>
   {% with with_transcribe=true, chosen=none %}{% include "forms/features.html" %}{% endwith %}
   {% include "forms/common.html" %}

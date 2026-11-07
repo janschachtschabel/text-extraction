@@ -147,15 +147,19 @@ def test_semantic_400_without_embedding_model() -> None:
     "case",
     [
         {"structured_options": structured(strategy="llm")},
-        {"structured_options": structured(strategy="auto")},
         {"chunking": ChunkingOptions(strategy="semantic")},
     ],
-    ids=["llm", "auto", "semantic"],
+    ids=["llm", "semantic"],
 )
 def test_llm_work_400_without_any_key(case: dict[str, Any]) -> None:
     overrides = {**LLM_ON, "llm_api_key": None, "llm_embedding_model": "embed-1"}
     refused(400, LLM_KEY_MISSING_MESSAGE, **case, **overrides)
     assert "sk-" not in LLM_KEY_MISSING_MESSAGE
+
+
+def test_auto_passes_without_any_key() -> None:
+    """P19-R2: ``auto`` then runs without the LLM (``llm_unavailable``)."""
+    check(structured_options=structured(strategy="auto"), **{**LLM_ON, "llm_api_key": None})
 
 
 @pytest.mark.parametrize(

@@ -97,7 +97,7 @@ from an older `.env.example` still has the switches at `false`: set them to `tru
 
 The LLM worker needs `LLM_BASE_URL` and `LLM_MODEL` of an OpenAI-compatible endpoint and a key:
 `LLM_API_KEY` in `.env`, or the caller's `X-LLM-Api-Key` (the playground's key field); without
-either, a request that needs the LLM answers 400. `LLM_EMBEDDING_MODEL` is for semantic chunking;
+either, a request that names LLM work answers 400, and the strategy `auto` runs without the LLM. `LLM_EMBEDDING_MODEL` is for semantic chunking;
 `docker compose run --rm llm-worker text-extraction-llm-worker --check` sends one tiny
 extraction to the endpoint. For `pii: hash` with the same hash in every result, set
 `PII_HASH_KEY` (`openssl rand -hex 32`).
@@ -113,7 +113,7 @@ To keep a feature for admin keys, set its second switch to `false`: `OCR_ALLOW_U
 that asks for the feature then gets 403 `forbidden`: `ocr: always`, `transcribe` or an audio or
 video upload, `pii`, and the strategy `llm`, `learn_selectors`, `semantic` chunking or
 `describe_images`. Where a user key does not ask by name, the request runs without the feature:
-`ocr: auto` reads no scans, and the strategy `auto` asks no LLM for the fields still missing
+a scan gets no OCR (`ocr_unavailable`), and the strategy `auto` asks no LLM for the fields still missing
 (warning `llm_unavailable`). The playground shows such a choice as disabled, with a hint. Admin
 keys may always use every feature the service has.
 

@@ -2139,15 +2139,31 @@ def test_semantic_400_without_embedding_model(route: str) -> None:
 
 
 @pytest.mark.parametrize("route", ROUTES)
-@pytest.mark.parametrize("strategy", ["llm", "auto"])
-def test_llm_work_400_without_any_key(route: str, strategy: str) -> None:
+def test_llm_work_400_without_any_key(route: str) -> None:
     service = Service(llm_settings(llm_api_key=None))
     with TestClient(service.app) as client:
-        response = post_route(client, route, structured={**LLM_STRUCTURED, "strategy": strategy})
+        response = post_route(client, route, structured={**LLM_STRUCTURED, "strategy": "llm"})
 
     refusal(response, 400, LLM_KEY_MISSING)
     assert service.fetcher.calls == []
     assert service.keys() == []
+
+
+@pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
+def test_auto_without_any_key_runs_without_the_llm(route: str, status: int) -> None:
+    """P19-R2: strategy ``auto`` is no LLM work it must have. Without any key it is accepted and
+    leaves the fields for the LLM missing (``llm_unavailable``); no key is stored."""
+    service = Service(llm_settings(llm_api_key=None))
+    with TestClient(service.app) as client:
+        wanted = {"type": "object", "properties": {"price_in_euro": {"type": "number"}}}
+        response = post_route(client, route, structured={"schema": wanted, "strategy": "auto"})
+
+    assert response.status_code == status, response.text
+    if route != "batch":
+        data = response.json()["data"]
+        assert "llm_unavailable" in data["warnings"]
+        assert data["structured"]["missing"]
+    assert service.keys("job:*:llm_key") == []
 
 
 @pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
@@ -2810,6 +2826,7 @@ def test_a_shutdown_cut_that_loses_to_a_release_answers_the_flow_once() -> None:
                 kind="extract",
                 renders_first=False,
                 hand_over=hand_over,
+                principal=USER,
             )
         )
         await asyncio.sleep(0.05)

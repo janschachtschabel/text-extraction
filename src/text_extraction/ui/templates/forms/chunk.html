@@ -19,9 +19,10 @@
   {% include "forms/format.html" %}
   <label for="chunk-method">{{ t("form.method") }}</label>
   <select id="chunk-method" name="method" aria-describedby="chunk-method-hint">
-    {% for value in ("recursive", "fixed", "markdown", "sentence", "semantic") %}<option value="{{ value }}"{% if value == "recursive" %} selected{% endif %}{% if value == "semantic" and not features.llm %} disabled{% endif %}>{{ t("form.method." ~ value) }}</option>{% endfor %}
+    {% for value in ("recursive", "fixed", "markdown", "sentence", "semantic") %}<option value="{{ value }}"{% if value == "recursive" %} selected{% endif %}{% if value == "semantic" and not features.semantic %} disabled{% endif %}>{{ t("form.method." ~ value) }}</option>{% endfor %}
   </select>
-  <p class="hint{% if not features.llm %} feature-off{% endif %}" id="chunk-method-hint">{{ t(features.hint("llm", "hint.method", "hint.method_no_llm")) }}</p>
+  <p class="hint{% if not features.semantic %} feature-off{% endif %}" id="chunk-method-hint">{{ t(features.hint("llm", "hint.method" if features.semantic else "hint.method_no_embedding", "hint.method_no_llm")) }}</p>
+  {% if features.semantic and features.llm_needs_key %}<p class="hint llm-key-hint">{{ t("hint.llm_needs_key") }}</p>{% endif %}
   <label for="chunk-chunking">{{ t("form.chunking") }}</label>
   <textarea id="chunk-chunking" name="chunking" rows="3" spellcheck="false" required aria-describedby="chunk-chunking-hint">{{ default_chunking }}</textarea>
   <p class="hint" id="chunk-chunking-hint">{{ t("hint.chunking") }}</p>

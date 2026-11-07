@@ -32,13 +32,13 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `screenshot` | Boolean | `false` | Auch einen Screenshot aufnehmen, ein PNG, wenn `screenshot_options` nichts anderes sagt. Nicht mit `mode: fast`. |
 | `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
 | `screenshot_options` | Objekt | nicht gesetzt | Viewport-Größe, Bildformat und -größe des Screenshots: `viewport` (`{"width", "height"}`, Standard 1920×1080), `format` (`png`, `jpeg` oder `webp`), `quality` (1 bis 100, nur für `jpeg` und `webp`) und `width` (skaliert herunter, höchstens die Breite des Viewports). Braucht `screenshot`, wird also mit `mode: fast` abgelehnt. |
-| `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. |
-| `transcribe` | Boolean | `false` | Audio und Video ohne Untertitel transkribieren (immer ein Job). |
+| `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. `always` ergibt für einen Nutzer-Schlüssel 403, solange OCR nur für Admin-Schlüssel freigegeben ist (`OCR_ALLOW_USERS=false`). |
+| `transcribe` | Boolean | `false` | Audio und Video ohne Untertitel transkribieren (immer ein Job). 403 für einen Nutzer-Schlüssel, solange die Transkription nur für Admin-Schlüssel freigegeben ist (`ASR_ALLOW_USERS=false`); ebenso das Hochladen von Audio oder Video. |
 | `languages` | Liste von Sprachcodes | leer | Bevorzugte Sprachen für Untertitel und Transkription, höchstens 5, etwa `["de", "en"]`. |
-| `pii` | Modus oder Objekt | nicht gesetzt | Personenbezogene Daten behandeln: `mask`, `redact`, `hash` oder `annotate`. Siehe [`pii`](#pii). |
+| `pii` | Modus oder Objekt | nicht gesetzt | Personenbezogene Daten behandeln: `mask`, `redact`, `hash` oder `annotate`. Siehe [`pii`](#pii). 403 für einen Nutzer-Schlüssel, solange es nur für Admin-Schlüssel freigegeben ist (`PII_ALLOW_USERS=false`). |
 | `structured` | Objekt | nicht gesetzt | Die Felder eines JSON-Schemas aus der Seite füllen. Siehe [`structured`](#structured). |
 | `chunking` | Objekt | nicht gesetzt | Den Inhalt in Chunks zerlegen. Siehe [`chunking`](#chunking). |
-| `describe_images` | Objekt | nicht gesetzt | Die Bilder der Seite mit dem LLM beschreiben. Siehe [`describe_images`](#describe_images). |
+| `describe_images` | Objekt | nicht gesetzt | Die Bilder der Seite mit dem LLM beschreiben. Siehe [`describe_images`](#describe_images). Solange das LLM nur für Admin-Schlüssel freigegeben ist (`LLM_ALLOW_USERS=false`), bekommt ein Nutzer-Schlüssel dafür 403, ebenso für die Strategie `llm`, `learn_selectors` und `semantic`-Chunking; seine Strategie `auto` läuft ohne das LLM. |
 
 <!-- request: POST /v1/extract -->
 ```json

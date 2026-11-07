@@ -10,11 +10,12 @@ What a user key may not use (ruling P19-R4):
 - **Asked for explicitly:** 403 ``forbidden`` before anything runs: ``ocr: always``, ``pii``,
   ``transcribe: true``, an audio or video upload, strategy ``llm``, ``learn_selectors``,
   ``describe_images`` and ``semantic`` chunking.
-- **Used implicitly:** the request runs as if the feature were off. ``ocr: auto`` becomes
-  ``never`` (``restricted_ocr``: the text layer, no OCR), and strategy ``auto`` asks no LLM for
-  missing fields (``settings_for``: the post stage runs with ``LLM_ENABLED`` off for the key and
-  answers the warning ``llm_unavailable``). Jobs keep the owner's role, so their workers apply
-  the same rule.
+- **Used implicitly:** the request runs as if the feature were off. A document that needs OCR
+  under ``ocr: auto`` gets no hand-off to the Docling workers (``Pipeline._ocr_kept``): its text
+  layer with ``ocr_unavailable``, or for an image the 403 text as its ``unsupported_content_type``
+  message. Strategy ``auto`` asks no LLM for missing fields (``settings_for``: the post stage, the
+  waits and the stored LLM key see ``LLM_ENABLED`` off for the key; warning ``llm_unavailable``).
+  Jobs keep the owner's role, so their workers apply the same rule.
 """
 
 from typing import Final, Literal
@@ -34,7 +35,6 @@ __all__ = [
     "allowed",
     "check_feature_access",
     "forbidden_message",
-    "restricted_ocr",
     "settings_for",
 ]
 
@@ -77,26 +77,21 @@ def _role(principal: Principal | None) -> Role | None:
     return principal.role if principal is not None else None
 
 
-def settings_for(settings: Settings, principal: Principal | None) -> Settings:
+def settings_for(
+    settings: Settings, principal: Principal | None, *, has_llm_key: bool = True
+) -> Settings:
     """``settings`` as ``principal`` sees them: the features it may not use switched off. The
-    same object when it may use them all."""
+    same object when it may use them all. ``has_llm_key=False`` (the request sent no
+    ``X-LLM-Api-Key``) also switches the LLM off while the service has no ``LLM_API_KEY``: no
+    LLM call could run, so strategy ``auto`` runs without it (P19-R2)."""
     off = {
         _ENABLED[feature]: False
         for feature in _ENABLED
         if _available(feature, settings) and not allowed(feature, _role(principal), settings)
     }
+    if not has_llm_key and settings.llm_api_key is None and _available("llm", settings):
+        off["llm_enabled"] = False
     return settings.model_copy(update=off) if off else settings
-
-
-def restricted_ocr(ocr: OcrOption, principal: Principal, settings: Settings) -> OcrOption:
-    """``ocr`` for ``principal``: ``auto`` is ``never`` for a key that may not use OCR."""
-    if (
-        ocr == "auto"
-        and _available("ocr", settings)
-        and not allowed("ocr", principal.role, settings)
-    ):
-        return "never"
-    return ocr
 
 
 def _asks_llm(

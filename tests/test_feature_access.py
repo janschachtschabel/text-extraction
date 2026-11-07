@@ -19,7 +19,6 @@ from text_extraction.feature_access import (
     allowed,
     check_feature_access,
     forbidden_message,
-    restricted_ocr,
     settings_for,
 )
 from text_extraction.fetch import Fetcher
@@ -110,14 +109,6 @@ def test_settings_for_switches_off_what_the_key_may_not_use() -> None:
     assert not llm_available(seen)
     assert (seen.docling_enabled, seen.pii_enabled, seen.asr_enabled) == (True, True, True)
     assert llm_available(closed)  # the service's own settings are unchanged
-
-
-def test_ocr_auto_is_never_for_a_key_without_ocr() -> None:
-    closed = settings(ocr_allow_users=False)
-    assert restricted_ocr("auto", USER, closed) == "never"
-    assert restricted_ocr("auto", ADMIN, closed) == "auto"
-    assert restricted_ocr("auto", USER, settings()) == "auto"
-    assert restricted_ocr("never", USER, closed) == "never"
 
 
 # --- the explicit requests ----------------------------------------------------------------------
@@ -245,17 +236,15 @@ def serving(config: Settings) -> TestClient:
 
 
 def test_auto_runs_without_the_llm_for_a_user() -> None:
-    """Strategy ``auto`` of a user key without the LLM: no key needed, the fields the page has
-    not are missing with ``llm_unavailable``. An admin key still needs a key for the LLM."""
+    """Strategy ``auto`` of a user key without the LLM: its key is never used, the fields the
+    page has not are missing with ``llm_unavailable``."""
     wanted = {"type": "object", "properties": {"price_in_euro": {"type": "number"}}}
     body = {"url": PAGE, "structured": {"schema": wanted, "strategy": "auto"}, "wait_seconds": 20}
-    with serving(settings(llm_allow_users=False)) as client:
-        answer = client.post("/v1/extract", json=body, headers=AUTH)
-        refused = client.post("/v1/extract", json=body, headers=ADMIN_AUTH)
+    headers = {**AUTH, "X-LLM-Api-Key": "sk-caller-key-0123"}
+    with serving(settings(llm_allow_users=False, llm_api_key="sk-operator-key")) as client:
+        answer = client.post("/v1/extract", json=body, headers=headers)
 
     assert answer.status_code == 200, answer.text
     data = answer.json()["data"]
     assert "llm_unavailable" in data["warnings"]
     assert data["structured"]["missing"] == ["price_in_euro"]
-    assert refused.status_code == 400
-    assert refused.json()["error"]["code"] == "invalid_request"

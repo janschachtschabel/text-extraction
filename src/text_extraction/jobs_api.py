@@ -40,7 +40,7 @@ from text_extraction.extract_api import (
     check_transcribe_request,
 )
 from text_extraction.extract_models import ExtractResult, with_own_fault_data
-from text_extraction.feature_access import check_feature_access, restricted_ocr, settings_for
+from text_extraction.feature_access import check_feature_access, settings_for
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
@@ -330,8 +330,8 @@ async def start_batch(
         if not settings.browser_enabled:
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
         queue = state.browser_queue
-    # 403 for a feature the service keeps for admin keys (P19-R4); `ocr: auto` of such a key is
-    # `never`, and the LLM checks see the LLM switched off for it.
+    # 403 for a feature the service keeps for admin keys (P19-R4); the LLM checks and the stored
+    # LLM key see the kept features switched off for such a key.
     check_feature_access(
         principal,
         settings,
@@ -360,7 +360,7 @@ async def start_batch(
     check_describe_request(
         body.describe_images, body.pii, body.metadata, seen, llm_key=caller_llm_key
     )
-    llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
+    llm = wants_llm(body.structured, body.chunking, seen, describe=body.describe_images)
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -368,7 +368,7 @@ async def start_batch(
         links=body.links,
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
-        ocr=restricted_ocr(body.ocr, principal, settings),
+        ocr=body.ocr,
         transcribe=body.transcribe,
         languages=body.languages,
         pii=body.pii,

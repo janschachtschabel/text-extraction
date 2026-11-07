@@ -353,7 +353,10 @@ def test_handoffs_wait_longer_for_stored_options_with_llm_work(
 
     monkeypatch.setattr(DoclingDispatcher, "wait", wait)
     monkeypatch.setattr(PiiDispatcher, "wait", wait)
-    settings = Settings(auth_mode="none", docling_enabled=True, llm_enabled=llm_enabled)
+    # A key: without any, strategy `auto` would run without the LLM (P19-R2).
+    settings = Settings(
+        auth_mode="none", docling_enabled=True, llm_enabled=llm_enabled, llm_api_key="sk-env"
+    )
     parts = Parts(settings)
     nlp = PiiDispatcher(parts.store, nlp_queue(parts.valkey, settings), settings)
     named = Envelope[ExtractResult].model_validate(

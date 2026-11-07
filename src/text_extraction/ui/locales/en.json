@@ -520,6 +520,7 @@
   "hint.strategy_no_llm": "Automatic tries metadata, selectors and patterns; the LLM is switched off in this service (LLM_ENABLED).",
   "hint.method": "How the text is cut into chunks. Semantic needs the LLM's embedding model.",
   "hint.method_no_llm": "How the text is cut into chunks. Semantic needs the LLM, which is switched off in this service (LLM_ENABLED).",
+  "hint.method_no_embedding": "How the text is cut into chunks. Semantic needs LLM_EMBEDDING_MODEL, which this service has not set.",
   "hint.max_images": "With \"Describe images\": how many images get a description.",
   "hint.wait_seconds": "How long this page waits for the answer; work that takes longer continues as a job.",
   "hint.advanced": "How long to wait before the request continues as a job, and any further field of the REST body as JSON (for example actions, cookies, headers or cache).",

@@ -7,7 +7,9 @@ workers.
    does ``ocr: always`` while the service has no OCR (F11), and ``transcribe: true`` while it
    has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``, M9) or transcribes on an external endpoint
    without a key for it (neither ``X-ASR-Api-Key`` nor ``ASR_EXTERNAL_API_KEY``, M11); an
-   ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403.
+   ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403, and
+   a feature the service keeps for admin keys (``*_ALLOW_USERS``, ``feature_access.py``) asked
+   for by a user key 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -134,7 +136,7 @@ from text_extraction.extract_models import (
     Timings,
     failed_extract,
 )
-from text_extraction.feature_access import check_feature_access, restricted_ocr, settings_for
+from text_extraction.feature_access import check_feature_access, settings_for
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
@@ -401,8 +403,8 @@ async def respond(
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
-    # 403 for a feature the service keeps for admin keys (P19-R4); `ocr: auto` of such a key is
-    # `never`, and the checks below see the LLM switched off for it.
+    # 403 for a feature the service keeps for admin keys (P19-R4); what follows sees the kept
+    # features switched off for such a key (the pipeline hands it no OCR).
     check_feature_access(
         principal,
         settings,
@@ -413,9 +415,6 @@ async def respond(
         chunking=body.chunking,
         describe=body.describe_images,
     )
-    ocr = restricted_ocr(body.ocr, principal, settings)
-    if ocr != body.ocr:
-        body = body.model_copy(update={"ocr": ocr})
     seen = settings_for(settings, principal)
     check_selector_access(body.structured, principal)
     check_ocr_request(body.ocr, settings)
@@ -430,11 +429,13 @@ async def respond(
         # a browser worker. No mode ran, so the pipeline answers `mode_used` null.
         pipeline: Pipeline = state.pipeline
         return await pipeline.run(body, principal)
-    wait_seconds = request_wait_seconds(body, settings)
+    # Without any LLM key, strategy `auto` runs without the LLM: no wait for it (P19-R2).
+    keyed = settings_for(settings, principal, has_llm_key=llm_key is not None)
+    wait_seconds = request_wait_seconds(body, keyed)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
     # Only a request that may need the LLM keeps the caller's key with its jobs.
-    llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
+    llm = wants_llm(body.structured, body.chunking, keyed, describe=body.describe_images)
     job_llm_key = llm_key if llm else None
     flow = partial(
         _flow,
@@ -527,7 +528,7 @@ async def answer_or_hand_over(
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
     describe: DescribeImagesOptions | None = None,
-    principal: Principal | None = None,
+    principal: Principal,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
     the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
@@ -801,7 +802,7 @@ async def post_stage(
         options.structured,
         options.chunking,
         options.pii,
-        settings=settings_for(state.settings, principal),
+        settings=settings_for(state.settings, principal, has_llm_key=llm_key is not None),
         threads=state.post_pool,
         hop=_llm_hop(handoff, handover) if handoff is not None else None,
         describe=options.describe_images,
@@ -1051,7 +1052,10 @@ async def _in_browser(
             detached=lambda: handover.detached,
             pii=body.pii is not None,
             llm=wants_llm(
-                body.structured, body.chunking, state.settings, describe=body.describe_images
+                body.structured,
+                body.chunking,
+                settings_for(state.settings, principal, has_llm_key=llm_key is not None),
+                describe=body.describe_images,
             ),
         )
     except asyncio.CancelledError:

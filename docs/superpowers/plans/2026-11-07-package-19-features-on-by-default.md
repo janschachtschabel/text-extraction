@@ -43,9 +43,14 @@ service's own defaults in `settings.py` stay off (a bare `uv run` has no workers
   answer 403 `forbidden` ("<feature> is for admin keys only on this service."): `ocr: always`,
   `pii`, `transcribe: true`, strategy `llm`, `learn_selectors`, `describe_images`, `semantic`
   chunking, an audio or video upload. Implicit uses behave as if the feature were off for that
-  request: `ocr: auto` is stored as `never` (the text layer), strategy `auto` does not ask the
-  LLM (`llm_unavailable`). Jobs keep the owner's role, so workers apply the same rule
-  (`feature_access.settings_for` in the post stage).
+  request: the pipeline hands such a key's documents no OCR (`ocr_unavailable`), strategy `auto`
+  does not ask the LLM (`llm_unavailable`) and the caller's LLM key is not stored. Jobs keep the
+  owner's role, so workers apply the same rule (`Pipeline._ocr_kept`,
+  `feature_access.settings_for`). Review: an earlier rewrite of `ocr: auto` to `never` dropped
+  the warning and split the result cache, so it was replaced.
+- **P19-R2 addendum (review):** strategy `auto` without any LLM key runs without the LLM
+  (`llm_unavailable`) instead of 400, so the default Structured request works on a fresh compose
+  stack; LLM work that names the LLM keeps its 400.
 - **P19-R6, transcripts and `QUALITY_MIN_WORDS`** (Jan's 27-word MP4, 2026-11-07): a media
   transcript (subtitles, transcript view, transcription) needs one word only; it is all the media
   says (`pipeline_media.is_transcript`).

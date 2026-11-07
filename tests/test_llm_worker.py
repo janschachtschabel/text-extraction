@@ -270,6 +270,23 @@ def test_runner_without_any_key_answers_without_the_llm(httpserver: HTTPServer) 
     assert httpserver.log == []
 
 
+def test_runner_without_any_key_finishes_auto_as_without_the_llm(httpserver: HTTPServer) -> None:
+    """P19-R2: strategy ``auto`` is no LLM work it must have; without any key its missing fields
+    stay missing with ``llm_unavailable``, not ``llm_failed``."""
+    auto = StructuredOptions.model_validate({**PRICE.model_dump(), "strategy": "auto"})
+    result = run_case(
+        settings_for(httpserver, llm_api_key=None), draft=envelope(CONTENT), structured=auto
+    )
+
+    assert result.status == "success"
+    assert result.error is None
+    assert result.data is not None
+    assert "llm_unavailable" in result.data.warnings
+    assert result.data.structured is not None
+    assert result.data.structured.missing == ["price"]
+    assert httpserver.log == []
+
+
 def test_runner_draft_without_its_content_is_llm_failed_not_retryable(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -89,7 +89,7 @@ from text_extraction.extract_api import (
     timed,
 )
 from text_extraction.extract_models import ExtractResult
-from text_extraction.feature_access import check_feature_access, restricted_ocr, settings_for
+from text_extraction.feature_access import check_feature_access, settings_for
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.llm_dispatch import UploadInput
@@ -418,11 +418,10 @@ async def answer_upload(
     shares this flow: no word-count gate (``Pipeline.extract_upload``). ``state`` is the public
     app's state. The caller has run ``principal_for`` and ``check_rate`` (``run_upload``)."""
     settings: Settings = state.settings
-    ocr = restricted_ocr(form.ocr, principal, settings)  # `auto` is `never` without OCR (P19-R4)
-    if ocr != form.ocr:
-        form = form.model_copy(update={"ocr": ocr})
-    # Only a request that may need the LLM keeps the caller's key with its jobs.
-    llm = wants_llm(form.structured, form.chunking, settings, describe=form.describe_images)
+    # The features the caller may use (P19-R4): only a request that may need the LLM keeps the
+    # caller's key with its jobs.
+    seen = settings_for(settings, principal, has_llm_key=llm_key is not None)
+    llm = wants_llm(form.structured, form.chunking, seen, describe=form.describe_images)
     job_llm_key = llm_key if llm else None
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)

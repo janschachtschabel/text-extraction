@@ -206,3 +206,23 @@ def test_a_user_key_sees_the_admin_only_hint() -> None:
     assert control.get("disabled") is not None
     hints = texts(root, "//form[@id='extract-form']//*[contains(@class, 'feature-off')]")
     assert translate("en", "hint.pii_admin_only") in hints
+
+
+def test_semantic_needs_the_embedding_model() -> None:
+    xpath = "//form[@id='chunk-form']//select[@name='method']/option[@value='semantic']"
+    (semantic,) = page(**ALL_ON).xpath(xpath)
+    assert semantic.get("disabled") is not None  # no LLM_EMBEDDING_MODEL
+    root = page(**ALL_ON, llm_embedding_model="embed-1")
+    (semantic,) = root.xpath(xpath)
+    assert semantic.get("disabled") is None
+    assert texts(root, "//form[@id='chunk-form']//*[contains(@class, 'llm-key-hint')]") == [
+        translate("en", "hint.llm_needs_key")
+    ]
+
+
+def test_image_count_follows_describe_images() -> None:
+    xpath = "//form[@id='extract-form']//input[@name='max_images']"
+    (count,) = page().xpath(xpath)
+    assert count.get("disabled") is not None
+    (count,) = page(**ALL_ON).xpath(xpath)
+    assert count.get("disabled") is None

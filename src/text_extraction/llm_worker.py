@@ -201,9 +201,8 @@ class LlmRunner:
         key = await self._store.llm_key(job.id)
         try:
             client = LlmClient(self._settings, key, registry=self._registry)
-        except LlmError:  # no key at all: the requests' side refuses this earlier
-            _log.error("llm_key_missing")
-            return await self._without_llm(draft, structured, job)
+        except LlmError:  # no key at all: strategy `auto` runs without the LLM (P19-R2)
+            return await self._without_llm(draft, structured, job, keyless=True)
         try:
             upload = await self._upload_of(draft, describe, job, item)
         except BaseException:
@@ -258,14 +257,27 @@ class LlmRunner:
         return stored[0]
 
     async def _without_llm(
-        self, draft: Envelope[ExtractResult], structured: StructuredOptions | None, job: JobRecord
+        self,
+        draft: Envelope[ExtractResult],
+        structured: StructuredOptions | None,
+        job: JobRecord,
+        *,
+        keyless: bool = False,
     ) -> Envelope[ExtractResult]:
-        """The draft's post stage without the LLM: ``llm_failed``, retryable, its content."""
+        """The draft's post stage without the LLM: ``llm_failed``, retryable, its content. With
+        ``keyless`` (neither the job nor ``LLM_API_KEY`` has a key; the requests' side refuses
+        the LLM work that must have one, so only strategy ``auto`` gets here) it is finished as
+        on a service without the LLM: ``llm_unavailable`` (P19-R2)."""
+        if keyless:
+            _log.info("llm_key_missing")
+        settings = (
+            self._settings.model_copy(update={"llm_enabled": False}) if keyless else self._settings
+        )
         return await self._post_pool.run(
             partial(
                 finish_post,
-                settings=self._settings,
-                reason="failed",
+                settings=settings,
+                reason=None if keyless else "failed",
                 describe=job.options.describe_images,
                 registry=self._registry,
             ),
