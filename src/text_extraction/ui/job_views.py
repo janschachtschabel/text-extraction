@@ -18,7 +18,7 @@ import asyncio
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final, get_args
@@ -154,6 +154,7 @@ class JobPanel:
     next_url: str | None = None
     tree_url: str | None = None
     tree_label: Message | None = None
+    tree_auto: bool = False  # ui.js may load the tree by itself: the job has a result already
     error: Message | None = None
     error_detail: str | None = None
     retryable: bool = False
@@ -248,6 +249,7 @@ def _panel(view: JobView, shown: _Shown, position: int) -> JobPanel:
     if view.kind == "site":
         panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': view.id})}"
         panel.tree_label = SHOW_TREE if view.state == "completed" else SHOW_TREE_NOW
+        panel.tree_auto = progress.done >= 1
     return panel
 
 
@@ -695,6 +697,50 @@ TREE_RULES_MAX_ORIGINS: Final = 20
 TREE_RULES_SECONDS: Final = 12
 TREE_JUDGE_SECONDS: Final = 5
 
+# The tree of a running job fetches itself again after this many seconds (``live=1``).
+TREE_REFRESH_SECONDS: Final = 4
+# A live refresh reuses the rule judgement of the refresh before for this long, per job and origin
+# set, and the memo holds at most this many of them.
+TREE_RULES_REUSE_SECONDS: Final = 30
+TREE_RULES_MEMO_SIZE: Final = 64
+
+_RulesKey = tuple[str, frozenset[str]]
+
+
+class _RulesMemo:
+    """A bounded in-process memo of the rules a live tree was judged by: derived data that any
+    pod may recompute, so Valkey stays the only state. An entry expires ``TREE_RULES_REUSE_SECONDS``
+    after it was put (``clock`` is a ``time.monotonic``); at most ``TREE_RULES_MEMO_SIZE`` live,
+    the oldest goes first."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._entries: dict[_RulesKey, tuple[float, dict[str, OriginRules | None]]] = {}
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, key: _RulesKey) -> dict[str, OriginRules | None] | None:
+        found = self._entries.get(key)
+        if found is None:
+            return None
+        if self._clock() >= found[0]:
+            del self._entries[key]
+            return None
+        return found[1]
+
+    def put(self, key: _RulesKey, rules: dict[str, OriginRules | None]) -> None:
+        now = self._clock()
+        self._entries.pop(key, None)
+        for old in [old for old, (expires, _) in self._entries.items() if now >= expires]:
+            del self._entries[old]
+        while len(self._entries) >= TREE_RULES_MEMO_SIZE:
+            del self._entries[next(iter(self._entries))]
+        self._entries[key] = (now + TREE_RULES_REUSE_SECONDS, rules)
+
+
+_RULES_MEMO: Final = _RulesMemo()
+
 
 async def _origin_rules(pipeline: Pipeline, origin: str, url: str) -> OriginRules | None:
     """The rules of ``url``'s origin; None when they cannot be loaded."""
@@ -705,13 +751,20 @@ async def _origin_rules(pipeline: Pipeline, origin: str, url: str) -> OriginRule
         return None
 
 
-async def _tree_rules(pipeline: Pipeline, tree: SiteTree) -> SiteTree:
+async def _tree_rules(pipeline: Pipeline, tree: SiteTree, reuse_for: str | None = None) -> SiteTree:
     """``tree`` with its leaves marked that the rules of their origin block under ``enforce``:
     the rules of the first ``TREE_RULES_MAX_ORIGINS`` origins are loaded concurrently within
     ``TREE_RULES_SECONDS`` (loads still pending then are cancelled, also when the request itself
     is cancelled); an origin whose load fails or times out counts as not read
-    (``SiteTree.unchecked``), one past the cap as not tried (``SiteTree.unchecked_more``)."""
+    (``SiteTree.unchecked``), one past the cap as not tried (``SiteTree.unchecked_more``). With
+    ``reuse_for`` (a job id: a live refresh) the rules of the last complete judgement of the same
+    origins are reused for ``TREE_RULES_REUSE_SECONDS``."""
     origins = list(leaf_origins(tree).items())[:TREE_RULES_MAX_ORIGINS]
+    key = (reuse_for, frozenset(origin for origin, _ in origins)) if reuse_for else None
+    remembered = _RULES_MEMO.get(key) if key else None
+    if remembered is not None:
+        deadline = time.monotonic() + TREE_JUDGE_SECONDS
+        return await asyncio.to_thread(mark_blocked, tree, remembered, deadline)
     loads = {
         origin: asyncio.ensure_future(_origin_rules(pipeline, origin, url))
         for origin, url in origins
@@ -734,6 +787,8 @@ async def _tree_rules(pipeline: Pipeline, tree: SiteTree) -> SiteTree:
         for load in pending:
             load.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+    if key and all(known is not None for known in rules.values()):
+        _RULES_MEMO.put(key, rules)  # a failed or late load is tried again at the next refresh
     deadline = time.monotonic() + TREE_JUDGE_SECONDS
     return await asyncio.to_thread(mark_blocked, tree, rules, deadline)
 
@@ -748,7 +803,9 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     ``TREE_RULES_SECONDS`` in all and judged within ``TREE_JUDGE_SECONDS``; origins that fail or
     run out of time are ``unchecked``, those past the cap are counted in ``unchecked_more``); a
     leaf that ``enforce`` would block is marked and, while the form's "Site rules" is
-    ``enforce``, cannot be selected."""
+    ``enforce``, cannot be selected. While the job runs, the tree is wrapped in an element that
+    fetches it again after ``TREE_REFRESH_SECONDS`` (``live=1``: the rules are then reused, see
+    `_tree_rules`); a finished job's tree stays."""
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)
@@ -769,7 +826,8 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
-    tree = await _tree_rules(request.app.state.pipeline, tree)
+    live = request.query_params.get("live") == "1"
+    tree = await _tree_rules(request.app.state.pipeline, tree, job_id if live else None)
     access = access_offer(principal.role, settings)
     preset = access_value(access, tree.crawl_mode)
     context = {
@@ -777,6 +835,13 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "job_id": job_id,
         "tree": tree,
         "snapshot": read.state != "completed",
+        # While the job runs the tree fetches itself again (ui.js keeps the user's work).
+        "refresh_url": (
+            f"{RUN_PREFIX}/site-tree?{urlencode({'id': job_id, 'live': 1})}"
+            if read.state != "completed"
+            else None
+        ),
+        "refresh_seconds": TREE_REFRESH_SECONDS,
         "duration": read.seconds,
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,

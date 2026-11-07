@@ -524,6 +524,240 @@
     });
   });
 
+  // The live tree (package 18): while its job runs, the tree is wrapped in an element
+  // ([data-tree-live], its value the refresh interval in seconds) that htmx replaces every few
+  // seconds. What the user did in the old tree is kept: the ticked URLs, the folds (keyed by the
+  // section's path, not by the list's generated id), the type filter, the batch options, the
+  // scroll position and the focus. A refresh says nothing and moves the focus nowhere; while a
+  // text field, select or textarea of the form has the focus it waits.
+  var treeSaved = null;
+  var autoLoaded = {};
+
+  // A node's key across refreshes: a page by its URL, a section by the labels of its path.
+  function nodeKey(item) {
+    var box = nodeBox(item);
+    if (box && box.name === "url") {
+      return "u:" + box.value;
+    }
+    var labels = [];
+    for (var up = item; up; up = up.parentElement ? up.parentElement.closest("li") : null) {
+      var label = up.querySelector(":scope > .cell-name .label");
+      labels.unshift(label ? label.textContent : "");
+    }
+    return "s:" + labels.join("\u0000");
+  }
+
+  function takesText(element) {
+    if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+      return true;
+    }
+    return element instanceof HTMLInputElement &&
+      ["checkbox", "radio", "button", "submit", "reset", "image", "hidden"].indexOf(element.type) < 0;
+  }
+
+  // The controls of the form outside the tree: the batch options.
+  function optionFields(form) {
+    return Array.prototype.filter.call(form.elements, function (field) {
+      return field.name && !field.closest(".tree") && field.type !== "hidden" &&
+        field.type !== "button" && field.type !== "submit";
+    });
+  }
+
+  function fieldKey(field) {
+    return field.name + (field.type === "radio" || field.type === "checkbox" ? "=" + field.value : "");
+  }
+
+  // Where the focus is in the tree, as something to find again in the new one.
+  function focusPlace(wrapper) {
+    var active = document.activeElement;
+    if (!(active instanceof Element) || !wrapper.contains(active)) {
+      return null;
+    }
+    var item = active.closest(".tree li");
+    if (active.matches(".tree button.fold") && item) {
+      return { kind: "fold", key: nodeKey(item) };
+    }
+    if (active.matches(".tree input[type=checkbox]") && item) {
+      return { kind: "box", key: nodeKey(item) };
+    }
+    if (active.matches(".tree-filter button.chip")) {
+      return { kind: "chip", key: active.getAttribute("data-filter-type") };
+    }
+    // Anything else that can be named again: a button of the tools, the skip link, the submit
+    // button, any element with an id.
+    var selector = null;
+    if (active.matches("[data-action]")) {
+      selector = "[data-action=\"" + active.getAttribute("data-action") + "\"]";
+    } else if (active.matches("a.skip-to-actions")) {
+      selector = "a.skip-to-actions";
+    } else if (active.matches("button[type=submit]")) {
+      selector = "button[type=submit]";
+    } else if (active.id) {
+      selector = "#" + CSS.escape(active.id);
+    }
+    return selector ? { kind: "sel", key: selector } : null;
+  }
+
+  function findPlace(form, place) {
+    if (place.kind === "sel") {
+      return (form.closest(".tree-view") || form).querySelector(place.key);
+    }
+    var found = null;
+    var candidates = place.kind === "chip"
+      ? form.querySelectorAll(".tree-filter button.chip")
+      : place.kind === "fold"
+        ? form.querySelectorAll(".tree button.fold")
+        : form.querySelectorAll(".tree input[type=checkbox]");
+    Array.prototype.forEach.call(candidates, function (candidate) {
+      var item = candidate.closest(".tree li");
+      var key = place.kind === "chip" ? candidate.getAttribute("data-filter-type")
+        : item ? nodeKey(item) : null;
+      if (!found && key === place.key) {
+        found = candidate;
+      }
+    });
+    return found;
+  }
+
+  function saveTree(wrapper) {
+    var form = wrapper.querySelector("form.tree-form");
+    var saved = { wrapper: wrapper, form: null };
+    if (!form) {
+      return saved;
+    }
+    saved.form = {
+      ticked: Array.prototype.map.call(
+        form.querySelectorAll(".tree input[name=url]:checked"),
+        function (box) { return box.value; }
+      ),
+      folds: {},
+      types: chosenTypes(form),
+      fields: optionFields(form).map(function (field) {
+        return { key: fieldKey(field), value: field.value, checked: field.checked };
+      }),
+      details: Array.prototype.map.call(form.querySelectorAll("details"), function (each) {
+        return each.open;
+      }),
+      scroll: form.querySelector(".tree-box") ? form.querySelector(".tree-box").scrollTop : 0,
+      focus: focusPlace(wrapper)
+    };
+    form.querySelectorAll(".tree button.fold").forEach(function (button) {
+      saved.form.folds[nodeKey(button.closest("li"))] = button.getAttribute("aria-expanded") === "true";
+    });
+    return saved;
+  }
+
+  function restoreTree(form, saved) {
+    // htmx sets a new tree up (htmx:load) only after this swap: do it now, so the controls to
+    // restore are shown. What is shown already is left as it is, so the later setup is a no-op.
+    initFolding(form);
+    initFilter(form);
+    var fields = {};
+    saved.fields.forEach(function (field) { fields[field.key] = field; });
+    optionFields(form).forEach(function (field) {
+      var before = fields[fieldKey(field)];
+      if (!before) {
+        return;
+      }
+      if (field.type === "radio" || field.type === "checkbox") {
+        field.checked = before.checked;
+      } else {
+        field.value = before.value;
+      }
+    });
+    form.querySelectorAll("details").forEach(function (each, index) {
+      each.open = Boolean(saved.details[index]);
+    });
+    applyTreeMode(form);  // the restored "Site rules" decide which boxes are disabled
+    var ticked = {};
+    saved.ticked.forEach(function (value) { ticked[value] = true; });
+    form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
+      if (ticked[box.value] && !box.disabled) {
+        box.checked = true;
+      }
+    });
+    settleAll(form);
+    countSelected(form);
+    form.querySelectorAll(".tree-filter button.chip").forEach(function (chip) {
+      var type = chip.getAttribute("data-filter-type");
+      press(chip, saved.types.length === 0 ? type === "all" : saved.types.indexOf(type) >= 0);
+    });
+    applyFilter(form);  // before the folds: the user's fold of a section beats the filter's unfold
+    form.querySelectorAll(".tree button.fold").forEach(function (button) {
+      var open = saved.folds[nodeKey(button.closest("li"))];
+      if (open !== undefined) {
+        setFold(button, open);
+      }
+    });
+    var box = form.querySelector(".tree-box");
+    if (box) {
+      box.scrollTop = saved.scroll;
+    }
+    var target = saved.focus ? findPlace(form, saved.focus) : null;
+    if (target) {
+      target.focus({ preventScroll: true });
+    }
+  }
+
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var wrapper = event.detail.elt;
+    var active = document.activeElement;
+    if (!(wrapper instanceof Element) || !wrapper.hasAttribute("data-tree-live") ||
+        !(active instanceof Element) || !wrapper.contains(active) || !takesText(active)) {
+      return;
+    }
+    event.preventDefault();
+    window.setTimeout(function () {
+      if (wrapper.isConnected) {
+        window.htmx.ajax("GET", wrapper.getAttribute("hx-get"), {
+          source: wrapper, target: wrapper, swap: "outerHTML"
+        });
+      }
+    }, (Number(wrapper.getAttribute("data-tree-live")) || 4) * 1000);
+  });
+
+  document.addEventListener("htmx:beforeSwap", function (event) {
+    var wrapper = event.detail.elt;
+    if (event.detail.shouldSwap && wrapper instanceof Element && wrapper.hasAttribute("data-tree-live")) {
+      treeSaved = saveTree(wrapper);
+    }
+  });
+
+  document.addEventListener("htmx:afterSwap", function (event) {
+    var saved = treeSaved;
+    treeSaved = null;
+    var root = event.target instanceof Element ? event.target : null;
+    // The swap that follows the beforeSwap above: its new content is no more the old wrapper.
+    if (!saved || !saved.form || !root || root === saved.wrapper) {
+      return;
+    }
+    var form = root.matches("form.tree-form") ? root : root.querySelector("form.tree-form");
+    if (form) {
+      restoreTree(form, saved.form);
+    }
+  });
+
+  // A site job's tree shows itself once the job has a result: the progress view marks the
+  // button (data-tree-auto), and the script presses it once per job unless something else is
+  // shown below the jobs. Marked data-refresh, the request is no request of the user's: nothing
+  // is announced. Without this script the "Show tree now" button stays as it is.
+  document.addEventListener("htmx:load", function (event) {
+    var root = event.target instanceof Element ? event.target : null;
+    var buttons = root ? root.querySelectorAll("button.tree-button[data-tree-auto]") : [];
+    Array.prototype.forEach.call(buttons, function (button) {
+      window.setTimeout(function () {
+        var view = button.closest(".jobs-view");
+        var detail = view ? view.querySelector(".job-detail") : null;
+        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild) {
+          return;
+        }
+        autoLoaded[button.id] = true;
+        button.setAttribute("data-refresh", "");
+        button.click();
+      }, 0);
+    });
+  });
+
   document.addEventListener("change", function (event) {
     var radio = event.target;
     if (radio instanceof HTMLInputElement && radio.name === "access" && radio.form) {

@@ -54,7 +54,7 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
     </p>
     {% endif %}
     <p class="actions">
-      {% if job.tree_url %}<button type="button" id="job-{{ job.id }}-tree" class="secondary tree-button" hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
+      {% if job.tree_url %}<button type="button" id="job-{{ job.id }}-tree" class="secondary tree-button"{% if job.tree_auto %} data-tree-auto{% endif %} hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
     </p>
     <form class="cancel" hx-post="/ui/run/cancel" hx-target="next .job-detail" hx-swap="innerHTML" hx-confirm="{{ t('progress.cancel_confirm') }}">
       <input type="hidden" name="id" value="{{ job.id }}">

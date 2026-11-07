@@ -5,9 +5,16 @@ reader when the type is a guess. #}
 {%- set why = t("tree.guessed") ~ (", " ~ t("tree.reason." ~ reason) if reason else "") -%}
 <span class="page-type type-{{ colours.get(kind, 'open') }}{% if guessed %} guessed{% endif %}"{% if guessed %} title="{{ why }}"{% endif %}>{{ t("page_type." ~ kind) }}{% if guessed %} <span aria-hidden="true">~</span><span class="visually-hidden">, {{ why }}</span>{% endif %}</span>
 {%- endmacro -%}
+{#- A running job's tree is in a wrapper that fetches the tree again (ui.js keeps the ticks, folds,
+filter and scroll position across the swap, and waits while a text field has the focus). No
+aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes. -#}
+{%- if refresh_url %}
+<div class="tree-live-wrapper" data-tree-live="{{ refresh_seconds }}" data-refresh hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ refresh_seconds }}s" hx-swap="outerHTML">
+{%- endif %}
 <section class="tree-view" aria-label="{{ t('tree.label') }}">
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
+  {% if refresh_url %}<p class="hint tree-live">{{ t("tree.live") }}</p>{% endif %}
   <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if duration is not none %} · {{ t("tree.duration", seconds=duration) }}{% endif %}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {%- if tree.blocked %}
   <p class="tree-blocked">{{ tn("tree.blocked", tree.blocked) }}</p>
@@ -115,3 +122,6 @@ reader when the type is a guess. #}
   <div class="tree-jobs"></div>
   {% endif %}
 </section>
+{%- if refresh_url %}
+</div>
+{%- endif %}

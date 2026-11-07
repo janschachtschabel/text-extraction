@@ -187,6 +187,7 @@
   "tree.label": "Site tree",
   "tree.title": "Site tree of job {id}",
   "tree.snapshot": "A snapshot: the job is still running.",
+  "tree.live": "Updates while the job runs",
   "tree.urls.one": "{count} URL",
   "tree.urls.other": "{count} URLs",
   "tree.hidden.one": "{count} more URL not shown ({setting})",

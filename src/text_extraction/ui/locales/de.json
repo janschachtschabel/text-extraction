@@ -187,6 +187,7 @@
   "tree.label": "Website-Baum",
   "tree.title": "Website-Baum von Job {id}",
   "tree.snapshot": "Eine Momentaufnahme: Der Job läuft noch.",
+  "tree.live": "Wird aktualisiert, solange der Job läuft",
   "tree.urls.one": "{count} URL",
   "tree.urls.other": "{count} URLs",
   "tree.hidden.one": "{count} weitere URL nicht angezeigt ({setting})",
