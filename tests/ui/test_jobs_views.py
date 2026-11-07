@@ -1351,7 +1351,7 @@ def test_tree_robots_unavailable_marks_every_url(monkeypatch: pytest.MonkeyPatch
 def test_tree_rules_not_read_are_named(monkeypatch: pytest.MonkeyPatch) -> None:
     with running(rules_fetcher()) as client:
 
-        async def none(url: str) -> None:
+        async def none(url: str, **kwargs: Any) -> None:
             return None
 
         monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", none)
@@ -1394,7 +1394,7 @@ def test_tree_rules_timeout_names_the_origin_and_logs(monkeypatch: pytest.Monkey
     cancelled: list[str] = []
     with running(rules_fetcher()) as client, capture_logs() as logs:
 
-        async def never(url: str) -> None:
+        async def never(url: str, **kwargs: Any) -> None:
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -1418,7 +1418,7 @@ def test_tree_rules_exception_leaves_the_origin_unchecked_and_logs(
 ) -> None:
     with running(rules_fetcher()) as client, capture_logs() as logs:
 
-        async def broken(url: str) -> None:
+        async def broken(url: str, **kwargs: Any) -> None:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", broken)
@@ -1442,9 +1442,9 @@ def test_tree_rules_cap_loads_only_the_first_origins(monkeypatch: pytest.MonkeyP
         pipeline = cast(FastAPI, client.app).state.pipeline
         real = pipeline.origin_rules
 
-        async def recording(url: str) -> Any:
+        async def recording(url: str, **kwargs: Any) -> Any:
             loaded.append(url)
-            return await real(url)
+            return await real(url, **kwargs)
 
         monkeypatch.setattr(pipeline, "origin_rules", recording)
         root = rules_tree(monkeypatch, client, two_origin_site())

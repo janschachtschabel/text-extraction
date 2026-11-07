@@ -5,6 +5,7 @@ judgement is reused for 30 s per job and origin set (a bounded in-process memo, 
 only)."""
 
 import asyncio
+import threading
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -13,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.ui.conftest import run, running
-from tests.ui.site_items import page_item
+from tests.ui.site_items import page_item, sitemap_item
 from tests.ui.test_jobs_views import (
     HEADERS,
     ORIGIN,
@@ -25,10 +26,12 @@ from tests.ui.test_jobs_views import (
     texts,
     tree,
 )
+from text_extraction.compliance import OriginRules
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobItem
 from text_extraction.ui import job_views
+from text_extraction.ui import site_tree as tree_module
 from text_extraction.ui.i18n import LANGUAGE_HEADER
 from text_extraction.ui.job_views import TREE_REFRESH_SECONDS, _RulesMemo
 
@@ -172,7 +175,7 @@ def test_only_the_origins_without_rules_are_read_again(monkeypatch: pytest.Monke
     loaded: list[str] = []
     answers: dict[str, Any] = {}
 
-    async def origin_rules(pipeline: Any, origin: str, url: str) -> Any:
+    async def origin_rules(pipeline: Any, origin: str, url: str, contacted: bool) -> Any:
         loaded.append(origin)
         return answers[origin]
 
@@ -203,9 +206,9 @@ def test_live_refreshes_load_the_rules_once_in_thirty_seconds(
         pipeline = cast(FastAPI, client.app).state.pipeline
         real = pipeline.origin_rules
 
-        async def recording(url: str) -> Any:
+        async def recording(url: str, **kwargs: Any) -> Any:
             loaded.append(url)
-            return await real(url)
+            return await real(url, **kwargs)
 
         monkeypatch.setattr(pipeline, "origin_rules", recording)
         items = rules_site()
@@ -311,3 +314,109 @@ def test_the_batch_view_of_the_tree_is_kept_across_a_refresh(
     assert jobs.get("id") == f"tree-{JOB}-jobs"
     assert jobs.get("hx-preserve") is not None
     assert root.xpath("//form[@id='tree-form']/@hx-target") == ["next .tree-jobs"]
+
+
+# --- bounded rule checks (third audit S1, S2) ----------------------------------------------------
+
+
+def test_the_judge_has_one_second_and_the_tree_reads_a_capped_copy_of_the_rules() -> None:
+    assert job_views.TREE_JUDGE_SECONDS == 1.0
+    assert job_views.TREE_RULES_MAX_RULES == 1000
+
+
+def test_the_tree_loads_rules_only_for_the_origins_the_job_contacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sitemap listing URLs on 30 foreign host:port origins: their rule files are read from
+    the cache only (not cached: unchecked); only the job's own origin is loaded."""
+    monkeypatch.setattr(job_views, "_RULES_MEMO", _RulesMemo(Clock()))
+    foreign = [f"https://f{i:02d}.example:{8000 + i}" for i in range(30)]
+    items = [
+        page_item(0, f"{ORIGIN}/sammlung/", depth=0),
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{origin}/p"} for origin in foreign]),
+    ]
+    calls: list[tuple[str, bool, int | None]] = []
+    fetcher = rules_fetcher()
+    with running(fetcher) as client:
+        pipeline = cast(FastAPI, client.app).state.pipeline
+        real = pipeline.origin_rules
+
+        async def recording(url: str, **kwargs: Any) -> Any:
+            calls.append((url, kwargs["cached_only"], kwargs["max_rules"]))
+            return await real(url, **kwargs)
+
+        monkeypatch.setattr(pipeline, "origin_rules", recording)
+        fake_reads(monkeypatch, len(items), fresh(items))
+        response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+        root = tree(response.text)
+
+    assert [(url, cached) for url, cached, _ in calls if not cached] == [
+        (f"{ORIGIN}/sammlung/", False)
+    ]
+    assert len([call for call in calls if call[1]]) == 19  # the cap of 20 origins, own first
+    assert {cap for _, _, cap in calls} == {1000}
+    assert all(url.startswith(ORIGIN) for url, _ in fetcher.calls)
+    [unchecked] = texts(root, "//p[@class='tree-unchecked']")
+    assert foreign[0] in unchecked
+    assert texts(root, "//p[@class='tree-unchecked-more']") == ["11 more sites were not checked."]
+
+
+def test_a_live_refresh_judges_only_the_urls_not_judged_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(job_views, "_RULES_MEMO", _RulesMemo(Clock()))
+    judged: list[str] = []
+    real = OriginRules.judge
+
+    def counting(self: OriginRules, url: str, mode: Any) -> Any:
+        judged.append(url)
+        return real(self, url, mode)
+
+    monkeypatch.setattr(OriginRules, "judge", counting)
+    items = rules_site()
+    with running(rules_fetcher()) as client:
+        fake_reads(monkeypatch, 10, lambda offset, limit: [i.model_copy(deep=True) for i in items])
+        params = {"id": JOB, "live": "1"}
+        first = tree(client.get("/ui/run/site-tree", params=params, headers=HEADERS).text)
+        assert len(judged) == 3
+        judged.clear()
+        items.append(page_item(2, f"{ORIGIN}/sammlung/_page9"))
+        second = tree(client.get("/ui/run/site-tree", params=params, headers=HEADERS).text)
+
+    assert judged == [f"{ORIGIN}/sammlung/_page9"]
+    assert len(first.xpath("//input[@data-blocked]")) == 2
+    assert len(second.xpath("//input[@data-blocked]")) == 3
+
+
+def test_the_tree_is_judged_on_the_conversion_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: list[str] = []
+    real = tree_module.mark_blocked
+
+    def recording(*args: Any) -> Any:
+        threads.append(threading.current_thread().name)
+        return real(*args)
+
+    monkeypatch.setattr(job_views, "mark_blocked", recording)
+    with running(rules_fetcher()) as client:
+        items = rules_site()
+        fake_reads(monkeypatch, len(items), fresh(items))
+        client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+
+    assert len(threads) == 1
+    assert threads[0].startswith("convert")
+
+
+def test_the_memo_keeps_at_most_its_judgements_and_drops_the_oldest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(job_views, "TREE_JUDGE_MEMO_URLS", 10)
+    clock = Clock()
+    memo = _RulesMemo(clock)
+    for number in range(3):
+        clock.now += 0.1
+        memo.put((f"job-{number}", frozenset()), {}, {f"u{number}-{i}": None for i in range(4)})
+
+    assert memo.get(("job-0", frozenset())) is None  # 12 judgements: the oldest entry went
+    assert memo.judged(("job-1", frozenset())) == {f"u1-{i}": None for i in range(4)}
+    assert len(memo.judged(("job-2", frozenset()))) == 4
+    assert memo.judged(("job-0", frozenset())) == {}

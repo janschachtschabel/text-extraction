@@ -52,8 +52,12 @@ checks nothing, so it reads the file in every mode.
 
 ``ComplianceChecker.origin_rules`` loads (or, with ``cached_only``, reads from the cache) all
 three files of an origin once as ``OriginRules``; its ``judge`` then decides for any number of
-the origin's URLs without I/O, with the result ``before_fetch`` would give. ``block_reason`` names
-why a report would block, and ``origin_of`` gives a URL's origin.
+the origin's URLs without I/O, with the result ``before_fetch`` would give. With ``max_rules``
+(the site tree's copy, third audit S1) it keeps only the first ``max_rules`` rules of each
+robots.txt and ai.txt user agent and the first ``max_rules`` tdmrep.json entries, so judging a
+URL stays cheap against a hostile 500 KiB file; such a copy can judge differently from
+``before_fetch`` for a file with more rules, which keeps reading the whole file. ``block_reason``
+names why a report would block, and ``origin_of`` gives a URL's origin.
 """
 
 import asyncio
@@ -65,13 +69,24 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
+from enum import Enum
 from html.parser import HTMLParser
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
 import structlog
 from protego import Protego
+
+# protego's own directive reader and names: the capped copy of a file (``_capped_rules``) must
+# group the lines exactly as protego does.
+from protego._protego import (
+    _ALLOW_DIRECTIVE,
+    _DISALLOW_DIRECTIVE,
+    _SITE_WIDE_DIRECTIVES,
+    _USER_AGENT_DIRECTIVE,
+    _extract_directive,
+)
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -340,6 +355,12 @@ class _Entry:
     error: ErrorCode | None = None  # unavailable: the fetch error, one of _HOST_ERRORS
 
 
+class _Unparsed(Enum):
+    """``OriginRules.tdm_parsed`` not given: the rules parse tdmrep.json themselves."""
+
+    NOT_GIVEN = 0
+
+
 @dataclass(frozen=True)
 class OriginRules:
     """The three rule files of one origin as loaded, with robots.txt and ai.txt parsed: judges
@@ -350,11 +371,15 @@ class OriginRules:
     ai: _Entry
     robots_rules: Protego | None
     ai_rules: Protego | None
-    # tdmrep.json parsed once (here, not per judged URL); None when absent or unreadable.
+    # tdmrep.json as parsed by the caller (off the event loop); parsed here when not given.
+    tdm_parsed: "InitVar[tuple[_TdmEntry, ...] | _Unparsed | None]" = _Unparsed.NOT_GIVEN
+    # tdmrep.json parsed once (not per judged URL); None when absent or unreadable.
     tdm_entries: "tuple[_TdmEntry, ...] | None" = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        entries = _parse_tdmrep(self.tdmrep.body) if self.tdmrep.state == "found" else None
+    def __post_init__(self, tdm_parsed: "tuple[_TdmEntry, ...] | _Unparsed | None") -> None:
+        entries = tdm_parsed
+        if isinstance(entries, _Unparsed):
+            entries = _parse_tdmrep(self.tdmrep.body) if self.tdmrep.state == "found" else None
         object.__setattr__(self, "tdm_entries", entries)
 
     def judge(self, url: str, mode: ComplianceMode) -> ComplianceReport:
@@ -440,15 +465,28 @@ class ComplianceChecker:
     ) -> ComplianceReport:
         return (await self._origin_rules(robots, tdmrep, ai)).judge(url, mode)
 
-    async def _origin_rules(self, robots: _Entry, tdmrep: _Entry, ai: _Entry) -> OriginRules:
-        return OriginRules(robots, tdmrep, ai, await self._rules(robots), await self._rules(ai))
+    async def _origin_rules(
+        self, robots: _Entry, tdmrep: _Entry, ai: _Entry, max_rules: int | None = None
+    ) -> OriginRules:
+        return OriginRules(
+            robots,
+            tdmrep,
+            ai,
+            await self._rules(robots, max_rules),
+            await self._rules(ai, max_rules),
+            await _tdm_entries(tdmrep, max_rules),
+        )
 
-    async def origin_rules(self, url: str, *, cached_only: bool) -> OriginRules | None:
+    async def origin_rules(
+        self, url: str, *, cached_only: bool, max_rules: int | None = None
+    ) -> OriginRules | None:
         """The three rule files of ``url``'s origin, to judge many URLs of it without further
         I/O (``OriginRules.judge``). With ``cached_only`` from the cache alone (one read; None
         while any file is not cached, or the cache cannot be read); otherwise the missing files
         are loaded one after another within one 10 s budget, as ``before_fetch`` does, so call
-        it in the host's turn. It reads in every compliance mode."""
+        it in the host's turn. It reads in every compliance mode. With ``max_rules`` the rules
+        are a capped copy (see the module's text): at most that many rules per user agent of
+        robots.txt and ai.txt and that many tdmrep.json entries, the first ones."""
         origin = _origin(url)
         if cached_only:
             keys = [_cache_key(kind, origin) for kind in ("robots", "tdmrep", "ai")]
@@ -465,7 +503,7 @@ class ComplianceChecker:
             robots = await self._load("robots", origin, _ROBOTS_PATH, deadline)
             tdmrep = await self._load("tdmrep", origin, _TDMREP_PATH, deadline)
             ai = await self._load("ai", origin, _AI_TXT_PATH, deadline)
-        return await self._origin_rules(robots, tdmrep, ai)
+        return await self._origin_rules(robots, tdmrep, ai, max_rules)
 
     def after_fetch(
         self, report: ComplianceReport, fetched: FetchResult, html: str | None
@@ -507,15 +545,18 @@ class ComplianceChecker:
         update["reasons"] = reasons
         return _decided(report.model_copy(update=update))
 
-    async def _rules(self, entry: _Entry) -> Protego | None:
-        """The parsed rules of a found robots.txt or ai.txt; None for any other entry."""
+    async def _rules(self, entry: _Entry, max_rules: int | None = None) -> Protego | None:
+        """The parsed rules of a found robots.txt or ai.txt; None for any other entry. With
+        ``max_rules`` the capped copy (`_capped_rules`), cached apart from the whole file."""
         if entry.state != "found":
             return None
         digest = hashlib.sha256(entry.body.encode()).hexdigest()
+        if max_rules is not None:
+            digest = f"{digest}:{max_rules}"
         if digest in self._rules_cache:
             self._rules_cache.move_to_end(digest)
             return self._rules_cache[digest]
-        rules = await asyncio.to_thread(_parse_rules, entry.body)
+        rules = await asyncio.to_thread(_parse_rules, entry.body, max_rules)
         self._rules_cache[digest] = rules
         if len(self._rules_cache) > _RULES_CACHE_SIZE:
             self._rules_cache.popitem(last=False)
@@ -738,13 +779,61 @@ def _says_absent(status: int) -> bool:
     return 300 <= status < 400 or (400 <= status < 500 and status != 429)
 
 
-def _parse_rules(text: str) -> Protego | None:
-    """Parse robots.txt-style rules. protego is lenient; a parser failure counts as unusable."""
+def _parse_rules(text: str, max_rules: int | None = None) -> Protego | None:
+    """Parse robots.txt-style rules (with ``max_rules`` the capped copy, `_capped_rules`).
+    protego is lenient; a parser failure counts as unusable."""
     try:
-        return Protego.parse(text)
+        return Protego.parse(text if max_rules is None else _capped_rules(text, max_rules))
     except Exception:  # untrusted input: any parser failure means the file is unusable
         _log.warning("compliance_rules_unparsable")
         return None
+
+
+# Stands for a run of rules left out of a capped copy: a rule without a value, which protego
+# ignores but which still ends the record group as the left-out rules did.
+_LEFT_OUT_RULES = "Disallow:"
+
+
+def _capped_rules(text: str, max_rules: int) -> str:
+    """``text`` with at most ``max_rules`` Allow/Disallow lines for each user agent, the first
+    ones in file order; the rest of a group (user agents, crawl delays, sitemaps) stays. The
+    lines are grouped as protego groups them (a user agent after any other group line starts
+    a new group; groups naming the same agent add up), and a rule is kept only while every
+    agent of its group is below the cap, so no agent's rules can grow past it. A run of left-out
+    rules becomes one ``_LEFT_OUT_RULES`` line, so the groups stay as they were. Comments and
+    blank lines are dropped."""
+    lines: list[str] = []
+    counts: dict[str, int] = {}
+    group: list[str] = []
+    previous: str | None = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        parsed = _extract_directive(line) if line else None
+        if parsed is None:
+            continue
+        name, value = parsed
+        if (
+            name in _USER_AGENT_DIRECTIVE
+            and previous is not None
+            and previous not in _USER_AGENT_DIRECTIVE
+        ):
+            group = []
+        if name not in _SITE_WIDE_DIRECTIVES:
+            previous = name
+        if name in _USER_AGENT_DIRECTIVE and value:
+            agent = value.lower()
+            for key in (agent, agent.replace("*", "") if agent != "*" else ""):
+                if key and key not in group:
+                    group.append(key)
+        elif name in _ALLOW_DIRECTIVE | _DISALLOW_DIRECTIVE and value and group:
+            if any(counts.get(key, 0) >= max_rules for key in group):
+                if lines[-1] != _LEFT_OUT_RULES:
+                    lines.append(_LEFT_OUT_RULES)
+                continue
+            for key in group:
+                counts[key] = counts.get(key, 0) + 1
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _sitemap_urls(rules: Protego | None, robots_url: str) -> list[str]:
@@ -845,6 +934,15 @@ def _parse_tdmrep(body: str) -> "tuple[_TdmEntry, ...] | None":
             continue
         parsed.append(_TdmEntry(location, reserved, _policy(entry.get("tdm-policy"))))
     return tuple(parsed)
+
+
+async def _tdm_entries(entry: _Entry, max_rules: int | None) -> "tuple[_TdmEntry, ...] | None":
+    """The parsed entries of a found tdmrep.json (parsed in a worker thread, off the event
+    loop), with ``max_rules`` the first that many; None for any other entry."""
+    if entry.state != "found":
+        return None
+    entries = await asyncio.to_thread(_parse_tdmrep, entry.body)
+    return entries if entries is None or max_rules is None else entries[:max_rules]
 
 
 def _match_tdmrep(entries: "tuple[_TdmEntry, ...]", url: str) -> _TdmMatch | None:

@@ -42,6 +42,14 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Fixed
 
+- The site tree's rule checks are bounded: rule files are loaded only for the sites the crawl
+  itself visited (a site that a sitemap or a link merely names is read from the cache, else shown
+  as not checked), the tree judges with the first 1,000 rules of each robots.txt and ai.txt user
+  agent and the first 1,000 tdmrep.json entries (a fetch still reads the whole file), the
+  judgement runs on the conversion pool within 1 s, and a live refresh judges only the URLs that
+  are new. A hostile 500 KiB rule file cost a view about 5 s of CPU, at every refresh. tdmrep.json
+  is parsed off the event loop. A sitemap entry without a type no longer clears the type a link
+  text gave a URL in the tree.
 - `discovery: sitemap_first` no longer trusts a `Sitemap:` line in robots.txt blindly: the first
   listed sitemap is probed like the guessed addresses, and one that answers 404 or is no sitemap
   (an HTML page) counts as absent, so the page's links are crawled instead of being left unvisited.

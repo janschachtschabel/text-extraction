@@ -5,11 +5,17 @@ import asyncio
 import time
 from typing import Any, cast
 
+import pytest
 from fakeredis import FakeAsyncRedis
 
 from tests.test_compliance import FakeFetcher, result
 from tests.ui.site_items import page_item, pending_item, robots_item, sitemap_item
-from text_extraction.compliance import ComplianceChecker, ComplianceReport, OriginRules
+from text_extraction.compliance import (
+    BlockReason,
+    ComplianceChecker,
+    ComplianceReport,
+    OriginRules,
+)
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import Fetcher
 from text_extraction.job_models import JobItem
@@ -786,3 +792,80 @@ def test_a_sitemap_guess_merged_into_a_held_link_replaces_its_link_text_guess() 
     [held] = builder._sources[2].values()
     assert held.url == url
     assert (held.page_type, held.type_reason, held.from_sitemap) == ("content", "default", True)
+
+
+def test_a_sitemap_entry_without_a_guess_keeps_a_held_links_text_guess() -> None:
+    """An entry with no type (an id-shaped URL) merged into the link held for it leaves the
+    link's guess: "type open" never replaces a guess."""
+    url = f"{ORIGIN}/12345"
+    builder = TreeBuilder(max_urls=1)
+    builder.add(page_item(0, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)))
+    builder.add(
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/andere/"}, {"loc": url}])
+    )
+    [held] = builder._sources[2].values()
+    assert held.url == url
+    assert (held.page_type, held.type_reason, held.from_sitemap) == ("privacy", "link_text", True)
+
+
+# --- rule checks: origins the job contacted, judgements reused (third audit S1, S2) -------------
+
+
+def test_contacted_names_the_origins_of_the_jobs_own_items() -> None:
+    redirected = page_item(1, "http://moved.example/a")
+    assert redirected.result is not None
+    assert redirected.result.data is not None
+    redirected.result.data.final_url = "https://new.example/a"
+    items = [
+        page_item(0, f"{ORIGIN}/", depth=0, links=(("https://linked.example/x", "depth"),)),
+        redirected,
+        robots_item(2, f"{ORIGIN}/robots.txt"),
+        sitemap_item(
+            3,
+            "https://maps.example:8443/sitemap.xml",
+            [{"loc": f"https://foreign-{i}.example:{8000 + i}/p"} for i in range(30)],
+        ),
+        pending_item(4, "https://queued.example/q"),
+    ]
+
+    tree = build_tree(items, max_urls=100)
+
+    assert tree.contacted == {
+        ORIGIN,
+        "http://moved.example",
+        "https://new.example",
+        "https://maps.example:8443",
+        "https://queued.example",
+    }
+    assert "https://foreign-0.example:8000" in leaf_origins(tree)
+
+
+def test_mark_blocked_reuses_judgements_and_records_new_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+    judged_urls: list[str] = []
+    real = OriginRules.judge
+
+    def counting(self: OriginRules, url: str, mode: Any) -> Any:
+        judged_urls.append(url)
+        return real(self, url, mode)
+
+    monkeypatch.setattr(OriginRules, "judge", counting)
+    known: dict[str, BlockReason | None] = {f"{ORIGIN}/sammlung/_page2": None}  # judged before
+
+    marked = mark_blocked(tree, {ORIGIN: rules}, judged=known)
+
+    assert sorted(judged_urls) == [f"{ORIGIN}/sammlung/", f"{ORIGIN}/sammlung/_page3"]
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": None,
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+    assert known == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": None,
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }

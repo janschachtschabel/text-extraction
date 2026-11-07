@@ -3227,12 +3227,27 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
 - **Site rules in the site tree (package 16).** The tree judges every shown URL when it is shown,
   not when the crawl ran, against the site's current robots.txt, tdmrep.json and ai.txt (from the
-  cache, or loaded once per site within the per-host limits; at most 20 sites, 12 s). A blocked
-  URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or "TDM", with the
-  reason as tooltip; the links the crawl skipped because of the rules are "linked only" leaves.
-  Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons skip it;
-  under `report` and `ignore` it can be ticked. The batch below the tree starts with the step the
-  crawl ran with.
+  cache, or loaded once per site within the per-host limits; at most 20 sites, 12 s). **Ruling
+  AU3-R6 (third audit, S1 and S2: bounded rule checks):** the files are loaded only for the origins
+  the job contacted, derived from its own items (the start page, the pages, robots.txt and sitemaps,
+  fetched or queued, and their final URLs; `SiteTree.contacted`, no stored state), and those come
+  first among the 20; any other origin (a sitemap may list URLs on any host and port, a page may
+  link anywhere) is read from the compliance cache alone and is unchecked when its files are not
+  cached, so one view never sends requests to hosts the crawl did not visit. The tree judges with a
+  capped copy of the rules (`TREE_RULES_MAX_RULES`, 1,000): the first 1,000 Allow/Disallow lines per
+  user agent of robots.txt and ai.txt (grouped as protego groups them) and the first 1,000
+  tdmrep.json entries, so one URL costs about 0.25 ms against a hostile 500 KiB file (under 1 ms for
+  a URL of 2,000 characters) instead of up to 8 ms. A real fetch (`before_fetch`) still reads the
+  whole file, so for a file with more rules the tree's marks are best effort and the crawl or batch
+  decides. tdmrep.json is parsed in a worker thread, also for a real fetch. The leaves are judged on
+  the conversion pool within 1 s (`TREE_JUDGE_SECONDS`; the origins not judged by then are
+  unchecked), and a live refresh reuses, with the rules, the judgements of the refreshes before (per
+  job and origin set for 30 s, at most 100,000 judgements in the pod's memo), so it judges only the
+  URLs that are new. A URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable)
+  or "TDM", with the reason as tooltip; the links the crawl skipped because of the rules are "linked
+  only" leaves. Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons
+  skip it; under `report` and `ignore` it can be ticked. The batch below the tree starts with the
+  step the crawl ran with.
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
   "Extract selected", so a keyboard user does not tab through every checkbox.
