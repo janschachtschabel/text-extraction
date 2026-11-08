@@ -64,7 +64,7 @@ def _images(version: str) -> str:
     minor = version.rsplit(".", 1)[0]
     guide = f"{REPOSITORY}/blob/main/docs/user-guide"
     chart = f"{REPOSITORY}/blob/main/deploy/helm/text-extraction/README.md"
-    compose = "docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait"
+    compose = "docker compose up -d --wait"
     return f"""### Images
 
 Five images, each tagged `{version}` and `{minor}` (linux/amd64):
@@ -77,8 +77,9 @@ Five images, each tagged `{version}` and `{minor}` (linux/amd64):
 
 ### Start
 
-- Docker Compose with these images, from a checkout of the tag, or of `main` for a
-  tag without `docker-compose.release.yml`: `{compose}`
+- Docker Compose with these images: the root `docker-compose.yml` of the tag, with
+  `TEXT_EXTRACTION_VERSION={version}` in `.env` (it starts without other variables; Docker panels
+  such as Hostinger's Docker Manager deploy it from the repository): `{compose}`
   ([installation guide]({guide}/en/installation.md), [German]({guide}/de/installation.md)).
 - Kubernetes: the Helm chart with `image.tag: "{version}"` ([chart README]({chart})).
 """

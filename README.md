@@ -10,7 +10,7 @@ and a playground in English and German.
 
 ## Status
 
-Prototype `v0.1.7`: packages 0-19 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.8`: packages 0-19 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,
@@ -39,27 +39,25 @@ the page needs it (`auto`, the default), never (`fast`) or always (`browser`). S
 
 Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
 optional workers for OCR, transcription, personal data and the LLM (their first start downloads
-about 3 GB of models) and a Valkey (with a password) for the shared state.
+about 3 GB of models) and a Valkey (with a password) for the shared state. The root
+`docker-compose.yml` runs the published images and needs no variables: its service `init`
+creates the Valkey password and an admin API key on the first start.
 
 ```bash
-cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-KEY=$(openssl rand -hex 32)                    # your API key: keep it
-printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
-openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build -d --wait          # public API on http://localhost:8080
+docker compose up -d --wait                    # public API on http://localhost:8080
+KEY=$(docker compose run --rm -T init text-extraction-init --show-admin-key)
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-`.env.example` has one admin key named `local`, whose SHA-256 you replace; see
-[API keys](docs/user-guide/en/usage.md#api-keys). The playground is at http://localhost:8080/ui
-and the MCP endpoint at http://localhost:8080/mcp.
-[Installation](docs/user-guide/en/installation.md) covers the local setup with uv, the optional
-workers (OCR, personal data, LLM, speech recognition), Kubernetes and the key settings.
-Without a build, `docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait`
-runs the released images: see
-[Released images](docs/user-guide/en/installation.md#released-images).
+The playground is at http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp;
+log in with the key. Hostinger's Docker Manager deploys the same file from this repository's URL:
+see [Hostinger VPS](docs/user-guide/en/installation.md#hostinger-vps).
+[Installation](docs/user-guide/en/installation.md) covers HTTPS with `DOMAIN`, your own keys
+([API keys](docs/user-guide/en/usage.md#api-keys)), building the images with
+`docker-compose.build.yml`, the local setup with uv, the optional workers (OCR, personal data,
+LLM, speech recognition), Kubernetes and the key settings.
 
 ## Use cases
 

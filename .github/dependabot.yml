@@ -42,7 +42,8 @@ updates:
       docker-minor-patch:
         update-types: [minor, patch]
 
-  # The Valkey image of docker-compose.yml (the Dockerfile entry above does not read compose files).
+  # The Valkey image of the compose files (the Dockerfile entry above does not read compose files;
+  # tests/test_compose_files.py keeps docker-compose.yml and docker-compose.build.yml on one tag).
   - package-ecosystem: docker-compose
     directory: /
     schedule:

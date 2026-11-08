@@ -94,7 +94,8 @@ def test_notes_end_with_the_images_and_the_start() -> None:
     for suffix in ("", "-browser", "-docling", "-asr", "-nlp"):
         assert f"`ghcr.io/janschachtschabel/text-extraction{suffix}:0.2.0`" in images
     assert "`0.2`" in images
-    assert "docker-compose.release.yml" in images
+    assert "`docker-compose.yml`" in images
+    assert "docker-compose.release.yml" not in images
     assert f"{BLOB}/main/docs/user-guide/en/installation.md" in images
     assert f"[German]({BLOB}/main/docs/user-guide/de/installation.md)" in images
     assert f"{BLOB}/main/deploy/helm/text-extraction/README.md" in images

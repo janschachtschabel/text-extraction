@@ -31,6 +31,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. Minimum 1. |
 | `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB), `/mcp` (see MCP) and some `/ui/run` routes (see UI). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
+| `VALKEY_URL_FILE` | unset | Path to a file that holds the Valkey URL (surrounding whitespace is dropped); it wins over `VALKEY_URL`. Its content is a secret, see [Secrets](#secrets). An unreadable or empty file makes the service exit with code 2. The root `docker-compose.yml` points it at `/secrets/valkey-url`, which its `init` service generates. |
 | `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` and `POST /v1/site-structure` answer 503 `internal_error` (retryable), a running site job appends no further pages or sitemaps (warning `site_memory_guard`), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
@@ -119,8 +120,9 @@ Keep these out of ConfigMaps, images and logs.
 | --- | --- | --- |
 | `API_KEYS` | JSON list of `{"name", "role", "sha256", "rate_limit_per_minute"}`. `role` is `user` or `admin`; `rate_limit_per_minute` is optional. Only the SHA-256 of a key is stored. | `secrets.apiKeys` (chart-managed Secret) or `secrets.existingSecret` + `secrets.existingSecretKey` |
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
-| `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
+| `VALKEY_PASSWORD` | Password of the Valkey that `docker-compose.build.yml` and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). `docker-compose.build.yml`: required in `.env` (no default). The root `docker-compose.yml` ignores it: its `init` service generates the password into the volume `secrets`. |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
+| `VALKEY_URL_FILE` | The file content (a URL with the password). | None: the chart sets `VALKEY_URL` itself. The root `docker-compose.yml` generates the file in the volume `secrets` (`init` service). |
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 | `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
 | `LLM_API_KEY` | API key of the LLM endpoint (`LLM_BASE_URL`). A request header `X-LLM-Api-Key` wins over it. The llm workers send it; the API pods need it too, only to know whether there is one. Empty counts as unset. Never logged, never in a repr, never in an answer. | `workers.llm.apiKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none and never renders the key as a literal); rendered into the API pods and the llm worker container only, and only with `workers.llm.enabled`. docker compose: `.env` (every service). |
@@ -181,11 +183,13 @@ build installs the Chrome stable of that day, so two builds of the same commit c
 Chrome's version.
 
 docker compose runs the API, one extract worker, one browser worker (image target `browser`,
-`/tmp` a 1 GiB tmpfs, `shm_size` 1 GiB) and a Valkey with a password (`VALKEY_PASSWORD`
-from `.env`, required). It sets `BROWSER_ENABLED=true` for all three and passes
+`/tmp` a 1 GiB tmpfs, `shm_size` 1 GiB) and a Valkey with a password: in `docker-compose.build.yml`
+`VALKEY_PASSWORD` from `.env` (required), in the root `docker-compose.yml` one the `init` service
+generated (see [Root compose file](#root-compose-file-published-images)). It sets
+`BROWSER_ENABLED=true` for all three and passes
 `BROWSER_UNBLOCK_ENABLED` (default false) from `.env` or the shell. Their stop grace periods are
-120 s (API), 45 s (extract worker) and 90 s (browser worker). These are fixed in
-`docker-compose.yml` and cover the shutdowns, unblock mode included, only at the default timeouts:
+120 s (API), 45 s (extract worker) and 90 s (browser worker). These are fixed in both compose
+files and cover the shutdowns, unblock mode included, only at the default timeouts:
 the API needs `SHUTDOWN_DRAIN_SECONDS` + its graceful phase (110 s with unblock mode), the extract
 worker `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, the browser worker
 `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (see Response times). If `.env` raises
@@ -194,8 +198,8 @@ worker `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, the browser worker
 affected services to at least that plus a few seconds, or compose kills them before their graceful
 shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE` is
 `api_key`. docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
-written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
-`docker-compose.yml` as well. The Helm chart pins both ports.
+written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit the compose
+file as well. The Helm chart pins both ports.
 
 The ASR worker (`text-extraction-asr-worker`, image `text-extraction-asr`) serves only port 9090.
 Its `/ready` answers 200 once it has checked the model under `ASR_MODELS_PATH` (local backend),
@@ -245,6 +249,33 @@ off, set `DOCLING_ENABLED=false` in `.env` and start with
 `docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. The service
 `docling-models` runs `--download-models` into the volume first (it needs the internet once), then
 `docling-worker` mounts it read-only; its stop grace period is 45 s.
+
+### Root compose file (published images)
+
+The root `docker-compose.yml` runs the published images and starts without a single variable, so
+Docker panels such as Hostinger's Docker Manager ("Compose from URL", which takes only the root
+`docker-compose.yml` and copies `.env.example` to `.env`) can deploy it straight from the
+repository. `docker-compose.build.yml` builds the images from a checkout instead and has the same
+services apart from `init` (a test keeps the two in step).
+
+- **Secrets:** the one-shot service `init` (`text-extraction-init`, API image) creates them on the
+  first start in the volume `secrets` and keeps them on every later start: a Valkey password
+  (`valkey.conf` with the password of the default user and a user `healthcheck` that may only
+  `PING`, and `valkey-url`, read through `VALKEY_URL_FILE`) and an admin API key (`api-keys.json`,
+  read through `API_KEYS_FILE`, merged with `API_KEYS` from `.env`). The plain key appears once in
+  `docker compose logs init`; `docker compose run --rm -T init text-extraction-init --show-admin-key`
+  prints it later. Deleting the volume `secrets` creates new ones on the next start.
+- **HTTPS through Traefik:** the `api` service carries Traefik labels for a Traefik with the Docker
+  provider (a Hostinger VPS runs one): `DOMAIN` is the bare host name of the route (`init` exits 1
+  on a scheme, port, path or slash), `TRAEFIK_ENTRYPOINT` (default `websecure`) and
+  `TRAEFIK_CERTRESOLVER` (default `letsencrypt`) name Traefik's entry point and resolver,
+  `TRAEFIK_ROUTER` (default `text-extraction`) the router and service, which must be unique in
+  Traefik. The default network is named `TRAEFIK_NETWORK` (default `text-extraction-web`): created
+  when missing, shared when it exists. Without Traefik the labels do nothing.
+- **Port:** the API is published on `API_PORT` (default `8080`, all interfaces);
+  `127.0.0.1:8080` keeps it to the server, so that only Traefik's HTTPS reaches it from outside.
+- **Version:** `TEXT_EXTRACTION_VERSION` (default the release of the file) picks the images.
+- Every service except the one-shot ones restarts `unless-stopped`.
 
 ## Response times
 

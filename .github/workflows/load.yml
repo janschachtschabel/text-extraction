@@ -67,7 +67,7 @@ jobs:
       COMPOSE_PROJECT_NAME: text-extraction
       # Every compose call: the base file, the load override (every worker runs without a profile).
       COMPOSE: >-
-        docker compose -f docker-compose.yml -f deploy/load/compose.load.yml
+        docker compose -f docker-compose.build.yml -f deploy/load/compose.load.yml
       # A pull request has no inputs: the dispatch defaults apply, which are the production
       # defaults (ruling R-P11-6). The override reads the models.
       SELECTOR_PROCESSES: ${{ inputs.selector_processes || '1,2,4' }}

@@ -11,8 +11,18 @@ from text_extraction.settings import Settings
 ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE = ROOT / ".env.example"
 
-# Read by docker compose only (it starts Valkey with it and builds VALKEY_URL from it).
-_COMPOSE_ONLY = {"VALKEY_PASSWORD"}
+# Read by docker compose only: docker-compose.build.yml starts Valkey with VALKEY_PASSWORD and
+# builds VALKEY_URL from it; the root docker-compose.yml reads the rest.
+_COMPOSE_ONLY = {
+    "VALKEY_PASSWORD",
+    "DOMAIN",
+    "TEXT_EXTRACTION_VERSION",
+    "API_PORT",
+    "TRAEFIK_NETWORK",
+    "TRAEFIK_ROUTER",
+    "TRAEFIK_ENTRYPOINT",
+    "TRAEFIK_CERTRESOLVER",
+}
 
 
 def _text() -> str:

@@ -387,8 +387,11 @@ keeps no other data set.
   `PII_HASH_KEY`; callers may send `X-LLM-Api-Key` and `X-ASR-Api-Key`:
   [configuration.md, Secrets](configuration.md#secrets).
 - Reference only: the [`Dockerfile`](../Dockerfile) (five targets), the
-  [`docker-compose.yml`](../docker-compose.yml) with [`.env.example`](../.env.example) for a
-  local stack. Resources, scaling and secrets for a deployment come from the Helm chart.
+  [`docker-compose.yml`](../docker-compose.yml) (published images, starts without variables: its
+  `init` service generates the secrets; also the file a Docker panel such as Hostinger's deploys)
+  and [`docker-compose.build.yml`](../docker-compose.build.yml) (builds the images), both with
+  [`.env.example`](../.env.example), for a single machine. Resources, scaling and secrets for a
+  deployment come from the Helm chart.
 
 ## 13. Costs
 
@@ -480,7 +483,7 @@ patches and models.
   `X.Y.Z`, as the example values do.
 - The `release` workflow then creates the GitHub release page of the tag, with the tag's
   section of the changelog as its notes (a 0.x version is marked as a pre-release);
-  `docker-compose.release.yml` runs the published images with Compose, and its default version
+  the root `docker-compose.yml` runs the published images with Compose, and its default version
   moves with each release (`tests/test_release.py`).
 - Rollback: `helm rollback <release> <revision>`, or `helm upgrade` with the previous tag.
 - The first release is `v0.1.0`, a prototype, tagged on the merge of package 13 (YouTube

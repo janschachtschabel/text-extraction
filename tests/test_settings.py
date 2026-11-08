@@ -26,6 +26,7 @@ SETTING_ENV_VARS = (
     "API_KEYS",
     "API_KEYS_FILE",
     "VALKEY_URL",
+    "VALKEY_URL_FILE",
     "RATE_LIMIT_PER_MINUTE",
     "RATE_LIMIT_ENABLED",
     "FETCH_TIMEOUT_SECONDS",
@@ -181,6 +182,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.auth_mode == "api_key"
     assert settings.api_keys_file is None
     assert settings.valkey_url == "redis://localhost:6379/0"
+    assert settings.valkey_url_file is None
     assert settings.rate_limit_per_minute == 60
     assert settings.rate_limit_enabled is True
     assert settings.fetch_timeout_seconds == 20
@@ -231,6 +233,33 @@ def test_api_keys_file_alone_satisfies_api_key_mode(
     monkeypatch.setenv("API_KEYS_FILE", str(keys_file))
 
     assert [k.name for k in Settings().api_keys] == ["only-file"]
+
+
+def test_valkey_url_file_wins_over_valkey_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    url_file = tmp_path / "valkey-url"
+    url_file.write_text("redis://:abc123@valkey:6379/0\n")
+    monkeypatch.setenv("API_KEYS", json.dumps([key_entry("ci", "secret")]))
+    monkeypatch.setenv("VALKEY_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("VALKEY_URL_FILE", str(url_file))
+
+    assert Settings().valkey_url == "redis://:abc123@valkey:6379/0"
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n"])
+def test_valkey_url_file_missing_or_empty_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str | None
+) -> None:
+    url_file = tmp_path / "valkey-url"
+    if content is not None:
+        url_file.write_text(content)
+    monkeypatch.setenv("API_KEYS", json.dumps([key_entry("ci", "secret")]))
+    monkeypatch.setenv("VALKEY_URL_FILE", str(url_file))
+
+    with pytest.raises(ValidationError, match="VALKEY_URL_FILE") as caught:
+        Settings()
+    assert "redis://" not in str(caught.value)
 
 
 def test_api_key_mode_without_keys_fails() -> None:

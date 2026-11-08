@@ -34,8 +34,9 @@ INTENTIONAL_DIFFERENCES: dict[str, str] = {
     "ASR_EXTERNAL_BASE_URL": "operator's endpoint, unset in the code",
     "LLM_EMBEDDING_MODEL": "operator's model name, unset in the code",
     "LLM_VISION_MODEL": "operator's model name, unset in the code",
-    # Read by docker compose only (not a Settings field).
+    # Read by docker compose only (not Settings fields).
     "VALKEY_PASSWORD": "compose only",
+    "DOMAIN": "compose only (root docker-compose.yml, Traefik labels)",
     # api_key is the code default, but the check below needs a Settings without keys: it is
     # compared with the field default directly (see test_auth_mode_is_the_code_default).
     "AUTH_MODE": "compared with the field default directly",
@@ -96,7 +97,7 @@ def test_every_difference_is_still_a_difference(monkeypatch: pytest.MonkeyPatch)
         shipped |= _helm_config(path)
     stale = []
     for name in INTENTIONAL_DIFFERENCES:
-        if name not in shipped or name in {"AUTH_MODE", "VALKEY_PASSWORD", "API_KEYS"}:
+        if name not in shipped or name in {"AUTH_MODE", "VALKEY_PASSWORD", "DOMAIN", "API_KEYS"}:
             continue
         monkeypatch.undo()
         default = getattr(_settings(monkeypatch), name.lower())

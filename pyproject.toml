@@ -1,6 +1,6 @@
 [project]
 name = "text-extraction"
-version = "0.1.7"
+version = "0.1.8"
 description = "API service that extracts text and Markdown from web pages, files, audio and video."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -63,6 +63,7 @@ text-extraction-docling-worker = "text_extraction.docling_worker:main"
 text-extraction-asr-worker = "text_extraction.asr_worker:main"
 text-extraction-nlp-worker = "text_extraction.nlp_worker:main"
 text-extraction-llm-worker = "text_extraction.llm_worker:main"
+text-extraction-init = "text_extraction.init_secrets:main"
 
 [project.optional-dependencies]
 browser = [
