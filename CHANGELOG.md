@@ -9,6 +9,36 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-09
+
+### Changed
+
+- The root `docker-compose.yml` runs the published images and starts without a single variable,
+  so Hostinger's Docker Manager ("Compose from URL", which takes only the root
+  `docker-compose.yml` and copies `.env.example` to `.env`) and other Docker panels can deploy it
+  from the repository. Before, the first deploy stopped at the required `VALKEY_PASSWORD`, which
+  `.env.example` leaves empty. The file has no YAML anchors or merge keys, no required or nested
+  variables, no build and no bind mounts, and every long-running service restarts
+  `unless-stopped`.
+- The former `docker-compose.yml`, which builds the images, is now `docker-compose.build.yml`
+  (`docker compose -f docker-compose.build.yml up --build -d --wait`); it still needs `API_KEYS`
+  and `VALKEY_PASSWORD` in `.env`. `docker-compose.release.yml` is gone: the root file replaces it.
+  The load test and CI use the build file.
+
+### Added
+
+- `text-extraction-init` and the one-shot compose service `init`: on the first start they create
+  the Valkey password and an admin API key in the volume `secrets` and keep them afterwards. The
+  key is logged once (`init_admin_key_created`); `docker compose run --rm -T init
+  text-extraction-init --show-admin-key` prints it later. Valkey reads its password from the
+  generated `valkey.conf` (with a user `healthcheck` that may only `PING`).
+- `VALKEY_URL_FILE`: a file that holds the Valkey URL (secret content), winning over `VALKEY_URL`.
+- Traefik labels on the `api` service of the root compose file (`DOMAIN`, `TRAEFIK_NETWORK`,
+  `TRAEFIK_ROUTER`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERTRESOLVER`), a named default network and
+  `API_PORT` for the published port. `init` refuses a `DOMAIN` that is not a bare host name.
+- Installation guide (English and German): published images, Hostinger VPS, building from the
+  checkout.
+
 ## [0.1.7] - 2026-11-08
 
 ### Changed

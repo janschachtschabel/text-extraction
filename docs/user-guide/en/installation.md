@@ -43,39 +43,83 @@ uv run pre-commit install    # install the git hooks
 Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
 optional workers (OCR, transcription, personal data, LLM) and a Valkey with a password. It switches
 on browser mode, OCR, transcription, personal data handling, the LLM, the MCP server and the
-playground.
+playground. There are two compose files:
+
+- `docker-compose.yml` runs the published images from `ghcr.io/janschachtschabel/text-extraction`
+  (linux/amd64) and starts without a single variable: for a server, and for Docker panels such as
+  Hostinger's Docker Manager.
+- `docker-compose.build.yml` builds the images from your checkout: for development.
+
+### Published images
+
+```bash
+cp .env.example .env                           # optional: the file starts without it
+docker compose up -d --wait                    # public API on http://localhost:8080
+docker compose logs init                       # the generated admin key (admin_key), shown once
+KEY=$(docker compose run --rm -T init text-extraction-init --show-admin-key)
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
+```
+
+On its first start the one-shot service `init` creates the secrets in the volume `secrets` and
+keeps them afterwards: the Valkey password and an admin API key. The key appears once in the log
+of `init`; the `--show-admin-key` command above prints it at any time. Your own keys go into
+`API_KEYS` in `.env` (see below); they count together with the generated one. The internal port
+9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
+http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
+
+`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.8`; `0.1`
+follows the newest `0.1.x` after `docker compose pull`, since an image already on the machine is
+not pulled again). This file needs `0.1.8` or later: older images have no `init` service. The releases and their notes are on the
+[releases page](https://github.com/janschachtschabel/text-extraction/releases).
+
+For HTTPS, the `api` service carries labels for a Traefik in front of it (Hostinger's VPS runs
+one): set `DOMAIN` in `.env` to the bare host name whose DNS points at the server, for example
+`api.example.org`, without `https://`. `API_PORT=127.0.0.1:8080` then keeps port 8080 to the
+server itself. The [configuration reference](../../configuration.md#root-compose-file-published-images)
+(English) describes the secrets, the Traefik settings and the network.
+
+### Hostinger VPS
+
+The Docker Manager of a Hostinger VPS deploys the root `docker-compose.yml` straight from the
+repository. Plan a VPS with 8 GB of memory or more: with every worker the stack takes about
+6 GiB when idle.
+
+1. Docker Manager, Compose, "Compose from URL": enter
+   `https://github.com/janschachtschabel/text-extraction`, keep the suggested name
+   (`text-extraction`) and deploy. The first deploy downloads the images and the models (about
+   3 GB of models) and takes several minutes.
+2. Open the project's logs, or the web console, and take the admin key from the service `init`
+   (event `init_admin_key_created`).
+3. Edit the project: set `DOMAIN` in `.env` (for example the VPS host name
+   `srvNNNNNN.hstgr.cloud` or your own domain with an A record pointing at the VPS), optionally
+   `API_PORT=127.0.0.1:8080`, then deploy again. Traefik gets the certificate itself. Until
+   `DOMAIN` is set, Traefik's log shows an error about an empty `Host()` rule: that is harmless.
+4. Open `https://<DOMAIN>/ui` and log in with the key.
+
+A failed deploy shows only "Deployment failed" or "Project not found"; the web console (a root
+shell) has the real message:
+
+```bash
+cat /docker/text-extraction/.build.log                 # the real error of a failed deploy
+cd /docker/text-extraction && docker compose logs init  # the admin key
+docker compose run --rm -T init text-extraction-init --show-admin-key
+```
+
+### Build from the checkout
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
 KEY=$(openssl rand -hex 32)                    # your API key: keep it
 printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build -d --wait          # public API on http://localhost:8080
-curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
+docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
 `API_KEYS` holds the SHA-256 of each key, never the key itself. `.env.example` has one admin key
 named `local`, whose SHA-256 you replace; [API keys](usage.md#api-keys) explains the keys and
-their roles. The internal port 9090 (`/health`, `/ready`, `/metrics`) is not
-published. The playground is at http://localhost:8080/ui and the MCP endpoint at
-http://localhost:8080/mcp.
-
-### Released images
-
-Instead of building the images, Compose can run a released version from
-`ghcr.io/janschachtschabel/text-extraction` (linux/amd64). The file `docker-compose.release.yml`
-swaps every build for the published image; `.env` stays the same, and the switches work as below.
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
-```
-
-`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.7`; `0.1`
-follows the newest `0.1.x` after `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
-since an image already on the machine is not pulled again). The releases and their notes are on the
-[releases page](https://github.com/janschachtschabel/text-extraction/releases).
+their roles. This file has no `init` service: it needs `API_KEYS` and `VALKEY_PASSWORD` in `.env`.
 
 ### Optional workers
 
@@ -92,7 +136,8 @@ in `.env` that is `true` by default:
 The first start downloads the models into volumes (about 3 GB in all); with every worker the stack
 takes about 6 GiB of memory when idle. To run without a worker, set its switch to `false` in `.env`
 and leave its services out, for example
-`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. An `.env` copied
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0` (with
+`-f docker-compose.build.yml` for the build file). An `.env` copied
 from an older `.env.example` still has the switches at `false`: set them to `true`.
 
 The LLM worker needs `LLM_BASE_URL` and `LLM_MODEL` of an OpenAI-compatible endpoint and a key:

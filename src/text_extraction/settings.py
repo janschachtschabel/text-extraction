@@ -125,8 +125,8 @@ def normalize_origin(value: str) -> str | None:
 
 class Settings(BaseSettings):
     """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content,
-    ``ASR_EXTERNAL_API_KEY``, ``PII_HASH_KEY``, ``LLM_API_KEY``, and ``VALKEY_URL`` when it
-    carries a password."""
+    ``ASR_EXTERNAL_API_KEY``, ``PII_HASH_KEY``, ``LLM_API_KEY``, ``VALKEY_URL`` when it
+    carries a password, and the content of ``VALKEY_URL_FILE``."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -144,6 +144,9 @@ class Settings(BaseSettings):
     # Under AUTH_MODE=none: the Host names the public app answers (M3/S4); "*" switches it off.
     allowed_hosts: Annotated[list[str], NoDecode] = ["localhost", "127.0.0.1", "[::1]", "api"]
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
+    # File holding the Valkey URL (secret content); wins over VALKEY_URL. The root
+    # docker-compose.yml points it at the URL its init service generates.
+    valkey_url_file: Path | None = None
     # Share of Valkey's maxmemory from which no new bulk is taken on: POST /v1/batch answers 503,
     # slow extractions are not handed over to jobs, the result cache (API and workers) skips.
     valkey_memory_guard_ratio: float = Field(default=0.8, ge=0.1, le=1.0)
@@ -592,6 +595,21 @@ class Settings(BaseSettings):
                 "LLM_BASE_URL must be an https URL (LLM_ALLOW_HTTP=true also allows http)"
             )
         self.llm_base_url = self.llm_base_url.strip()
+        return self
+
+    @model_validator(mode="after")
+    def _read_valkey_url_file(self) -> Self:
+        if self.valkey_url_file is None:
+            return self
+        try:
+            url = self.valkey_url_file.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise ValueError(
+                f"VALKEY_URL_FILE {self.valkey_url_file}: cannot be read ({error.strerror})"
+            ) from None
+        if not url:
+            raise ValueError(f"VALKEY_URL_FILE {self.valkey_url_file}: the file is empty")
+        self.valkey_url = url
         return self
 
     @model_validator(mode="after")

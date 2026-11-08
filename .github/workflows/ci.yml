@@ -311,13 +311,17 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Every `docker compose` call without -f reads the build file; the root docker-compose.yml
+    # (published images) has its own steps at the end.
+    env:
+      COMPOSE_FILE: docker-compose.build.yml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Parses and interpolates docker-compose.yml with dummy values, no real secrets. The runner
-      # has no .env, so nothing else supplies VALKEY_PASSWORD.
+      # Parses and interpolates docker-compose.build.yml with dummy values, no real secrets. The
+      # runner has no .env, so nothing else supplies VALKEY_PASSWORD.
       - run: docker compose config -q
         env:
           VALKEY_PASSWORD: ci-dummy-password
@@ -454,7 +458,7 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
-          docker compose -f docker-compose.yml -f deploy/load/compose.load.yml config --format json > compose.json
+          docker compose -f docker-compose.build.yml -f deploy/load/compose.load.yml config --format json > compose.json
           jq -e --arg tests "$PWD/tests" '[.services.farm, .services["fake-llm"]]
             | all(.image == "text-extraction:dev" and .read_only == true
               and .volumes[0].source == $tests and .volumes[0].target == "/app/tests"
@@ -473,27 +477,38 @@ jobs:
             | length == 7 and all(.value.healthcheck | .start_period == "10m0s" and .start_interval == "5s" and .retries == 6
               and (.test | join(" ") | contains("127.0.0.1:9090/ready")))' compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "lg"' compose.json
-          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml config --format json \
+          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.build.yml -f deploy/load/compose.load.yml config --format json \
             | jq -e '.services | .["asr-models"].environment.ASR_MODEL == "small" and .["nlp-models"].environment.PII_MODEL_SIZE == "md"
               and .api.environment.STRUCTURED_SELECTOR_PROCESSES == "4"'
           rm compose.json
 
-      # The release override: every app service runs a published image and has no build section
-      # left, with every worker (tests/test_release.py pins the default version).
-      - name: docker compose config (released images)
+      # The root docker-compose.yml (published images, the file Docker panels such as Hostinger's
+      # deploy): it starts without a single variable, with no .env and with .env.example as .env;
+      # every app service runs a published image without a build section
+      # (tests/test_compose_files.py pins the default version and the Hostinger rules).
+      - name: docker compose config (root file, published images)
         env:
-          VALKEY_PASSWORD: ci-dummy-password
+          COMPOSE_FILE: docker-compose.yml
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.release.yml config --format json > compose.json
+          test ! -e .env
+          docker compose config -q
+          docker compose config --format json > compose.json
           jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 10
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 11
             and all(.value.build == null
               and (.value.pull_policy == "missing" or .value.pull_policy == "if_not_present")
               and (.value.image | test("^ghcr\\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?:[0-9]+\\.[0-9]+\\.[0-9]+$")))' compose.json
           jq -e '.services | .["browser-worker"].image | contains("/text-extraction-browser:")' compose.json
-          TEXT_EXTRACTION_VERSION=0.1 docker compose -f docker-compose.yml -f docker-compose.release.yml config --format json \
-            | jq -e '.services.api.image == "ghcr.io/janschachtschabel/text-extraction:0.1"'
-          rm compose.json
+          jq -e '.services.api.ports == [{"mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp"}]' compose.json
+          jq -e '.networks.default.name == "text-extraction-web"' compose.json
+          TEXT_EXTRACTION_VERSION=0.1 API_PORT=127.0.0.1:8080 DOMAIN=api.example.org docker compose config --format json \
+            | jq -e '.services.api.image == "ghcr.io/janschachtschabel/text-extraction:0.1"
+              and .services.api.ports[0].host_ip == "127.0.0.1"
+              and .services.api.labels["traefik.http.routers.text-extraction.rule"] == "Host(`api.example.org`)"
+              and .services.init.environment.DOMAIN == "api.example.org"'
+          cp .env.example .env
+          docker compose config -q
+          rm .env compose.json
 
       # VALKEY_PASSWORD has no default: without it the file must be rejected.
       - run: |

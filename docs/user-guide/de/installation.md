@@ -46,40 +46,86 @@ uv run pre-commit install    # install the git hooks
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
 Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM) und ein
 Valkey mit Passwort. Es schaltet den Browser-Modus, OCR, die Transkription, die Behandlung
-personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein.
+personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein. Es gibt zwei
+Compose-Dateien:
+
+- `docker-compose.yml` startet die veröffentlichten Images von
+  `ghcr.io/janschachtschabel/text-extraction` (linux/amd64) und kommt ohne eine einzige Variable
+  aus: für einen Server und für Docker-Oberflächen wie den Docker Manager von Hostinger.
+- `docker-compose.build.yml` baut die Images aus Ihrem Checkout: für die Entwicklung.
+
+### Veröffentlichte Images
+
+```bash
+cp .env.example .env                           # optional: the file starts without it
+docker compose up -d --wait                    # public API on http://localhost:8080
+docker compose logs init                       # the generated admin key (admin_key), shown once
+KEY=$(docker compose run --rm -T init text-extraction-init --show-admin-key)
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
+```
+
+Beim ersten Start legt der einmalige Dienst `init` die Geheimnisse im Volume `secrets` an und
+behält sie danach: das Valkey-Passwort und einen Admin-API-Schlüssel. Der Schlüssel steht einmal
+im Log von `init`; der Befehl mit `--show-admin-key` oben gibt ihn jederzeit aus. Eigene Schlüssel
+gehören wie bisher in `API_KEYS` in `.env` (siehe unten); sie gelten zusammen mit dem erzeugten.
+Der interne Port 9090 (`/health`, `/ready`, `/metrics`) wird nicht veröffentlicht. Die Spielwiese
+liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
+
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.8`; `0.1`
+folgt der neuesten `0.1.x` nach `docker compose pull`, denn ein Image, das schon auf dem Rechner
+liegt, wird nicht erneut geladen). Diese Datei braucht `0.1.8` oder neuer: Ältere Images haben
+keinen Dienst `init`. Die Versionen und ihre Notizen stehen auf der
+[Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
+
+Für HTTPS trägt der Dienst `api` Labels für ein vorgeschaltetes Traefik (der VPS von Hostinger hat
+eines): Setzen Sie `DOMAIN` in `.env` auf den reinen Hostnamen, dessen DNS auf den Server zeigt,
+zum Beispiel `api.example.org`, ohne `https://`. `API_PORT=127.0.0.1:8080` hält Port 8080 dann
+auf dem Server selbst. Die [Konfigurationsreferenz](../../configuration.md#root-compose-file-published-images)
+(Englisch) beschreibt die Geheimnisse, die Traefik-Einstellungen und das Netz.
+
+### Hostinger-VPS
+
+Der Docker Manager eines Hostinger-VPS stellt die `docker-compose.yml` im Hauptordner direkt aus
+dem Repository bereit. Planen Sie einen VPS mit 8 GB Arbeitsspeicher oder mehr: Mit allen Workern
+braucht der Stack im Leerlauf etwa 6 GiB.
+
+1. Docker Manager, Compose, „Compose from URL“: `https://github.com/janschachtschabel/text-extraction`
+   eintragen, den vorgeschlagenen Namen (`text-extraction`) übernehmen und bereitstellen. Die erste
+   Bereitstellung lädt die Images und die Modelle (etwa 3 GB Modelle) und dauert einige Minuten.
+2. Die Logs des Projekts oder die Webkonsole öffnen und den Admin-Schlüssel aus dem Dienst `init`
+   nehmen (Ereignis `init_admin_key_created`).
+3. Das Projekt bearbeiten: `DOMAIN` in `.env` setzen (etwa den VPS-Hostnamen
+   `srvNNNNNN.hstgr.cloud` oder Ihre eigene Domain mit einem A-Eintrag auf den VPS), wahlweise
+   `API_PORT=127.0.0.1:8080`, dann erneut bereitstellen. Das Zertifikat holt Traefik selbst.
+   Solange `DOMAIN` leer ist, zeigt das Traefik-Log einen Fehler zu einer leeren `Host()`-Regel:
+   Der ist harmlos.
+4. `https://<DOMAIN>/ui` öffnen und mit dem Schlüssel anmelden.
+
+Eine fehlgeschlagene Bereitstellung zeigt nur „Bereitstellung fehlgeschlagen“ oder „Projekt nicht
+gefunden“; die Webkonsole (eine Root-Shell) zeigt die eigentliche Meldung:
+
+```bash
+cat /docker/text-extraction/.build.log                 # the real error of a failed deploy
+cd /docker/text-extraction && docker compose logs init  # the admin key
+docker compose run --rm -T init text-extraction-init --show-admin-key
+```
+
+### Aus dem Checkout bauen
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
 KEY=$(openssl rand -hex 32)                    # your API key: keep it
 printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build -d --wait          # public API on http://localhost:8080
-curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
+docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
 `API_KEYS` enthält den SHA-256 jedes Schlüssels, nie den Schlüssel selbst. `.env.example` hat einen
 Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; [API-Schlüssel](usage.md#api-schlüssel)
-erklärt die Schlüssel und ihre Rollen. Der interne Port 9090 (`/health`, `/ready`, `/metrics`)
-wird nicht veröffentlicht. Die Spielwiese liegt unter http://localhost:8080/ui und der
-MCP-Endpunkt unter http://localhost:8080/mcp.
-
-### Veröffentlichte Images
-
-Statt die Images selbst zu bauen, kann Compose eine veröffentlichte Version von
-`ghcr.io/janschachtschabel/text-extraction` starten (linux/amd64). Die Datei
-`docker-compose.release.yml` ersetzt jeden Build durch das veröffentlichte Image; `.env` bleibt
-gleich, und die Schalter funktionieren wie unten beschrieben.
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
-```
-
-`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.7`; `0.1`
-folgt der neuesten `0.1.x` nach `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
-denn ein Image, das schon auf dem Rechner liegt, wird nicht erneut geladen). Die Versionen und ihre Notizen stehen auf der
-[Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
+erklärt die Schlüssel und ihre Rollen. Diese Datei hat keinen Dienst `init`: Sie braucht `API_KEYS`
+und `VALKEY_PASSWORD` in `.env`.
 
 ### Optionale Worker
 
@@ -96,7 +142,8 @@ Schalter in `.env`, der standardmäßig `true` ist:
 Der erste Start lädt die Modelle in Volumes (zusammen etwa 3 GB); mit allen Workern braucht der
 Stack im Leerlauf etwa 6 GiB Arbeitsspeicher. Um ohne einen Worker zu starten, setzen Sie seinen
 Schalter in `.env` auf `false` und lassen seine Dienste weg, zum Beispiel
-`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0`. Eine `.env`, die
+`docker compose up -d --wait --scale docling-models=0 --scale docling-worker=0` (für die
+Build-Datei mit `-f docker-compose.build.yml`). Eine `.env`, die
 aus einer älteren `.env.example` kopiert ist, hat die Schalter noch auf `false`: Setzen Sie sie auf `true`.
 
 Der LLM-Worker braucht `LLM_BASE_URL` und `LLM_MODEL` eines OpenAI-kompatiblen Endpunkts und einen

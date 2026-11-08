@@ -11,7 +11,7 @@ Englisch.
 
 ## Status
 
-Prototyp `v0.1.7`: Die Pakete 0 bis 19 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.8`: Die Pakete 0 bis 19 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
@@ -43,27 +43,26 @@ Siehe [Website-Regeln](docs/user-guide/de/site-rules.md) und
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
 Browser-Worker, die optionalen Worker für OCR, Transkription, personenbezogene Daten und das LLM
 (ihr erster Start lädt etwa 3 GB Modelle) und ein Valkey (mit Passwort) für den gemeinsamen Zustand.
+Die `docker-compose.yml` im Hauptordner startet die veröffentlichten Images und braucht keine
+Variablen: Ihr Dienst `init` legt beim ersten Start das Valkey-Passwort und einen
+Admin-API-Schlüssel an.
 
 ```bash
-cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-KEY=$(openssl rand -hex 32)                    # your API key: keep it
-printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
-openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build -d --wait          # public API on http://localhost:8080
+docker compose up -d --wait                    # public API on http://localhost:8080
+KEY=$(docker compose run --rm -T init text-extraction-init --show-admin-key)
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-`.env.example` hat einen Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; siehe
-[API-Schlüssel](docs/user-guide/de/usage.md#api-schlüssel). Die Spielwiese liegt unter
-http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
-[Installation](docs/user-guide/de/installation.md) beschreibt die lokale Einrichtung mit uv, die
-optionalen Worker (OCR, personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die
-wichtigsten Einstellungen.
-Ohne Build startet `docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait`
-die veröffentlichten Images: siehe
-[Veröffentlichte Images](docs/user-guide/de/installation.md#veröffentlichte-images).
+Die Spielwiese liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter
+http://localhost:8080/mcp; Sie melden sich mit dem Schlüssel an. Der Docker Manager von Hostinger
+stellt dieselbe Datei über die URL dieses Repositorys bereit: siehe
+[Hostinger-VPS](docs/user-guide/de/installation.md#hostinger-vps).
+[Installation](docs/user-guide/de/installation.md) beschreibt HTTPS mit `DOMAIN`, eigene
+Schlüssel ([API-Schlüssel](docs/user-guide/de/usage.md#api-schlüssel)), das Bauen der Images mit
+`docker-compose.build.yml`, die lokale Einrichtung mit uv, die optionalen Worker (OCR,
+personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die wichtigsten Einstellungen.
 
 ## Anwendungsfälle
 
