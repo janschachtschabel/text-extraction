@@ -25,7 +25,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Operations | Funktionen | Die Liste der Tabs. |
 | Advanced | Erweitert | Der zugeklappte Abschnitt eines Formulars mit „Optionen (JSON)“ und, wo das Formular es hat, „Sekunden warten, bevor daraus ein Job wird“. |
 | Show source | Quelltext anzeigen | Der zugeklappte Abschnitt eines Markdown-Ergebnisses, der den Markdown-Text zeigt. |
-| Site rules | Website-Regeln | Die Wahl in drei Stufen in der Spielwiese: Regeln beachten, nur prüfen und melden oder Prüfung aus. |
+| Site rules | Website-Regeln | Die Wahl in drei Stufen in der Spielwiese: Regeln einhalten, nur prüfen und melden oder Prüfung aus. |
 | Respect the site's rules | Regeln der Website einhalten | `compliance: enforce`: robots.txt und der TDM-Nutzungsvorbehalt werden geprüft, und eine Seite, die sie sperren, wird nicht extrahiert. Die Standardstufe des Betreibers trägt in der Spielwiese den Zusatz „(Standard)“. |
 | Check and report only | Nur prüfen und melden | `compliance: report`: Die Prüfungen laufen und werden gemeldet, aber nichts wird gesperrt. |
 | Checks off (contract partners) | Prüfung aus (Vertragspartner) | Die Stufe der Spielwiese für Websites, die die Extraktion vertraglich erlaubt haben: `compliance: ignore`; mit Entsperrmodus ist es die maximale Extraktion. |
@@ -77,6 +77,7 @@ Begriffe der API und dieser Anleitung.
 | playground | Spielwiese | Die Weboberfläche unter `/ui`. |
 | result envelope | Ergebnis-Envelope | Die Form jeder Antwort: `status`, `data`, `error`. |
 | maximum extraction | maximale Extraktion | `compliance: ignore` mit Entsperrmodus, für Vertragspartner. |
+| browser mode | Browser-Modus | Seiten, die JavaScript brauchen, werden in Chromium gerendert (`BROWSER_ENABLED`; `mode: browser` und der Fallback von `auto`). |
 | unblock browser | Entsperr-Browser | Der getarnte Chrome des Entsperrmodus. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | Der Vorbehalt einer Website gegen Text- und Data-Mining. |
 | page type | Seitentyp | Die Art einer Seite (`page_type`), etwa Inhalt, Übersicht oder Impressum; nach Regeln bestimmt. |

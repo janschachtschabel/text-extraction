@@ -9,7 +9,7 @@ Schlüssel, der es wählen darf, kann sie mit `compliance: ignore` abschalten. D
 Standard, die maximale Extraktion, die Pause, um die ein Host bitten kann, und wie Sie in der API,
 im MCP-Server und in der Spielwiese wählen.
 
-## Die Regeln der Website beachten
+## Die Regeln der Website einhalten
 
 Das ist der Standard. Der Dienst:
 
@@ -129,7 +129,7 @@ Prüfungen also für jeden Lauf und nicht nur für die ganze Installation:
 - Ein Batch: `compliance` im Body von `POST /v1/batch`. Der eine Wert gilt für alle seine
   URLs.
 - Ein Website-Lauf: `compliance` im Body von `POST /v1/site-structure`. Es gilt für den ganzen Lauf.
-- MCP: `compliance` gehört in `options` des Werkzeugs.
+- MCP: `compliance` gehört in `options` des Tools.
 
 Ein Schlüssel darf nur wählen, was ihm erlaubt ist: Ein Admin wählt alle drei Werte; ein anderer
 Schlüssel wählt `enforce` oder `report`, solange der Betreiber Überschreibungen erlaubt

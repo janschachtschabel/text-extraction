@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-08
+
 ### Changed
 
 - docker compose starts the ASR worker by default: transcription of audio and video uploads and
@@ -21,6 +23,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `PII_ENABLED` and `LLM_ENABLED` are `true` in compose and `.env.example`. Each switch at `false`,
   with `--scale` of the feature's services to 0, switches a feature off. The LLM still needs a key
   (`LLM_API_KEY` or the caller's `X-LLM-Api-Key`). The Helm chart is unchanged.
+- uv is pinned to the Dockerfile's minor (`[tool.uv] required-version = ">=0.11,<0.12"`), and
+  Dependabot ignores `uv-build` until uv and uv_build are raised together.
+- A test checks that every `.env.example` and Helm `config:` value equals its `Settings` default,
+  apart from a documented allow-list.
+- Dependencies: fastmcp 4.1.3, openai 3.37.0, patchright 1.64.2, reportlab 5.1.0 (#47); GitHub
+  Action astral-sh/setup-uv 10.3.2 (#46).
 
 ### Added
 
@@ -39,21 +47,69 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by
   default; a feature the service has switched off is disabled with a hint naming its switch, and
   the LLM choices say when the caller's LLM key is needed.
+- Helm: optional PodDisruptionBudgets (`podDisruptionBudget.enabled`, `maxUnavailable: 1`) for the
+  API and every worker pool with more than one replica; on in the production example.
 
 ### Fixed
 
+- ASR off no longer breaks the worker: with `ASR_ENABLED=false`,
+  `text-extraction-asr-worker --download-models` and `--check` exit 0 without a model (log event
+  `asr_disabled`), and the worker idles on `/health` and `/ready` without loading a model or
+  taking queue items; in docker compose the ASR services then idle.
+- The site tree's rule checks are bounded: rule files are loaded only for the sites the crawl
+  itself visited (a site that a sitemap or a link merely names is read from the cache, else shown
+  as not checked), the tree judges with the first 1,000 rules of each robots.txt and ai.txt user
+  agent and the first 1,000 tdmrep.json entries (a fetch still reads the whole file), the
+  judgement runs on a thread of its own within 1 s (a view that cannot get it shows the sites as
+  not checked instead of waiting behind conversions), and a live refresh judges only the URLs
+  that are new. A hostile 500 KiB rule file cost a view about 5 s of CPU, at every refresh. tdmrep.json
+  is parsed off the event loop and once per file text, like robots.txt. A sitemap entry without a type no longer clears the type a link
+  text gave a URL in the tree.
+- `discovery: sitemap_first` no longer trusts a `Sitemap:` line in robots.txt blindly: the first
+  listed sitemap is probed like the guessed addresses, and one that answers 404 or is no sitemap
+  (an HTML page) counts as absent, so the page's links are crawled instead of being left unvisited.
+- Page types: a schema.org `Event`, `Course`, `Quiz` or `LearningResource` makes a page `event` or
+  `learning_material` only as the page's one main entity (the `mainEntity` of its `WebPage`, its
+  only such JSON-LD node, or microdata on `<html>`, `<body>`, `<main>` or `<article>`), and only
+  an address that is a type name alone (such as `/impressum` or `/de/impressum`) wins over it, so
+  `/kurse/datenschutz` with one `Course` stays `learning_material` as in 0.1.6. An article with an
+  event in its sidebar stays `content`, and a page of several events is not typed `event` by
+  schema.org (it is `listing` when it is mostly links). An article (`og:type` `article`, enough
+  words) below a type name with a slug of words, such as `/datenschutz/schuelerfotos-im-unterricht`, is `content`. A
+  link text such as "Anmelden" or "Datenschutz" no longer types a linked URL whose last part is a
+  slug of words, and in the site tree it never replaces a sitemap's default "Content", so "Select
+  content pages" keeps such pages checked.
+- PHP error removal keeps a message that the page quotes: in a quote, a heading, a list item, a
+  table cell, a definition list or a figure caption only the `html_errors` form (bold label and
+  bold path) is removed, and a message copied as plain text stays in `content`. It now also
+  recognises Drupal paths (`.module`, `.theme`, `.install`, `.engine`) and removes Xdebug's
+  message tables, each listed once in `data.server_errors`.
+- Rolling upgrades from 0.1.5: a site job with the default `discovery: crawl` no longer stores
+  `discovery`, so pods of 0.1.5 read it; only `discovery: sitemap_first` needs every pod on the new
+  release. Results read a page type, a link category or a `crawl` value of a later release as
+  `other`, `content` and `listed` instead of failing, so later new values need no upgrade order;
+  requests still refuse unknown values (422) and the OpenAPI spec is unchanged.
 - The playground names switched-off transcription ("Transcription is switched off in this
   service") instead of "This kind of content cannot be converted" when an audio or video upload
   or `transcribe: true` meets a service without ASR.
 - A short transcript is a `success`, not `partial` with `content_too_short`: subtitles, the
   transcript view and a transcription are all that the media says, so `QUALITY_MIN_WORDS` does
   not apply to them (a 27-word video was marked partial).
+- Playground: on a phone the site tree's checkbox, path and page count no longer overlap from
+  about level 6 (the indentation stops at 6rem, a page count or title moves under its path, a wide
+  type pill ends in an ellipsis), and every checkbox keeps its target size; a long file path in
+  "Server errors" wraps instead of widening the page; the status column's title holds the whole
+  status and error code; paths, titles and link texts are bidi isolates, so a right-to-left
+  override cannot reorder the text around them; the note on blocked URLs names only the "Site
+  rules" choices the caller is offered; "The total grows while it crawls" shows only while the
+  crawl runs. German: the "Checks off" hint says „die Grenzen für ausgehende Anfragen“ like its
+  siblings.
 
 ## [0.1.6] - 2026-11-07
 
 Package 18: the site tree after the v0.1.5 test (plan
 [docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md](docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md)).
-API changes: the site option `discovery`, the field `SiteNode.guess`, the field
+API changes: the site option `discovery`, the fields `SitemapEntry.type_guess` and
 `SitemapInfo.type_hint` and the page types `event` and `learning_material`.
 
 ### Added
@@ -100,9 +156,11 @@ API changes: the site option `discovery`, the field `SiteNode.guess`, the field
 
 ### Upgrade
 
-- A stored site job carries `discovery`. During a rolling update an old pod may reject a site job
-  that a new pod created (the job fails or is retried): finish the rollout before creating site
-  jobs, or accept that.
+- Update the API pods first, then the workers. Pods of 0.1.5 and older cannot read results with
+  the page types `event` or `learning_material` or a link with `crawl: sitemap_first` (extract,
+  batch and site jobs), and they refuse every site job of 0.1.6, which stores `discovery` also at
+  its default `crawl` (0.1.7 stores it only for `sitemap_first`). Create site jobs only once every
+  pod runs 0.1.6 (see `docs/configuration.md`, "Upgrading to 0.1.6 or 0.1.7").
 
 ## [0.1.5] - 2026-11-06
 
@@ -115,7 +173,7 @@ The only API change is the new warning code `server_errors_removed` and the opti
 
 - PHP error output that a site prints into its pages (`Warning`, `Notice`, `Deprecated`,
   `Fatal error` and the like, "in /path.php on line N") is removed from the text, except inside
-  `pre`, `code`, `textarea` and `script`. The result carries the warning `server_errors_removed`
+  `pre`, `code`, `kbd`, `samp`, `tt`, `var`, `textarea` and `script`. The result carries the warning `server_errors_removed`
   and the new optional field `data.server_errors` (level, message, file, line, count; at most 50,
   identical messages merged; null when there are none). The playground lists them in a closed
   section after "Images".
@@ -483,3 +541,13 @@ tag.
 - A full 4,000-URL regression run against the WLO set. The `live` workflow takes a `mode` input
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
+
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/janschachtschabel/text-extraction/releases/tag/v0.1.0

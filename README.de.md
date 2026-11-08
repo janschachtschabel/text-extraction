@@ -11,13 +11,13 @@ Englisch.
 
 ## Status
 
-Prototyp `v0.1.6`: Die Pakete 0 bis 18 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.7`: Die Pakete 0 bis 19 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
-Seitentypen, neue Gestaltung des Playgrounds, robots.txt-Markierungen im Seitenbaum mit einem
-Schalter für die Website-Regeln pro Lauf, Korrekturen am Playground nach dem Test von v0.1.4,
-Seitenbaum mit Typen, Spalten und schnellem Lesen der Sitemap). Die Pakete und ihren Stand zeigt
+Seitentypen, neue Gestaltung der Spielwiese, robots.txt-Markierungen im Website-Baum mit einem
+Schalter für die Website-Regeln pro Lauf, Korrekturen an der Spielwiese nach dem Test von v0.1.4,
+Website-Baum mit Typen, Spalten und schnellem Lesen der Sitemap, Zusatzfunktionen standardmäßig an). Die Pakete und ihren Stand zeigt
 [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion

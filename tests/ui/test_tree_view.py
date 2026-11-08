@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from tests.ui.site_items import page_item, sitemap_item
 from tests.ui.test_jobs_views import ORIGIN, fake_reads, show_tree, texts, tree
+from text_extraction.envelope import ErrorCode
 
 SITE = [
     page_item(
@@ -185,3 +186,59 @@ def test_a_section_shows_its_pages_and_type(rendered: Any) -> None:
         pill.get("class").split()
     )  # the sitemap page is guessed
     assert docs.get("data-type") is None
+
+
+# --- the status title and bidi isolation (third audit U2, U3) -------------------------------------
+
+RLO_TEXT = "‮Free download gnp.exe"
+FAILING = [
+    page_item(
+        0,
+        f"{ORIGIN}/",
+        title="Home",
+        depth=0,
+        links=((f"{ORIGIN}/p/12345", "depth", None, RLO_TEXT),),
+    ),
+    page_item(1, f"{ORIGIN}/gone", error=ErrorCode.TARGET_HTTP_ERROR),
+]
+
+
+@pytest.fixture
+def failing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Any:
+    fake_reads(monkeypatch, len(FAILING), lambda offset, limit: FAILING[offset : offset + limit])
+    return lambda language="en": tree(show_tree(client, language=language))
+
+
+@pytest.mark.parametrize(
+    ("language", "failed", "succeeded"),
+    [
+        ("en", "failed: target_http_error", "success"),
+        ("de", "fehlgeschlagen: target_http_error", "erfolgreich"),
+    ],
+)
+def test_the_status_cell_has_the_whole_status_in_its_title(
+    failing: Any, language: str, failed: str, succeeded: str
+) -> None:
+    """The narrow status column cuts a long error code: its title holds status and code."""
+    root = failing(language)
+
+    [gone] = leaf(root, "/gone").xpath(".//div[@class='cell-status']")
+    assert gone.get("title") == failed
+    [home] = leaf(root, "/").xpath(".//div[@class='cell-status']")
+    assert home.get("title") == succeeded
+    [linked] = leaf(root, "/p/12345").xpath(".//div[@class='cell-status']")
+    assert linked.get("title") is None  # nothing to show: no status, no code
+
+
+@pytest.mark.parametrize(("language", "quoted"), [("en", "“{}”"), ("de", "„{}“")])
+def test_a_link_text_is_isolated_inside_its_quotes(
+    failing: Any, language: str, quoted: str
+) -> None:
+    """A right-to-left override in a link text cannot turn the quotes around it."""
+    root = failing(language)
+
+    [linked] = leaf(root, "/p/12345").xpath(".//span[contains(@class, 'title-link')]")
+    [isolate] = linked.xpath("./bdi")
+    assert isolate.text_content() == RLO_TEXT
+    assert linked.text_content() == quoted.format(RLO_TEXT)
+    assert linked.get("title") == quoted.format(RLO_TEXT)

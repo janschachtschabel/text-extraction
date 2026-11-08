@@ -5,21 +5,31 @@ import asyncio
 import time
 from typing import Any, cast
 
+import pytest
 from fakeredis import FakeAsyncRedis
 
 from tests.test_compliance import FakeFetcher, result
 from tests.ui.site_items import page_item, pending_item, robots_item, sitemap_item
-from text_extraction.compliance import ComplianceChecker, ComplianceReport, OriginRules
+from text_extraction.compliance import (
+    BlockReason,
+    ComplianceChecker,
+    ComplianceReport,
+    OriginRules,
+)
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import Fetcher
 from text_extraction.job_models import JobItem
 from text_extraction.settings import Settings
 from text_extraction.ui.site_tree import (
     MAX_SECTION_DEPTH,
+    NON_CONTENT_TYPES,
     TREE_MAX_SOCIAL,
     SiteTree,
+    TreeBuilder,
     TreeNode,
+    apply_judgement,
     build_tree,
+    judge_leaves,
     leaf_origins,
     mark_blocked,
 )
@@ -725,3 +735,160 @@ def test_sections_count_their_pages_and_share_a_type() -> None:
     # A fetched leaf without a type (failed page) leaves the section without one.
     assert (sections["fetched/"].pages, sections["fetched/"].section_type) == (2, None)
     assert (root.pages, root.section_type) == (7, None)
+
+
+def test_a_link_text_never_overrides_a_sitemap_content_guess() -> None:
+    """Third audit A3: a sitemap entry guessed ``content`` stays content (and so ticked by
+    "Select content pages") when a page links it with a type word such as "Datenschutz"."""
+    url = f"{ORIGIN}/medien/"
+    entry = {"loc": url}
+    link = ((url, "depth", None, "Datenschutz"),)
+    stored = {"loc": url, "type_guess": "content"}
+    orders = [
+        [sitemap_item(0, f"{ORIGIN}/sitemap.xml", [entry]), page_item(1, f"{ORIGIN}/", links=link)],
+        [page_item(0, f"{ORIGIN}/", links=link), sitemap_item(1, f"{ORIGIN}/sitemap.xml", [entry])],
+        [
+            sitemap_item(0, f"{ORIGIN}/sitemap.xml", [stored]),
+            page_item(1, f"{ORIGIN}/", links=link),
+        ],
+    ]
+    for items in orders:
+        node = _by_url(build_tree(items, max_urls=10))[url]
+        assert (node.kind, node.page_type, node.type_reason) == ("sitemap", "content", "default")
+        assert node.page_type not in NON_CONTENT_TYPES
+        assert node.title == "Datenschutz"
+
+
+def test_a_link_text_still_types_a_url_known_only_from_links() -> None:
+    url = f"{ORIGIN}/medien/"
+    items = [
+        page_item(
+            0,
+            f"{ORIGIN}/",
+            links=((url, "depth", None, "Mehr"), (url, "depth", None, "Datenschutz")),
+        )
+    ]
+    node = _by_url(build_tree(items, max_urls=10))[url]
+    assert (node.kind, node.page_type, node.type_reason) == ("linked", "privacy", "link_text")
+
+
+def test_a_slug_linked_as_a_type_word_stays_content_in_the_tree() -> None:
+    url = f"{ORIGIN}/themen/medienbildung-und-privatsphaere"
+    items = [
+        sitemap_item(0, f"{ORIGIN}/sitemap.xml", [{"loc": url}]),
+        page_item(1, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)),
+    ]
+    node = _by_url(build_tree(items, max_urls=10))[url]
+    assert (node.page_type, node.type_reason) == ("content", "default")
+
+
+def test_a_sitemap_guess_merged_into_a_held_link_replaces_its_link_text_guess() -> None:
+    """With the sitemap source full, an entry merges into the link held for the same URL; the
+    sitemap's default still beats the link text (AU3-R2)."""
+    url = f"{ORIGIN}/medien/"
+    builder = TreeBuilder(max_urls=1)
+    builder.add(page_item(0, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)))
+    builder.add(
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/andere/"}, {"loc": url}])
+    )
+    [held] = builder._sources[2].values()
+    assert held.url == url
+    assert (held.page_type, held.type_reason, held.from_sitemap) == ("content", "default", True)
+
+
+def test_a_sitemap_entry_without_a_guess_keeps_a_held_links_text_guess() -> None:
+    """An entry with no type (an id-shaped URL) merged into the link held for it leaves the
+    link's guess: "type open" never replaces a guess."""
+    url = f"{ORIGIN}/12345"
+    builder = TreeBuilder(max_urls=1)
+    builder.add(page_item(0, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)))
+    builder.add(
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/andere/"}, {"loc": url}])
+    )
+    [held] = builder._sources[2].values()
+    assert held.url == url
+    assert (held.page_type, held.type_reason, held.from_sitemap) == ("privacy", "link_text", True)
+
+
+# --- rule checks: origins the job contacted, judgements reused (third audit S1, S2) -------------
+
+
+def test_contacted_names_the_origins_of_the_jobs_own_items() -> None:
+    redirected = page_item(1, "http://moved.example/a")
+    assert redirected.result is not None
+    assert redirected.result.data is not None
+    redirected.result.data.final_url = "https://new.example/a"
+    items = [
+        page_item(0, f"{ORIGIN}/", depth=0, links=(("https://linked.example/x", "depth"),)),
+        redirected,
+        robots_item(2, f"{ORIGIN}/robots.txt"),
+        sitemap_item(
+            3,
+            "https://maps.example:8443/sitemap.xml",
+            [{"loc": f"https://foreign-{i}.example:{8000 + i}/p"} for i in range(30)],
+        ),
+        pending_item(4, "https://queued.example/q"),
+    ]
+
+    tree = build_tree(items, max_urls=100)
+
+    assert tree.contacted == {
+        ORIGIN,
+        "http://moved.example",
+        "https://new.example",
+        "https://maps.example:8443",
+        "https://queued.example",
+    }
+    assert "https://foreign-0.example:8000" in leaf_origins(tree)
+
+
+def test_mark_blocked_reuses_judgements_and_records_new_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+    judged_urls: list[str] = []
+    real = OriginRules.judge
+
+    def counting(self: OriginRules, url: str, mode: Any) -> Any:
+        judged_urls.append(url)
+        return real(self, url, mode)
+
+    monkeypatch.setattr(OriginRules, "judge", counting)
+    known: dict[str, BlockReason | None] = {f"{ORIGIN}/sammlung/_page2": None}  # judged before
+
+    marked = mark_blocked(tree, {ORIGIN: rules}, judged=known)
+
+    assert sorted(judged_urls) == [f"{ORIGIN}/sammlung/", f"{ORIGIN}/sammlung/_page3"]
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": None,
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+    assert known == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": None,
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+
+
+def test_judge_leaves_is_pure_and_apply_judgement_marks() -> None:
+    """The judgement (on a pool thread) only reads the tree; the marks are applied apart."""
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+    before = [(node.url, node.blocked) for node in _leaves(tree)]
+
+    judgement = judge_leaves(tree, {ORIGIN: rules})
+
+    assert [(node.url, node.blocked) for node in _leaves(tree)] == before
+    assert judgement.reasons == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": "robots",
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+    assert judgement.cut == frozenset()
+    marked = apply_judgement(tree, {ORIGIN: rules}, judgement)
+    assert (marked.blocked, marked.unchecked) == (2, ())
+    late = judge_leaves(tree, {ORIGIN: rules}, deadline=time.monotonic() - 1)
+    assert (late.reasons, late.cut) == ({}, frozenset({ORIGIN}))

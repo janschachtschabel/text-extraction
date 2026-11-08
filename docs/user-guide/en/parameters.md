@@ -25,8 +25,8 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
 | `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0`: a job at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
 | `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. The action `evaluate` (JavaScript) is for admin keys only; any other key gets 403. |
-| `cookies` | list of objects | empty | Cookies for the requested site. Not with `mode: fast`. |
-| `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
+| `cookies` | list of objects | empty | Cookies for the requested site, at most 50. Not with `mode: fast`. |
+| `headers` | object | empty | Request headers for the requested site, at most 20 (each value at most 4096 characters). Not with `mode: fast`. |
 | `screenshot` | boolean | `false` | Also capture a screenshot, a PNG unless `screenshot_options` says otherwise. Not with `mode: fast`. |
 | `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
 | `screenshot_options` | object | unset | Viewport size, image format and size of the screenshot: `viewport` (`{"width", "height"}`, default 1920×1080), `format` (`png`, `jpeg` or `webp`), `quality` (1 to 100, only for `jpeg` and `webp`) and `width` (scales down, at most the viewport's width). Needs `screenshot`, so it is refused with `mode: fast`. |
@@ -149,7 +149,7 @@ over HTTP only, without their text.
 | `depth` | integer, 0 to `SITE_MAX_DEPTH` | `2` | How many links deep the crawl goes from the start page; `0`: the start page and the sitemaps only. |
 | `max_pages` | integer, 1 to `SITE_MAX_PAGES` | `100` | Most pages, the start page included. |
 | `sitemaps` | boolean | `true` | Read robots.txt and the sitemaps it lists (or `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml` in turn). |
-| `discovery` | `crawl` or `sitemap_first` | `crawl` | `crawl` follows links up to `depth` and `max_pages`. `sitemap_first`: when robots.txt lists a sitemap or a guessed sitemap address answers, only the start page is crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs `sitemaps: true` (422 otherwise). |
+| `discovery` | `crawl` or `sitemap_first` | `crawl` | `crawl` follows links up to `depth` and `max_pages`. `sitemap_first`: when robots.txt lists a sitemap that answers as one, or a guessed sitemap address does, only the start page is crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs `sitemaps: true` (422 otherwise). |
 | `scope` | `host` or `path` | `host` | Which links are followed: `host` the start page's host, `path` only URLs under the start URL's directory. |
 | `metadata` | boolean | `true` | Include each page's metadata. |
 | `cache` | boolean | `true` | Use the result cache for pages. |

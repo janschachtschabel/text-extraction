@@ -593,14 +593,16 @@ def test_structured_keeps_its_whole_deadline_after_descriptions(
     original = post_module._extract
 
     async def slow(*args: Any, **kwargs: Any) -> None:
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(3.3)
         await original(*args, **kwargs)
 
     monkeypatch.setattr(post_module, "_extract", slow)
     serve_llm(httpserver, lambda _body, _n: described(PICTURE), extraction=answer({"price": 19.99}))
-    images = FakeImages(slow={image_url(0): 0.4})
+    images = FakeImages(slow={image_url(0): 1.0})
     case = Case(settings_for(httpserver), images=images)
-    case.runner.deadline_seconds = 1.0  # describe_seconds 0.5: 1.5 s in all
+    # describe_seconds 2.0: 6 s in all. The image (1 s) and the structured work (3.3 s) each fit
+    # their own budget with a margin a loaded runner keeps; together they exceed the 4 s deadline.
+    case.runner.deadline_seconds = 4.0
 
     result = asyncio.run(case.run(draft=page_envelope(1), describe=DESCRIBE))
 

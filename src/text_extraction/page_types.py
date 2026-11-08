@@ -15,17 +15,29 @@ its signals, strongest first (ruling P14-S4):
    the outermost microdata scope says ``ContactPage``, ``AboutPage``, ``SearchResultsPage`` or
    ``CollectionPage``.
 4. ``url_type`` (imprint, privacy, legal, auth, search, contact, about, listing).
-5. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
+5. schema.org: the page's one main entity is an ``Event`` (or a type ending in ``Event``), a
+   ``LearningResource``, a ``Quiz`` or a ``Course`` (``event``, ``learning_material``). The main
+   entities are the ``mainEntity`` of a ``*Page`` node, else every JSON-LD node; failing a
+   JSON-LD entity, the microdata scopes on ``<html>``, ``<body>``, ``<main>`` or ``<article>``
+   outside ``<aside>``, ``<nav>``, ``<header>`` and ``<footer>``. Only entities that are an
+   article (a type ending in ``Article``, or ``BlogPosting``, ``SocialMediaPosting``,
+   ``DiscussionForumPosting``, ``LiveBlogPosting``), an event or a learning resource count;
+   there has to be exactly one, and it must not be an article (AU3-R5). It ranks above ``url``
+   unless the path, after an optional language code, is only the type name (``/impressum``,
+   ``/de/datenschutz/``): ``/kurse/datenschutz`` with a main ``Course`` is ``learning_material``.
+6. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
    followed by nothing (a trailing colon aside) or a separator other than a colon, or ends with
    one after a separator;
    the first ``<h1>`` is the name of a type and nothing else (A26-R4).
-6. ``auth``: a password input on a thin page.
-7. ``listing``: ``rel="next|prev"``, or a page that is mostly links.
-8. ``content`` when the extracted content has enough words, else ``other``.
+7. ``auth``: a password input on a thin page.
+8. ``listing``: ``rel="next|prev"``, or a page that is mostly links.
+9. ``content`` when the extracted content has enough words, else ``other``.
 
 An article (``og:type`` is ``article``) with enough words drops the votes of the title, the
 ``<h1>``, the pagination, the link density and a ``url`` vote for ``listing`` before the winner
-is chosen (A26-R5); a ``url`` vote for another type and schema.org stay.
+is chosen (A26-R5); a ``url`` vote for another type and schema.org stay. For such an article a
+type name as the first path segment does not count when the last segment is a slug of words
+(``/datenschutz/schuelerfotos-im-unterricht``; AU3-R3).
 
 ``PageTypeInfo.signals`` lists every signal that agrees with the winner, also those that rank
 lower, in the order of ``PageSignal``. ``og_type`` (``og:type`` is ``article``) only ever agrees
@@ -42,12 +54,13 @@ imported for typing only): ``convert.links`` imports ``LinkCategory`` from here,
 import json
 import re
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, get_args
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from lxml.html import HtmlElement
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from text_extraction.structured.rules import parse_page
 
@@ -85,6 +98,31 @@ LinkCategory = Literal[
     "download",
     "nav",
 ]
+
+
+def unknown_as(literal: Any, catch_all: str) -> BeforeValidator:
+    """A validator that reads a string outside ``literal`` as ``catch_all`` (ruling AU3-R1).
+
+    For the result models only: results are read back from Valkey and the cache by pods of other
+    releases, so a reader maps a value that a later release added to the type's catch-all
+    instead of failing. Pure (no log). Anything else is left to the Literal, and the JSON schema
+    stays the Literal's enum. Request models keep the plain Literal, so an unknown value there is
+    still 422."""
+    known = frozenset(get_args(literal))
+    if catch_all not in known:
+        raise ValueError(f"{catch_all!r} is not a value of {literal!r}")
+
+    def read(value: object) -> object:
+        return catch_all if isinstance(value, str) and value not in known else value
+
+    return BeforeValidator(read)
+
+
+# The result-side readers of ``PageType`` and ``LinkCategory``: an unknown page type is
+# ``other``, an unknown link category ``content`` (what ``link_category`` answers for a link no
+# rule names).
+TolerantPageType = Annotated[PageType, unknown_as(PageType, "other")]
+TolerantLinkCategory = Annotated[LinkCategory, unknown_as(LinkCategory, "content")]
 PageSignal = Literal[
     "status",
     "soft_404",
@@ -264,6 +302,8 @@ _PAGE_PARAMETERS: Final = frozenset({"page", "seite"})
 _PAGE_SEGMENTS: Final = frozenset({"page", "seite"})
 _FILE_EXTENSION = re.compile(r"\.(?:html?|php|aspx?)$")
 _INDEX_FILE = re.compile(r"^index\.(?:html?|php)$", re.IGNORECASE)
+# Two letters in a row: a part of a slug that is a word (AU3-R2).
+_TWO_LETTERS = re.compile(r"[^\W\d_]{2}")
 # A language code as a path segment, with an optional region (``de``, ``de-at``, ``pt_BR``).
 _LANGUAGE_SEGMENT = re.compile(r"^(?P<language>[a-z]{2})(?:[-_][a-z]{2})?$", re.IGNORECASE)
 # Empty, ``/``, ``/index.html``, and a language code in front (``/de``, ``/en/``, ``/de-at/``).
@@ -302,12 +342,24 @@ def _site_language(segment: str) -> str | None:
     return match["language"].lower()
 
 
-def _segment_types(stems: list[str]) -> set[PageType]:
+def _without_language(stems: list[str]) -> list[str]:
+    """``stems`` without a leading language code, which does not count as a segment."""
+    return stems[1:] if stems and _site_language(stems[0]) is not None else stems
+
+
+def _is_word_slug(stem: str) -> bool:
+    """Parts joined by ``-`` (``_`` is read as ``-``), at least two of which hold two letters in a
+    row: ``schuelerfotos-im-unterricht``, ``oer-einfuehrung``, ``mathe-workshop-2026``; not
+    ``seite-2``, ``123`` or a UUID (AU3-R2, AU3-R3)."""
+    return sum(1 for part in stem.split("-") if _TWO_LETTERS.search(part)) >= 2
+
+
+def _segment_types(stems: list[str], *, first_segment: bool = True) -> set[PageType]:
     """The types the path segments say by their position (A26-R2): a listing name with at most
     one segment after it, an ambiguous name as the only segment, any other name as the first or
-    the last segment; a leading language code does not count as a segment."""
-    if stems and _site_language(stems[0]) is not None:
-        stems = stems[1:]
+    the last segment (as the first only with ``first_segment``); a leading language code does not
+    count as a segment."""
+    stems = _without_language(stems)
     found: set[PageType] = set()
     last = len(stems) - 1
     for index, stem in enumerate(stems):
@@ -318,7 +370,7 @@ def _segment_types(stems: list[str]) -> set[PageType]:
         elif stem in _AMBIGUOUS_NAMES:
             counts = last == 0
         else:
-            counts = index in (0, last)
+            counts = index == last or (index == 0 and first_segment)
         if counts:
             found.add(_SEGMENT_TYPE[stem])
     return found
@@ -326,6 +378,14 @@ def _segment_types(stems: list[str]) -> set[PageType]:
 
 def _is_tracking(name: str) -> bool:
     return name.startswith(_TRACKING_PREFIX) or name in _TRACKING_PARAMETERS
+
+
+def _path_stems(path: str) -> list[str]:
+    """The stems of the segments of ``path`` (decoded, NFC), a trailing index file dropped."""
+    segments = [segment for segment in path.split("/") if segment]
+    if segments and _INDEX_FILE.match(segments[-1]):
+        segments.pop()
+    return [_segment_stem(segment) for segment in segments]
 
 
 def url_type(url: str) -> PageType | None:
@@ -340,18 +400,20 @@ def url_type(url: str) -> PageType | None:
     every query parameter is a tracking parameter, a language parameter (``lang``, ``hl``,
     ``locale``) or empty (A26-R1).
     """
+    return _url_type(url)
+
+
+def _url_type(url: str, *, first_segment: bool = True) -> PageType | None:
+    """``url_type``; without ``first_segment`` a name as the first segment does not count."""
     try:
         parts = urlsplit(url)
         query = parse_qsl(parts.query)
     except ValueError:
         return None
     path = unicodedata.normalize("NFC", unquote(parts.path))
-    segments = [segment for segment in path.split("/") if segment]
-    if segments and _INDEX_FILE.match(segments[-1]):
-        segments.pop()
-    stems = [_segment_stem(segment) for segment in segments]
+    stems = _path_stems(path)
 
-    found = _segment_types(stems)
+    found = _segment_types(stems, first_segment=first_segment)
     for index, stem in enumerate(stems[:-1]):
         if stem in _PAGE_SEGMENTS and stems[index + 1].isdecimal():
             found.add("listing")
@@ -488,6 +550,19 @@ def _has_default_shape(url: str) -> bool:
     return _LETTER_RUN.search(stem) is not None
 
 
+def _link_text_counts(url: str) -> bool:
+    """Whether a link text type word may type ``url`` (AU3-R2): its path, without an index file
+    and a leading language code, has at most one segment, or its last segment is no slug of
+    words. A link "Anmelden" to ``/fortbildungen/mathe-workshop-2026`` names an action, not the
+    page; a link "Impressum" to ``/p/123`` names the page."""
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return False
+    stems = _without_language(_path_stems(path))
+    return len(stems) <= 1 or not _is_word_slug(stems[-1])
+
+
 def guess_type(
     url: str,
     *,
@@ -502,7 +577,9 @@ def guess_type(
     2. WordPress and dated patterns (``url``): ``?p=``, ``?page_id=``, a dated path, a
        ``post_type`` query, ``?cat=``, ``?tag=``, ``?author=``, a ``__trashed`` slug;
     3. a ``sitemap_hint`` other than ``content`` (``sitemap``);
-    4. the link text is a type word, or ``region`` is ``pagination`` (``link_text``);
+    4. the link text is a type word and the URL's path (without an index file and a leading
+       language code) has at most one segment or a last segment that is no slug of words
+       (AU3-R2), or ``region`` is ``pagination`` (``link_text``);
     5. an event or material keyword in the path or the link text (``keywords``);
     6. a ``sitemap_hint`` of ``content`` (``sitemap``);
     7. ``content`` for a URL with a name and no id shape (``default``);
@@ -516,7 +593,7 @@ def guess_type(
         return TypeGuess(by_pattern, "url")
     if sitemap_hint is not None and sitemap_hint != "content":
         return TypeGuess(sitemap_hint, "sitemap")
-    if (by_text := _HEADING_TYPE.get(_fold(link_text))) is not None:
+    if (by_text := _HEADING_TYPE.get(_fold(link_text))) is not None and _link_text_counts(url):
         return TypeGuess(by_text, "link_text")
     if region == "pagination":
         return TypeGuess("listing", "link_text")
@@ -701,6 +778,21 @@ _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
 )
 _EVENT_SCHEMA_SUFFIX: Final = "Event"  # Event, EducationEvent, BusinessEvent ...
 _MATERIAL_SCHEMA_TYPES: Final = frozenset({"LearningResource", "Quiz", "Course"})
+# Article, NewsArticle, TechArticle ... and the postings that are articles: an article entity,
+# which competes with an event or a learning resource for the page's main entity. Not every
+# ``*Posting`` is one: a ``JobPosting`` is no article.
+_ARTICLE_SCHEMA_SUFFIX: Final = "Article"
+_POSTING_SCHEMA_TYPES: Final = frozenset(
+    {"BlogPosting", "SocialMediaPosting", "DiscussionForumPosting", "LiveBlogPosting"}
+)
+_PAGE_SCHEMA_SUFFIX: Final = "Page"  # WebPage, ItemPage, ...: a node whose mainEntity counts
+# The types a page's one main entity gives; they rank below a ``url`` vote of a type name that
+# is the whole path, and above any other (AU3-R5).
+_ENTITY_PAGE_TYPES: Final = frozenset({"event", "learning_material"})
+# Microdata scopes on these elements can be the page's main entity, unless inside one of the
+# frame elements (a sidebar, a menu, the header or the footer).
+_MAIN_SCOPE_TAGS: Final = frozenset({"html", "body", "main", "article"})
+_FRAME_TAGS: Final = frozenset({"aside", "nav", "header", "footer"})
 _NON_VISIBLE: Final = ("script", "style", "noscript", "template")
 # Primary subtags of a ``lang`` that names no language: undetermined, multiple, no linguistic
 # content, and the private-use prefix (BCP 47).
@@ -710,7 +802,7 @@ _NO_LANGUAGE_SUBTAGS: Final = frozenset({"und", "mul", "zxx", "x"})
 class PageTypeInfo(BaseModel):
     """The type of a page and the signals that agree with it."""
 
-    type: PageType = Field(
+    type: TolerantPageType = Field(
         description="What kind of page this is, by rules: `home`, `content` (an article or "
         "another page with enough text), `listing` (an index of other pages: a category, a tag, "
         "an archive, a page of a paged list), `event` (an event or its schema.org subtype), "
@@ -767,8 +859,9 @@ def _microdata_scopes(tree: HtmlElement) -> list[HtmlElement]:
     return scopes
 
 
-def _schema_type_names(tree: HtmlElement) -> set[str]:
-    names: set[str] = set()
+def _json_ld_page_nodes(tree: HtmlElement) -> list[object]:
+    """The JSON-LD nodes of the page (top-level and ``@graph``), up to the size and count limits."""
+    nodes: list[object] = []
     scripts = 0
     for script in tree.iter("script"):
         if not (script.get("type") or "").strip().lower().startswith("application/ld+json"):
@@ -783,23 +876,113 @@ def _schema_type_names(tree: HtmlElement) -> set[str]:
             data = json.loads(text)
         except (ValueError, RecursionError):
             continue
-        for node in _json_ld_nodes(data):
-            names.update(_json_ld_types(node))
-    for scope in _microdata_scopes(tree):
-        names.update(_schema_name(item) for item in (scope.get("itemtype") or "").split())
-    return names
+        nodes.extend(_json_ld_nodes(data))
+    return nodes
+
+
+def _entity_kind(names: list[str]) -> PageType | Literal["article"] | None:
+    """What a schema entity of these type names is: an article, an event, a learning resource,
+    or None (an organisation, a breadcrumb, a web page ...)."""
+    if _POSTING_SCHEMA_TYPES.intersection(names) or any(
+        name.endswith(_ARTICLE_SCHEMA_SUFFIX) for name in names
+    ):
+        return "article"
+    if any(name.endswith(_EVENT_SCHEMA_SUFFIX) for name in names):
+        return "event"
+    if _MATERIAL_SCHEMA_TYPES.intersection(names):
+        return "learning_material"
+    return None
+
+
+def _json_ld_main_entities(nodes: list[object]) -> Iterator[dict[str, Any]]:
+    """The ``mainEntity`` of the ``*Page`` nodes (inline, or by a string ``@id`` a node of the
+    page), each node once and at most ``_MAX_JSON_LD_NODES`` values read, else every node."""
+    by_id = {
+        node["@id"]: node
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("@id"), str)
+    }
+    yielded: set[int] = set()
+    budget = _MAX_JSON_LD_NODES
+    for node in nodes:
+        page_types = _json_ld_types(node)
+        if not isinstance(node, dict) or not any(
+            name.endswith(_PAGE_SCHEMA_SUFFIX) for name in page_types
+        ):
+            continue
+        raw = node.get("mainEntity")
+        for value in (raw if isinstance(raw, list) else [raw])[:budget]:
+            budget -= 1
+            if not isinstance(value, dict):
+                continue
+            target: object = value
+            if not _json_ld_types(value):
+                ref = value.get("@id")
+                target = by_id.get(ref) if isinstance(ref, str) else None
+            if isinstance(target, dict) and id(target) not in yielded:
+                yielded.add(id(target))
+                yield target
+        if budget <= 0:
+            break
+    if not yielded:
+        yield from (node for node in nodes if isinstance(node, dict))
+
+
+def _entity_key(node: dict[str, Any], names: list[str]) -> object:
+    """What makes two entities one: the ``@id``, else the types, the name, the start date and
+    the URL (a recurring event has one name and several dates)."""
+    node_id = node.get("@id")
+    if isinstance(node_id, str):
+        return node_id
+    return (tuple(names), *(str(node.get(field)) for field in ("name", "startDate", "url")))
+
+
+def _entity_kinds_json_ld(nodes: list[object]) -> list[PageType | Literal["article"]]:
+    """The kinds of the page's main JSON-LD entities, one per entity (`_entity_key`); it stops
+    at the second, as two are no main entity."""
+    seen: dict[object, PageType | Literal["article"]] = {}
+    for node in _json_ld_main_entities(nodes):
+        names = _json_ld_types(node)
+        if (kind := _entity_kind(names)) is None:
+            continue
+        seen.setdefault(_entity_key(node, names), kind)
+        if len(seen) > 1:
+            break
+    return list(seen.values())
+
+
+def _is_main_scope(scope: HtmlElement) -> bool:
+    """A microdata scope that can be the page's main entity: on ``<html>``, ``<body>``,
+    ``<main>`` or ``<article>``, and not inside a sidebar, a menu, the header or the footer."""
+    if scope.tag not in _MAIN_SCOPE_TAGS:
+        return False
+    return not any(ancestor.tag in _FRAME_TAGS for ancestor in scope.iterancestors())
 
 
 def _schema_page_type(tree: HtmlElement) -> PageType | None:
-    names = _schema_type_names(tree)
+    """The type schema.org says: a page kind (``ContactPage`` ...) of any node or outermost
+    scope, else the kind of the page's one main entity when it is an event or a learning
+    resource (AU3-R5)."""
+    nodes = _json_ld_page_nodes(tree)
+    scopes = _microdata_scopes(tree)
+    names: set[str] = set()
+    for node in nodes:
+        names.update(_json_ld_types(node))
+    for scope in scopes:
+        names.update(_schema_name(item) for item in (scope.get("itemtype") or "").split())
     for name, found in _SCHEMA_TYPES:
         if name in names:
             return found
-    if any(name.endswith(_EVENT_SCHEMA_SUFFIX) for name in names):
-        return "event"
-    if names & _MATERIAL_SCHEMA_TYPES:
-        return "learning_material"
-    return None
+    kinds = _entity_kinds_json_ld(nodes)
+    if not kinds:
+        for scope in scopes:
+            if _is_main_scope(scope):
+                itemtypes = [_schema_name(item) for item in (scope.get("itemtype") or "").split()]
+                if (kind := _entity_kind(itemtypes)) is not None:
+                    kinds.append(kind)
+    if len(kinds) != 1 or kinds[0] == "article":
+        return None
+    return kinds[0]
 
 
 def _title_type(text: str | None) -> PageType | None:
@@ -869,8 +1052,39 @@ _SIGNAL_ORDER: Final[tuple[PageSignal, ...]] = (
     "word_count",
 )
 _DECISIVE: Final[tuple[PageSignal, ...]] = tuple(s for s in _SIGNAL_ORDER if s != "og_type")
+# The same with ``url`` before ``schema_org``, for a schema vote of a main entity against a type
+# name that is the whole path (AU3-R5).
+_DECISIVE_URL_FIRST: Final[tuple[PageSignal, ...]] = (
+    "status",
+    "soft_404",
+    "root_path",
+    "url",
+    *(s for s in _DECISIVE if s not in ("status", "soft_404", "root_path", "url")),
+)
 # The votes an article with enough words drops (A26-R5); a ``url`` vote only for ``listing``.
 _ARTICLE_DROPS: Final[tuple[PageSignal, ...]] = ("title", "h1", "pagination", "link_density")
+
+
+def _has_slug_after_first(url: str) -> bool:
+    """The path, without an index file and a leading language code, has two or more segments and
+    the last is a slug of words (AU3-R3)."""
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return False
+    stems = _without_language(_path_stems(path))
+    return len(stems) >= 2 and _is_word_slug(stems[-1])
+
+
+def _type_name_path(url: str) -> PageType | None:
+    """The type of a path that, without an index file and a leading language code, is one type
+    name (``/impressum``, ``/datenschutz/``, ``/de/impressum``), else None (AU3-R5)."""
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return None
+    stems = _without_language(_path_stems(path))
+    return _SEGMENT_TYPE.get(stems[0]) if len(stems) == 1 else None
 
 
 def page_type(
@@ -926,15 +1140,31 @@ def page_type(
     body = tree.find(".//body")
     if _is_link_dense(body if body is not None else tree):
         votes["link_density"] = "listing"
+    long_article = False
     if quality.word_count >= min_words:
         votes["word_count"] = "content"
-        if is_article:
+        long_article = is_article
+        if long_article:
             for signal in _ARTICLE_DROPS:
                 votes.pop(signal, None)
-            if votes.get("url") == "listing":
-                del votes["url"]
+    # A type name as the first segment, before a slug of words, does not count for an article
+    # with enough words (AU3-R3): the ``url`` vote is what the other segments and the query say.
+    if "url" in votes and long_article and _has_slug_after_first(url):
+        if (by_rest := _url_type(url, first_segment=False)) is None:
+            del votes["url"]
+        else:
+            votes["url"] = by_rest
+    if long_article and votes.get("url") == "listing":  # A26-R5
+        del votes["url"]
 
-    winner: PageType = next((votes[s] for s in _DECISIVE if s in votes), "other")
+    # A main entity loses only to a type name that is the whole path (AU3-R5).
+    url_first = (
+        votes.get("schema_org") in _ENTITY_PAGE_TYPES
+        and "url" in votes
+        and votes["url"] == _type_name_path(url)
+    )
+    order = _DECISIVE_URL_FIRST if url_first else _DECISIVE
+    winner: PageType = next((votes[s] for s in order if s in votes), "other")
     if winner == "other":
         return PageTypeInfo(type="other", signals=[])
     return PageTypeInfo(type=winner, signals=[s for s in _SIGNAL_ORDER if votes.get(s) == winner])

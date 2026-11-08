@@ -27,8 +27,8 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. Die Aktion `evaluate` (JavaScript) ist nur für Admin-Schlüssel; andere Schlüssel erhalten 403. |
-| `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
-| `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
+| `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website, höchstens 50. Nicht mit `mode: fast`. |
+| `headers` | Objekt | leer | Header für die angefragte Website, höchstens 20 (jeder Wert höchstens 4096 Zeichen). Nicht mit `mode: fast`. |
 | `screenshot` | Boolean | `false` | Auch einen Screenshot aufnehmen, ein PNG, wenn `screenshot_options` nichts anderes sagt. Nicht mit `mode: fast`. |
 | `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
 | `screenshot_options` | Objekt | nicht gesetzt | Viewport-Größe, Bildformat und -größe des Screenshots: `viewport` (`{"width", "height"}`, Standard 1920×1080), `format` (`png`, `jpeg` oder `webp`), `quality` (1 bis 100, nur für `jpeg` und `webp`) und `width` (skaliert herunter, höchstens die Breite des Viewports). Braucht `screenshot`, wird also mit `mode: fast` abgelehnt. |
@@ -151,7 +151,7 @@ nur über HTTP gelesen, ohne ihren Text.
 | `depth` | Ganzzahl, 0 bis `SITE_MAX_DEPTH` | `2` | Wie viele Links weit der Crawl von der Startseite aus geht; `0`: nur die Startseite und die Sitemaps. |
 | `max_pages` | Ganzzahl, 1 bis `SITE_MAX_PAGES` | `100` | Höchstens so viele Seiten, die Startseite mitgezählt. |
 | `sitemaps` | Boolean | `true` | robots.txt und die Sitemaps lesen, die sie nennt (sonst nacheinander `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml`). |
-| `discovery` | `crawl` oder `sitemap_first` | `crawl` | `crawl` folgt Links bis `depth` und `max_pages`. `sitemap_first`: Nennt robots.txt eine Sitemap oder antwortet eine erratene Sitemap-Adresse, wird nur die Startseite gecrawlt und ihre Links haben `crawl: sitemap_first`; sonst wie `crawl`. Setzt `sitemaps: true` voraus (sonst 422). |
+| `discovery` | `crawl` oder `sitemap_first` | `crawl` | `crawl` folgt Links bis `depth` und `max_pages`. `sitemap_first`: Antwortet eine Sitemap, die robots.txt nennt, als Sitemap oder eine erratene Sitemap-Adresse mit einer, wird nur die Startseite gecrawlt und ihre Links haben `crawl: sitemap_first`; sonst wie `crawl`. Setzt `sitemaps: true` voraus (sonst 422). |
 | `scope` | `host` oder `path` | `host` | Welchen Links gefolgt wird: `host` dem Host der Startseite, `path` nur URLs unter dem Verzeichnis der Start-URL. |
 | `metadata` | Boolean | `true` | Die Metadaten jeder Seite mitliefern. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache für Seiten nutzen. |

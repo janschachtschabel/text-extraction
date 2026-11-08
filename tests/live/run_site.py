@@ -88,7 +88,9 @@ class SiteReport:
     page_types: dict[str, int] = field(default_factory=dict)  # page items by `data.page_type.type`
     warnings: dict[str, int] = field(default_factory=dict)
     error_codes: dict[str, int] = field(default_factory=dict)
-    sitemap: str = "none"  # `listed` (robots.txt), `guessed` (/sitemap.xml) or `none` found
+    # `listed` (robots.txt), `guessed` (at /sitemap.xml, /sitemap_index.xml or /wp-sitemap.xml)
+    # or `none` found
+    sitemap: str = "none"
     tree_urls: int = 0  # the URLs of the site tree (`build_tree`)
     type_open: int = 0  # tree URLs not fetched (sitemap or linked) and without a page type
     type_open_pct: float | None = None  # `type_open` as a share of `tree_urls`; None for no URLs
@@ -139,7 +141,8 @@ def _site(item: dict[str, Any]) -> dict[str, Any]:
 
 def _sitemap_state(items: Sequence[dict[str, Any]]) -> str:
     """`listed` when robots.txt named a sitemap or a sitemap that was not guessed exists,
-    `guessed` when only the guessed /sitemap.xml exists, else `none` (no sitemap found)."""
+    `guessed` when only a sitemap guessed at /sitemap.xml, /sitemap_index.xml or /wp-sitemap.xml
+    exists, else `none` (no sitemap found)."""
     sites = [_site(item) for item in items]
     present = [
         info

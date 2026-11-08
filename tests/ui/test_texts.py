@@ -23,7 +23,10 @@ from text_extraction.ui.timeline import timeline
 
 ARCHITECTURE = Path(__file__).resolve().parents[2] / "docs" / "architecture.md"
 # Backticked snake_case names of the warnings block that are request or tool fields, not warnings.
-NOT_WARNINGS = {"content_offset", "describe_images", "learn_selectors", "max_chars", "max_pages"}
+NOT_WARNINGS = {
+    *("content_offset", "describe_images", "html_errors", "learn_selectors", "max_chars"),
+    "max_pages",
+}
 # A warning whose name holds a number, such as `action_<index>_failed`: its key is
 # ``warning.action_index_failed``.
 _NUMBERED = re.compile(r"`([a-z][a-z0-9_]*)<([a-z]+)>([a-z0-9_]*)`")

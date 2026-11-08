@@ -18,7 +18,13 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
   {% if refresh_url %}<p class="hint tree-live" hidden>{{ t("tree.live") }}</p>{% endif %}
   <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if duration is not none %} · {{ t("tree.duration", seconds=duration) }}{% endif %}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {%- if tree.blocked %}
-  <p class="tree-blocked">{{ tn("tree.blocked", tree.blocked) }}</p>
+  {#- The note names only the "Site rules" steps this caller is offered that let a blocked URL
+  be selected (third audit U4): none when there is no choice. #}
+  {%- set remedies = access.modes | reject("equalto", "enforce") | list if access.shown else [] %}
+  <p class="tree-blocked">
+  {%- if remedies | length > 1 %}{{ tn("tree.blocked", tree.blocked) }}
+  {%- elif remedies %}{{ tn("tree.blocked_one_mode", tree.blocked, mode=t("access." ~ remedies[0])) }}
+  {%- else %}{{ tn("tree.blocked_no_choice", tree.blocked) }}{% endif %}</p>
   {%- endif %}
   {%- if tree.unchecked %}
   <p class="tree-unchecked">{{ t("tree.unchecked", origins=unchecked_origins) }}</p>
@@ -77,7 +83,11 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
         {#- A failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
         it with the mode that allows it (package 16). #}
         <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and node.error_code not in ("blocked_by_robots", "tdm_reserved") %} data-failed{% endif %}> <span class="label" title="{{ node.label }}">{{ node.label }}</span>
-        {%- if node.url and node.title %}{% set shown = t("tree.link_title", title=node.title) if node.title_from_link else node.title %} <span class="title{% if node.title_from_link %} title-link{% endif %}" title="{{ shown }}">{{ shown }}</span>{% endif %}
+        {#- A link's text sits in a bdi inside its quotes, so a right-to-left override in it
+        cannot turn them (third audit U3); the title attribute holds the plain text. #}
+        {%- if node.url and node.title %}
+        {%- if node.title_from_link %}{% set isolated %}<bdi>{{ node.title }}</bdi>{% endset %}{% set shown = t("tree.link_title", title=node.title) %}{% set shown_html = t("tree.link_title", title=isolated) %}
+        {%- else %}{% set shown = node.title %}{% set shown_html = node.title %}{% endif %} <span class="title{% if node.title_from_link %} title-link{% endif %}" title="{{ shown }}">{{ shown_html }}</span>{% endif %}
         {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
         {%- if not node.url %} <span class="pages">{{ tn("tree.section_pages", node.pages) }}</span>{% endif %}</div>
         <div class="cell-type">
@@ -89,7 +99,10 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
         {%- if node.url %}
         <div class="row-meta">
           <div class="cell-found"{% if node.lastmod %} title="{{ t('tree.found_changed', found=t(found_labels[node.kind]), date=node.lastmod) }}"{% endif %}><span class="visually-hidden">{{ t("tree.col.found") }}: </span>{{ t(found_labels[node.kind]) }}{% if node.lastmod %}<span class="visually-hidden">, {{ t("tree.changed", date=node.lastmod) }}</span>{% endif %}</div>
-          <div class="cell-status"><span class="visually-hidden">{{ t("tree.col.status") }}: </span>
+          {#- The narrow column cuts a long error code: the title holds status and code (third
+          audit U2). #}
+          {%- set status_label = (t(status_text(node.status)) if status_text(node.status) else node.status) if node.status else "" %}
+          <div class="cell-status"{% if node.status or node.error_code %} title="{{ status_label }}{% if node.status and node.error_code %}: {% endif %}{{ node.error_code or '' }}"{% endif %}><span class="visually-hidden">{{ t("tree.col.status") }}: </span>
           {%- if node.status %}<span class="status" data-value="{{ node.status }}">{{ t(status_text(node.status)) if status_text(node.status) else code(node.status) }}</span>{% endif %}
           {%- if node.error_code %} <span class="error-code">{{ code(node.error_code) }}</span>{% endif %}
           {%- if not node.status and not node.error_code %}<span class="none">–</span>{% endif %}</div>

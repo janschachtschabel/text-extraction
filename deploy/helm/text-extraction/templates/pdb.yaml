@@ -1,0 +1,47 @@
+{{- /*
+  PodDisruptionBudgets (podDisruptionBudget.enabled): one for the API pods and one for each
+  enabled worker pool, each only when its replica count (or the autoscaler's minimum) is above 1.
+  A budget on a single pod would block every node drain.
+*/ -}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $apiReplicas := ternary .Values.autoscaling.minReplicas .Values.replicaCount .Values.autoscaling.enabled }}
+{{- if gt (int $apiReplicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "text-extraction.fullname" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "text-extraction.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+{{- $worker := index $.Values.workers $pool }}
+{{- if $worker.enabled }}
+{{- $replicas := $worker.replicaCount }}
+{{- if $worker.autoscaling.keda.enabled }}
+{{- $replicas = $worker.autoscaling.keda.minReplicaCount }}
+{{- else if $worker.autoscaling.hpa.enabled }}
+{{- $replicas = $worker.autoscaling.hpa.minReplicas }}
+{{- end }}
+{{- if gt (int $replicas) 1 }}
+{{- $args := list $ $pool }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "text-extraction.workerName" $args }}
+  labels:
+    {{- include "text-extraction.workerLabels" $args | nindent 4 }}
+spec:
+  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "text-extraction.workerSelectorLabels" $args | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

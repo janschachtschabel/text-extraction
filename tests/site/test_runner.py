@@ -1405,6 +1405,78 @@ async def test_sitemap_first_with_listed_sitemap_crawls_only_the_start_page() ->
     assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)  # a listed sitemap never probes
 
 
+async def listed_sitemap_crawl(answer: Answer | None) -> tuple[Crawl, str]:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/old-sitemap.xml\n"
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        ROBOTS: text(ROBOTS, robots, "text/plain"),
+    }
+    if answer is not None:
+        answers[f"{SITE}/old-sitemap.xml"] = answer
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+    await crawl.crawl()
+    return crawl, job_id
+
+
+@scenario
+async def test_sitemap_first_listed_sitemap_that_answers_404_crawls_links() -> None:
+    crawl, job_id = await listed_sitemap_crawl(None)
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert set(LINKED) <= fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_listed_sitemap_that_is_html_counts_as_absent() -> None:
+    url = f"{SITE}/old-sitemap.xml"
+    crawl, job_id = await listed_sitemap_crawl(text(url, html(), "text/html"))
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert set(LINKED) <= fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_listed_sitemap_with_a_urlset_is_trusted() -> None:
+    url = f"{SITE}/old-sitemap.xml"
+    crawl, job_id = await listed_sitemap_crawl(text(url, urlset(*LISTED)))
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
+def _sitemap_index(*locs: str) -> bytes:
+    children = "".join(f"<sitemap><loc>{loc}</loc></sitemap>" for loc in locs)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{children}'
+        "</sitemapindex>"
+    ).encode()
+
+
+@pytest.mark.parametrize("form", ["index", "gzip"])
+@scenario
+async def test_sitemap_first_trusts_a_listed_index_or_gzip_sitemap(form: str) -> None:
+    import gzip
+
+    url = f"{SITE}/old-sitemap.xml"
+    body = (
+        _sitemap_index(f"{SITE}/child.xml")
+        if form == "index"
+        else gzip.compress(urlset(*LISTED).encode())
+    )
+    kind = "application/xml" if form == "index" else "application/gzip"
+    crawl, job_id = await listed_sitemap_crawl(fetched(url, body, content_type=kind))
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
 @scenario
 async def test_sitemap_first_with_guessed_sitemap() -> None:
     crawl = Crawl(

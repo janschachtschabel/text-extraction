@@ -187,7 +187,13 @@ from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_media import MediaInputMeta, media_too_long_message
 from text_extraction.scheduler import QueueItem
-from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
+from text_extraction.server import (
+    _HANDLED_SIGNALS,
+    EXIT_CONFIG_ERROR,
+    _Server,
+    _server,
+    configured_settings,
+)
 from text_extraction.settings import Settings
 from text_extraction.tracing import outbound_trace_headers
 from text_extraction.valkey import create_valkey
@@ -1264,6 +1270,49 @@ async def _run(settings: Settings) -> None:
         _log.info("valkey_closed")
 
 
+async def serve_idle(
+    internal: _Server, readiness: Readiness, *, stop: asyncio.Event | None = None
+) -> None:
+    """``ASR_ENABLED=false``: serve only the internal app (``/health``, ``/ready``, ``/metrics``)
+    until a signal. Ready at once, no queue item taken, no model or child loaded. ``stop`` is
+    for tests; by default SIGTERM and SIGINT set it."""
+    loop = asyncio.get_running_loop()
+    installed = stop is None
+    if stop is None:
+        stop = asyncio.Event()
+        for sig in _HANDLED_SIGNALS:
+            loop.add_signal_handler(sig, stop.set)
+    task = asyncio.create_task(internal.serve())
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        readiness.mark_listening()
+        await asyncio.wait([task, stopping], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        readiness.mark_draining()
+        stopping.cancel()
+        internal.should_exit = True
+        if installed:
+            for sig in _HANDLED_SIGNALS:
+                loop.remove_signal_handler(sig)
+        await task
+
+
+async def _idle(settings: Settings) -> None:
+    valkey = create_valkey(settings.valkey_url)
+    readiness = Readiness()
+    internal = _server(
+        create_internal_app(settings, valkey, REGISTRY, readiness=readiness),
+        settings.internal_host,
+        settings.internal_port,
+        GRACEFUL_SECONDS,
+    )
+    try:
+        await serve_idle(internal, readiness)
+    finally:
+        await valkey.aclose()
+        _log.info("valkey_closed")
+
+
 async def _check(settings: Settings) -> int:
     """FFmpeg's licence and the built-in clip in one child: 0 when both pass, else 1. The
     scratch directory is left alone: ``--check`` may run in a pod whose worker transcribes."""
@@ -1296,6 +1345,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     settings = configured_settings()
+    if not settings.asr_enabled:
+        # Helm and compose start this process in every install; with ASR off it must not fail
+        # for a model nobody needs. --download-models and --check pass, the worker idles.
+        _log.info("asr_disabled", message="ASR_ENABLED=false: no model, no queue items")
+        if args.download_models or args.check:
+            sys.exit(0)
+        asyncio.run(_idle(settings))
+        return
     external = settings.asr_backend == "openai"
     if external and settings.asr_external_base_url is None:
         _log.error(

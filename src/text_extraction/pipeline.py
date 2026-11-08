@@ -160,6 +160,7 @@ from text_extraction.compliance import (
     OriginRules,
     RobotsSitemaps,
     blocking_code,
+    capped_rules_available,
     compliance_block,
     origin_of,
     resolve_mode,
@@ -1325,20 +1326,26 @@ class Pipeline:
             raise RuntimeError("robots.txt was not loaded")
         return loaded
 
-    async def origin_rules(self, url: str) -> OriginRules | None:
+    async def origin_rules(
+        self, url: str, *, cached_only: bool = False, max_rules: int | None = None
+    ) -> OriginRules | None:
         """The rule files of ``url``'s origin, to judge many of its URLs: from the compliance
-        cache without a request, else loaded in the host's turn (within the 10 s budget of an
-        origin's files). None when the gate refuses the turn or its backend fails; it never
-        raises. It reads in every compliance mode."""
+        cache without a request, else (unless ``cached_only``) loaded in the host's turn (within
+        the 10 s budget of an origin's files). None when they are not cached and
+        ``cached_only``, or the gate refuses the turn or its backend fails; it never raises. It
+        reads in every compliance mode. ``max_rules`` asks for the capped copy
+        (``ComplianceChecker.origin_rules``), None while that copy cannot be made."""
         if origin_of(url) is None:  # not an http(s) URL: no origin, no rules
             return None
-        cached = await self._checker.origin_rules(url, cached_only=True)
-        if cached is not None:
+        if max_rules is not None and not capped_rules_available():
+            return None  # no turn taken for rules that could not be used
+        cached = await self._checker.origin_rules(url, cached_only=True, max_rules=max_rules)
+        if cached is not None or cached_only:
             return cached
         turn = HostTurn(self._gate)
         try:
             await turn.take(urlsplit(url).hostname or "", None)
-            return await self._checker.origin_rules(url, cached_only=False)
+            return await self._checker.origin_rules(url, cached_only=False, max_rules=max_rules)
         except (OutboundBusy, CircuitOpen) as error:
             _log.warning("origin_rules_refused", error_type=type(error).__name__)
         except RedisError as error:

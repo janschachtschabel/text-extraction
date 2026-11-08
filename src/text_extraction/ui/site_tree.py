@@ -20,9 +20,10 @@ or a linked-only URL the guess of ``page_types.guess_type`` (ruling P18-R1: from
 sitemap's ``type_hint``, a link's text and region, or ``content`` by default), always
 ``type_guessed`` with its ``type_reason``; only a URL with no name and an id shape stays without
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
-strongest, unless that guess is ``content`` by default and a weaker source gives a reason. The
-first link that names a URL sets its title (``title_from_link``); a crawled page's own title
-wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
+strongest, unless that guess is ``content`` by default and a weaker source gives a reason other
+than a link text for a sitemap entry (AU3-R2: a link "Datenschutz" leaves a listed page
+content). The first link that names a URL sets its title (``title_from_link``); a crawled
+page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
 type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
 ``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
@@ -33,11 +34,14 @@ host and path, at most ``TREE_MAX_SOCIAL``; share and intent endpoints (``facebo
 
 A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
 its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
-its URL against its origin's rules under ``enforce`` (`mark_blocked`, which does no I/O: the
-caller loads the rules per origin, `leaf_origins`). Origins tried whose rules could not be
-read or judged in time (the caller's budgets, `mark_blocked`'s deadline) are named
-(``SiteTree.unchecked``); origins not tried (past the caller's cap) are counted
-(``SiteTree.unchecked_more``). Their leaves stay unmarked.
+its URL against its origin's rules under ``enforce`` (`mark_blocked`: `judge_leaves`, which
+only reads the tree, so it may run on a thread, then `apply_judgement`; no I/O: the
+caller loads the rules per origin, `leaf_origins`, and loads them over the network only for
+the origins the job itself contacted, ``SiteTree.contacted``; a caller may pass the judgements
+of an earlier view to reuse them). Origins tried whose rules could not be read or judged in
+time (the caller's budgets, `mark_blocked`'s deadline) are named (``SiteTree.unchecked``);
+origins not tried (past the caller's cap) are counted (``SiteTree.unchecked_more``). Their
+leaves stay unmarked.
 
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own
@@ -47,7 +51,7 @@ order."""
 
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Final, Literal, get_args
@@ -71,12 +75,15 @@ __all__ = [
     "MAX_SECTION_DEPTH",
     "NON_CONTENT_TYPES",
     "TREE_MAX_SOCIAL",
+    "Judgement",
     "NodeKind",
     "SiteTree",
     "SocialLink",
     "TreeBuilder",
     "TreeNode",
+    "apply_judgement",
     "build_tree",
+    "judge_leaves",
     "leaf_origins",
     "mark_blocked",
 ]
@@ -171,7 +178,9 @@ class SiteTree:
     ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
     number of origins not tried (`mark_blocked`). ``untyped`` counts the shown URLs that were
     not fetched (sitemap or linked) and have no page type; ``social`` the social links;
-    ``found_counts`` the shown URLs of each kind (``page``, ``sitemap``, ``linked``)."""
+    ``found_counts`` the shown URLs of each kind (``page``, ``sitemap``, ``linked``);
+    ``contacted`` the origins of the job's own items (pages, robots.txt and sitemaps, fetched
+    or queued) and of their final URLs: the origins the crawl itself contacts."""
 
     roots: list[TreeNode]
     urls: int
@@ -184,6 +193,7 @@ class SiteTree:
     untyped: int = 0
     social: tuple[SocialLink, ...] = ()
     found_counts: Mapping[NodeKind, int] = field(default_factory=dict)
+    contacted: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -201,17 +211,31 @@ class _Found:
     type_reason: GuessReason | None = None
     title_from_link: bool = False
     blocked: BlockReason | None = None
+    from_sitemap: bool = False
 
     def merge(self, other: "_Found") -> None:
         if not self.title:
             self.title, self.title_from_link = other.title, other.title_from_link
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL; between
-            # guesses, a weaker source's reason beats a stronger source's bare default.
+            # guesses, a weaker source's reason beats a stronger source's bare default, but a
+            # link text never beats a sitemap entry's guess (AU3-R2), also when the entry merges
+            # into a link held because the sitemap source is full (an entry without a guess
+            # leaves the link's: "type open" never replaces a guess).
             if (
                 other.status is not None
                 or self.page_type is None
-                or (self.type_reason == "default" and other.type_reason not in (None, "default"))
+                or (
+                    self.type_reason == "default"
+                    and other.type_reason not in (None, "default")
+                    and not (self.from_sitemap and other.type_reason == "link_text")
+                )
+                or (
+                    other.from_sitemap
+                    and other.page_type is not None
+                    and not self.from_sitemap
+                    and self.type_reason == "link_text"
+                )
             ):
                 self.page_type, self.type_guessed = other.page_type, other.type_guessed
                 self.type_reason = other.type_reason
@@ -219,6 +243,7 @@ class _Found:
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
         self.blocked = self.blocked or other.blocked
+        self.from_sitemap = self.from_sitemap or other.from_sitemap
 
 
 class TreeBuilder:
@@ -232,13 +257,19 @@ class TreeBuilder:
         self._hidden_more = 0
         self._mode: ComplianceMode | None = None
         self._social: dict[str, SocialLink] = {}
+        self._contacted: set[str] = set()
 
     def add(self, item: JobItem) -> None:
         """Take what ``item`` says: a page, a sitemap's entries or a page's linked-only URLs.
-        Items without a result (still queued) and robots.txt add nothing."""
+        Items without a result (still queued) and robots.txt add no URL; every item adds its
+        origin (and its final URL's) to ``SiteTree.contacted``."""
         envelope = item.result
         data = envelope.data if envelope is not None else None
         site: SiteInfo | None = data.site if data is not None else None
+        for url in (item.url, data.final_url if data is not None else None):
+            origin = origin_of(url) if url else None
+            if origin is not None:
+                self._contacted.add(origin)
         if envelope is None or data is None:
             return
         if self._mode is None and data.compliance is not None:
@@ -271,7 +302,7 @@ class TreeBuilder:
                     # before the field has none and keeps the guess made here.
                     found.page_type, found.type_guessed = entry.type_guess, True
                     found.type_reason = found.type_reason or "default"
-                found.lastmod = entry.lastmod
+                found.lastmod, found.from_sitemap = entry.lastmod, True
                 self._add(_ENTRY, found)
 
     def _add_social(self, url: str, category: str | None) -> None:
@@ -339,6 +370,7 @@ class TreeBuilder:
             untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
             social=tuple(self._social.values()),
             found_counts={kind: sum(1 for k, _ in shown if k == kind) for kind in _KINDS},
+            contacted=frozenset(self._contacted),
         )
 
 
@@ -498,30 +530,67 @@ def leaf_origins(tree: SiteTree) -> dict[str, str]:
     return {origin: first[origin] for origin in sorted(first, key=lambda o: (-counts[o], o))}
 
 
-def mark_blocked(
-    tree: SiteTree, rules: Mapping[str, OriginRules | None], deadline: float | None = None
-) -> SiteTree:
-    """``tree`` with every leaf marked that its origin's rules block under ``enforce``. ``rules``
-    maps an origin (as `leaf_origins` gives it) to its rules, ``None`` for an origin that was
-    tried and could not be read (``SiteTree.unchecked``); an origin absent from it was not tried
-    (``SiteTree.unchecked_more`` counts them). Where the origin's rules are known, the current
-    judgement decides; the crawl's own reason stays only for ``tdm`` (a page's ``noai`` is known
-    only after its fetch) and for unchecked origins. ``deadline`` (a ``time.monotonic`` value)
-    bounds the work: origins with a leaf not judged by then are ``unchecked``. Pure: the nodes
-    are updated in place."""
-    blocked = 0
+@dataclass(frozen=True)
+class Judgement:
+    """What `judge_leaves` found: ``reasons`` the judgement of each leaf URL whose origin has
+    rules and that was judged in time (none: no rule blocks it), ``cut`` the origins with a
+    leaf not judged by the deadline, ``origins`` the tree's origins as `leaf_origins` orders
+    them."""
+
+    reasons: Mapping[str, BlockReason | None]
+    cut: frozenset[str]
+    origins: tuple[str, ...]
+
+
+def judge_leaves(
+    tree: SiteTree,
+    rules: Mapping[str, OriginRules | None],
+    deadline: float | None = None,
+    judged: MutableMapping[str, BlockReason | None] | None = None,
+) -> Judgement:
+    """Judge the leaves of ``tree`` against their origin's rules under ``enforce``, without
+    changing the tree (it may run on a thread while the event loop renders the tree):
+    `apply_judgement` applies the result. ``rules`` maps an origin (as `leaf_origins` gives it)
+    to its rules, ``None`` for an origin that was tried and could not be read. ``judged`` maps a
+    URL to its judgement under these same rules (an earlier view's): a URL in it is not judged
+    again, and every new judgement is added to it. ``deadline`` (a ``time.monotonic`` value)
+    bounds the work: origins with a leaf not judged by then are ``cut``."""
+    memo: MutableMapping[str, BlockReason | None] = {} if judged is None else judged
+    reasons: dict[str, BlockReason | None] = {}
     cut: set[str] = set()
     for node in _leaves(tree):
-        origin = origin_of(node.url) if node.url is not None else None
+        url = node.url
+        origin = origin_of(url) if url is not None else None
         known = rules.get(origin) if origin is not None else None
-        if known is not None and node.url is not None and origin is not None:
-            if deadline is not None and time.monotonic() >= deadline:
-                cut.add(origin)
-            else:
-                judged = block_reason(known.judge(node.url, "enforce"))
-                node.blocked = node.blocked if judged is None and node.blocked == "tdm" else judged
+        if known is None or url is None or origin is None:
+            continue
+        if url in memo:
+            reasons[url] = memo[url]
+        elif deadline is not None and time.monotonic() >= deadline:
+            cut.add(origin)
+        else:
+            reasons[url] = memo[url] = block_reason(known.judge(url, "enforce"))
+    return Judgement(reasons, frozenset(cut), tuple(leaf_origins(tree)))
+
+
+def apply_judgement(
+    tree: SiteTree, rules: Mapping[str, OriginRules | None], judgement: Judgement
+) -> SiteTree:
+    """``tree`` with the marks of ``judgement`` (`judge_leaves` of this tree and ``rules``):
+    where an origin's rules are known, the current judgement decides; the crawl's own reason
+    stays only for ``tdm`` (a page's ``noai`` is known only after its fetch) and for leaves not
+    judged (unchecked origins). An origin of ``rules`` that is ``None`` or cut is
+    ``SiteTree.unchecked``; one absent from ``rules`` was not tried
+    (``SiteTree.unchecked_more`` counts them). The nodes are updated in place."""
+    blocked = 0
+    reasons = judgement.reasons
+    for node in _leaves(tree):
+        if node.url is not None and node.url in reasons:
+            reason = reasons[node.url]
+            node.blocked = node.blocked if reason is None and node.blocked == "tdm" else reason
         blocked += node.blocked is not None
-    origins = leaf_origins(tree)
+    origins = judgement.origins
+    cut = judgement.cut
     unchecked = tuple(o for o in origins if o in rules and (rules[o] is None or o in cut))
     return replace(
         tree,
@@ -529,3 +598,14 @@ def mark_blocked(
         unchecked=unchecked,
         unchecked_more=sum(1 for o in origins if o not in rules),
     )
+
+
+def mark_blocked(
+    tree: SiteTree,
+    rules: Mapping[str, OriginRules | None],
+    deadline: float | None = None,
+    judged: MutableMapping[str, BlockReason | None] | None = None,
+) -> SiteTree:
+    """``tree`` with every leaf marked that its origin's rules block under ``enforce``:
+    `judge_leaves`, then `apply_judgement` (see both)."""
+    return apply_judgement(tree, rules, judge_leaves(tree, rules, deadline, judged))

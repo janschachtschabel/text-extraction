@@ -61,10 +61,10 @@ Prüfungen von `compliance`; die Einträge behalten Titel, Status, Metadaten und
 keinen Text (`content: null`). Der Crawl bleibt auf dem Host der Startseite (ein führendes `www.`
 zählt nicht); `scope: "path"` hält ihn unter dem Verzeichnis der Start-URL, `sitemaps: false`
 lässt die Sitemaps aus, und `depth: 0` liest nur die Startseite und die Sitemaps. Mit
-`discovery: "sitemap_first"` liest der Crawl nur die Startseite, wenn robots.txt eine Sitemap nennt
-oder eine der drei Adressen eine liefert, und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap
+`discovery: "sitemap_first"` liest der Crawl nur die Startseite, wenn eine Sitemap, die robots.txt
+nennt, als Sitemap antwortet oder eine der drei Adressen eine liefert, und entnimmt die übrigen Seiten der Sitemap; ohne Sitemap
 folgt er den Links wie sonst. `discovery: "sitemap_first"` mit `sitemaps: false` ergibt 422. Die
-Weboberfläche bietet das als „Schnell: Sitemap zuerst“ (Voreinstellung; „robots.txt und Sitemaps“
+Spielwiese bietet das als „Schnell: Sitemap zuerst“ (Voreinstellung; „robots.txt und Sitemaps“
 muss angehakt sein) neben „Gründlich: Links folgen“ an; der API-Standard ist `discovery: "crawl"`. Ein Crawl wird
 zusammen mit Ihren Batches auf `BATCH_MAX_OPEN_PER_CLIENT` angerechnet.
 
@@ -115,9 +115,7 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    Sprache an (`<html lang>`): Über `/it/` auf einer deutschen Seite entscheiden die übrigen
    Regeln.
 3. schema.org: Das JSON-LD oder die Microdata der Seite sagen `ContactPage` (`contact`),
-   `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`); trifft
-   keine davon zu, nennt ein `Event`-Typ (`Event`, `EducationEvent` und andere Namen, die auf
-   `Event` enden) `event`, und `LearningResource`, `Quiz` oder `Course` nennt `learning_material`.
+   `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`).
 4. Die URL: ein ganzes Pfadsegment wie `impressum` oder `imprint` (`imprint`), `datenschutz`
    oder `privacy` (`privacy`), `agb`, `terms`, `cookies` oder `barrierefreiheit` (`legal`),
    `login`, `registrieren` oder `konto` (`auth`), `suche` oder `search` oder eine Suchanfrage
@@ -130,22 +128,39 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    benennen, zählen nur allein: `cookies`, `terms`, `legal`, `konto`, `account`, `profil`,
    `profile`, `recherche`, `team`, `password`, `passwort` und `disclaimer`. So ist `/cookies`
    `legal`, `/rezepte/cookies` aber nicht.
-5. Der Titel beginnt oder endet mit dem Namen eines Typs, etwa „Impressum“, „Kontakt“, „Login“
+5. schema.org für den Hauptgegenstand der Seite: Beschreibt die Seite genau eine Veranstaltung
+   (`Event`, `EducationEvent` und andere Namen, die auf `Event` enden) oder genau eine Lernressource
+   (`LearningResource`, `Quiz` oder `Course`) und daneben keinen Artikel, ist sie `event` oder
+   `learning_material`. Es zählt nur der Hauptgegenstand: die `mainEntity` des `WebPage`-Knotens
+   der Seite, sonst ihre JSON-LD-Knoten, sonst Microdata auf `<html>`, `<body>`, `<main>` oder
+   `<article>` der Seite (nicht in einer Seitenleiste, einem Menü, der Kopf- oder der Fußzeile).
+   So bleibt ein Artikel mit einer Veranstaltung in der Seitenleiste `content`, und eine Seite,
+   die mehrere Veranstaltungen auflistet, wird durch schema.org nicht `event` (sie ist `listing`,
+   wenn sie vor allem aus Links besteht). Der Hauptgegenstand schlägt die Adresse (Regel 4), es
+   sei denn, der Pfad ist nur der Name eines Typs, ein Sprachkürzel davor zählt nicht mit:
+   `/impressum` und `/de/impressum` mit einem Quiz darauf bleiben `imprint`, aber
+   `/kurse/datenschutz`, das einen Kurs beschreibt, ist `learning_material`, und
+   `/kontakt/workshop-anmeldung`, das eine Veranstaltung beschreibt, ist `event`.
+6. Der Titel beginnt oder endet mit dem Namen eines Typs, etwa „Impressum“, „Kontakt“, „Login“
    oder „Suchergebnisse“ („Impressum | Firma“ und „Firma | Impressum“). Ein Doppelpunkt nach dem
    Namen leitet einen Untertitel ein: „Datenschutz: Was Schulen wissen müssen“ ist keine
    Datenschutzseite („Impressum:“ ohne etwas danach ist ein Impressum). Die erste Überschrift
    zählt nur, wenn sie allein aus dem Namen besteht: „Kontakt“, nicht „Kontakt zur Schule
    aufnehmen“.
-6. `auth`: ein Passwortfeld auf einer Seite mit wenig Text.
-7. `listing`: ein Link auf die nächste oder vorige Seite (`rel="next"`) oder eine Seite, die
+7. `auth`: ein Passwortfeld auf einer Seite mit wenig Text.
+8. `listing`: ein Link auf die nächste oder vorige Seite (`rel="next"`) oder eine Seite, die
    vor allem aus Links besteht (mindestens 20 Links, die 60 % ihres Textes ausmachen).
-8. `content`, wenn die Seite mindestens `QUALITY_MIN_WORDS` (50) Wörter hat, sonst `other`.
+9. `content`, wenn die Seite mindestens `QUALITY_MIN_WORDS` (50) Wörter hat, sonst `other`.
 
 Ein Artikel (`og:type` ist `article`) mit mindestens `QUALITY_MIN_WORDS` Wörtern bleibt
 `content`, gleich was sein Titel, seine erste Überschrift, seine Links oder eine Listenadresse
 (etwa `/blog/page/2` oder `/tag/python`) sagen. Nur eine andere Adresse (etwa `/impressum/`),
 schema.org oder ein Passwortfeld auf einer kurzen Seite (`auth`) können ihn zu einem anderen Typ
-machen.
+machen. Der Name eines Typs als erster Teil seiner Adresse zählt nicht, wenn danach ein Name aus
+mehreren Wörtern folgt: `/datenschutz/schuelerfotos-im-unterricht` und
+`/kontakt/elterngespraech-vorbereiten` sind `content`. Als einziger oder letzter Teil zählt er
+weiter (`/datenschutz/`, `/themen/datenschutz`), ebenso vor einem einzelnen Wort
+(`/kontakt/anfahrt`).
 
 `signals` nennt jede Regel, die zum Typ passt, in dieser Reihenfolge, auch die nach der
 entscheidenden: `/impressum` mit dem Titel „Impressum“ hat `["url", "title"]`.
@@ -211,7 +226,7 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme; der Baum erscheint auch von
    selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange er läuft. Jede URL zeigt
    ihren Seitentyp, und die Zeile „Typen:“ über dem Baum zählt sie; mit JavaScript ersetzen
-   Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
+   Filter-Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
    JavaScript bleibt die Zeile stehen). „Alle auswählen“ markiert jede angezeigte URL (unter einem
    Typfilter nur die angezeigten) und „Inhaltsseiten auswählen“ jede angezeigte URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,

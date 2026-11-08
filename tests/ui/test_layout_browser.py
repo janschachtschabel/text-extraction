@@ -623,3 +623,47 @@ def test_cards_stack_at_390(ui: tuple[str, str]) -> None:
         assert computed(page, "#result", "borderTopWidth") == ["0px"]
         (width,) = computed(page, ".settings", "borderTopWidth")
         assert width == "1px"
+
+
+# A PHP warning whose path is 300 characters without a hyphen or a space (third audit U1).
+LONG_PATH: Final = ("/var/www/" + "verylongpluginname" * 16)[:296] + ".php"
+PHP_PAGE: Final = (
+    "<!doctype html><html lang='en'><head><title>PHP page</title></head><body>"
+    f"<br />\n<b>Warning</b>:  Undefined variable $x in <b>{LONG_PATH}</b> on line <b>12</b>"
+    "<br /><main><h1>PHP page</h1><p>The school library opened a new reading room where pupils"
+    " and teachers meet after lessons to study history, science and music together.</p></main>"
+    "</body></html>"
+).encode()
+
+
+@pytest.fixture
+def php_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
+    """The /ui URL and the origin of a site whose /php.html prints a PHP warning."""
+
+    def handle(request: Request) -> Response:
+        if request.path == "/php.html":
+            return Response(PHP_PAGE, content_type="text/html; charset=utf-8")
+        return Response("Not found", status=404, content_type="text/plain")
+
+    httpserver.expect_request(re.compile(".*")).respond_with_handler(handle)
+    with serving(_settings()) as url:
+        yield url, httpserver.url_for("/").rstrip("/")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_a_long_server_error_path_wraps(php_ui: tuple[str, str], width: int) -> None:
+    url, origin = php_ui
+    assert len(LONG_PATH) == 300
+    with browsing(url) as (page, console):
+        page.set_viewport_size({"width": width, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.fill("#extract-url", f"{origin}/php.html")
+        page.click("#panel-extract button[type=submit]")
+        fold = page.locator("#result details:has(ul.server-errors)")
+        expect(fold).to_have_count(1)
+        fold.locator("summary").click()
+        expect(fold.locator(".where")).to_contain_text(LONG_PATH)
+        width_now = page.evaluate("[document.scrollingElement.scrollWidth, innerWidth]")
+        assert width_now[0] <= width_now[1]
+    assert console == []

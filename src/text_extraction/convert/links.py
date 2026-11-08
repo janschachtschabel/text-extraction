@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from pydantic import Field
 
 from text_extraction.convert.markup import attr, parse_html
-from text_extraction.page_types import LinkCategory, link_category
+from text_extraction.page_types import TolerantLinkCategory, link_category
 
 # The description of a link's ``category`` in the OpenAPI spec (``links`` and ``site.links``).
 LINK_CATEGORY_DESCRIPTION = (
@@ -62,7 +62,9 @@ class Link:
     text: str
     kind: Literal["internal", "external", "file"]
     # None only in results cached before link categories.
-    category: Annotated[LinkCategory | None, Field(description=LINK_CATEGORY_DESCRIPTION)] = None
+    category: Annotated[
+        TolerantLinkCategory | None, Field(description=LINK_CATEGORY_DESCRIPTION)
+    ] = None
 
 
 def absolute_url(base: str, href: str) -> str | None:

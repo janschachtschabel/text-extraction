@@ -216,6 +216,10 @@ The service runs without B-API today and is prepared for it.
   unblock mode:
   [architecture.md, Auth](architecture.md#auth),
   [configuration.md, Secrets](configuration.md#secrets).
+- Site rules per request: with `COMPLIANCE_ALLOW_OVERRIDE` at its default `true`, any user key
+  may choose `report` per request and per run, so robots.txt and TDM opt-outs are then only
+  reported; operators of a public service set it to `false`:
+  [configuration.md, Environment variables](configuration.md#environment-variables).
 - LLM: `LLM_ENABLED`, `LLM_BASE_URL` (any OpenAI-compatible endpoint), `LLM_MODEL`,
   `LLM_EMBEDDING_MODEL`, `LLM_VISION_MODEL` and the secret `LLM_API_KEY`:
   [configuration.md, LLM](configuration.md#llm). The models are chosen by the operator, never per

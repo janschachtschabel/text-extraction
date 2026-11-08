@@ -169,7 +169,23 @@ add a note of its own):
   that starts a line of its block counts, as PHP writes one, so a message quoted inside a
   sentence stays, and so does text inside `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
   `textarea` and `script`; a message over several lines, such as PHP 8's "Fatal error: Uncaught
-  …" with its stack trace, is not recognised and stays; package 17). The removed messages are listed
+  …" with its stack trace, is not recognised and stays; package 17; the path ends in `.php`,
+  `.inc`, `.phtml` or Drupal's `.module`, `.theme`, `.install`, `.engine`; an Xdebug message,
+  a `table.xdebug-error` whose first `th` reads `( ! ) Warning: … on line 3`, is removed as a
+  whole table and listed once; audit A1). **Ruling AU3-R4 (third audit, R2):** in a quoting
+  context, `blockquote`, `q`, `cite`, `h1`–`h6`, `li`, `dd`, `dt`, `td`, `th`, `figcaption` and
+  anything inside them, a message counts only in the `html_errors` form, its label and its path
+  each the whole text of a `<b>` or `<strong>` (`<b>Warning</b>: … in <b>/a.php</b> on line
+  <b>12</b>`): a reader who quotes a message copies it from the browser, which drops the markup,
+  and real output keeps it. There the plain form (`Warning: … in /a.php on line 12`, also with
+  only a bold label) stays. Outside those contexts the plain form still counts, as PHP prints it
+  with `html_errors` off and real output often lands in a `<p>` or `<div>` that a theme opened.
+  Known limit: a forum post that pastes a message on a line of its own in a bare `<p>` or `<div>`
+  (`Hallo,<br>…<br>Warning: … on line 5<br>Was tun?`) loses it; forums usually quote pasted
+  output in a `<blockquote>`, where it stays. Known limit: an `html_errors` message that is not
+  recognised (another extension) and stands loose in a container that starts with a block reads
+  `**/a.ext**on line` in Markdown: Trafilatura joins such loose inline text without the space,
+  for any bold text, not only here. The removed messages are listed
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none, and null when PII handling was requested: the messages are page
   text that can name a person, and the PII step does not read them), and the playground shows
@@ -779,7 +795,7 @@ while `BROWSER_ENABLED` is false, are unchanged.
     sweep removes every released profile again for 30 s, the pause doubling from 1 s (warning
     `browser_profile_left` for one still there then); the worker's shutdown removes any left.
     Patchright is pinned to the newest release at least 14 days old
-    (1.64.1; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
+    (1.64.2; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
     the stable of that day.
   - What changes: robots and TDM are not checked (that is `ignore`); nothing is blocked; service
     workers and non-GET navigations are allowed. The proxy, the navigation checks, the byte cap
@@ -2418,7 +2434,7 @@ pages (the start page and three levels below it) with the typed-links elements, 
 a PDF, an iframe and an external link; every sitemap entry arrives, every page to depth 2 is one
 item, the disallowed page is never requested, and every followed link points at the right item.
 Site B has no robots.txt; its `/sitemap.xml` is found by the guess and its 300 entries arrive in
-parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, five
+parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, six
 WLO-type sites, depth 1, 25 pages each, `compliance: enforce`) is reported by the live workflow,
 never a gate (R-P9-3): the build sandbox reaches none of the sites.
 
@@ -2499,8 +2515,9 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   twice), the first that answers with a sitemap is parsed and ends the chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
   sitemap that robots.txt lists never guesses; under the memory guard the next guess is not appended
   (`site_memory_guard` on the absent item). **`discovery: sitemap_first`:** after item 0's fetch,
-  `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps` (a listed sitemap: yes), else
-  probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
+  `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps`; the first listed sitemap is probed
+  like a guess (a stale listing, 404 or HTML, is no and never guesses), else
+  it probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
   `SITEMAP_PROBE_MAX_BYTES`, 64 KiB; a 2xx answer that `looks_like_sitemap` is yes, a 404, 410 or
   2xx that is no sitemap moves on, a failure or another status is no; an unavailable robots.txt
   counts as no listed sitemap), so every probe has the SSRF guard,
@@ -2673,7 +2690,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      start page);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
      `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
-     (`schema_org`);
+     (`schema_org`; the page's one main entity as an event or a learning resource ranks after
+     `url`, see "The main entity" below);
   4. `url_type` (`url`): whole path segments or their stem before `.html`/`.htm`/`.php`,
      case-folded, umlauts also as `ae`/`oe`/`ue` (German and English names per type, in the order
      `imprint`, `privacy`, `legal`, `auth`, `search`, `contact`, `about`, `listing`), a search
@@ -2717,10 +2735,26 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   one inside a menu of 60 links is `content`. A `url` vote for any other type and `schema_org`
   stay, so a WordPress imprint at `/impressum/` (SEO plugins mark plain pages as articles too)
   stays an imprint; `password_field` stays too (it needs fewer than `THIN_PAGE_BELOW_WORDS`
-  words). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML or
-  a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
-  raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
-  `page_type: null` instead of failing.
+  words).
+  **Ruling AU3-R3 (third audit, A3: a type name above an article):** for such an article (same
+  condition) a type name as the *first* path segment does not count when the path, without an
+  index file and a leading language code, has two or more segments and the last one is a slug of
+  words (parts joined by `-` or `_`, at least two of which hold two letters in a row:
+  `mathe-workshop-2026` is one, `seite-2` is none); the `url` vote is then what the other
+  segments and the query say (`_url_type(url, first_segment=False)`), and dropped when that is
+  nothing or, for the article, `listing` (A26-R5). Against a main event or learning resource
+  such a `url` vote loses anyway (AU3-R5). So
+  `/datenschutz/schuelerfotos-im-unterricht`, `/kontakt/elterngespraech-vorbereiten` and
+  `/barrierefreiheit/leichte-sprache-im-unterricht` are `content`, and
+  `/datenschutz/cookie-richtlinie` is `legal` by its last segment. A name as the only or the last
+  segment still counts (`/datenschutz/`, `/themen/datenschutz`, `/impressum/index.html`), and so
+  does a first segment before a single word (`/kontakt/anfahrt` stays `contact`: a short child
+  of a contact page is more likely a contact page than an article). Without `og:type` `article`
+  and enough words and without a main entity, A26-R2 is unchanged. JSON-LD is parsed up to a
+  size and a count per page, and nothing raises on bad HTML or a bad URL. The status passed is
+  `upstream_status`. The type is an extra: should the rules raise anyway, `_process` logs
+  `page_type_failed` (host and error type) and the page keeps `page_type: null` instead of
+  failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
   (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
   failed. In results `error` therefore comes from soft 404s (`soft_404`).
@@ -2734,10 +2768,42 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   navigation helper of the old service ("home", "startseite", "nach oben", "back to top", "menu",
   arrows and the like), else `content`.
 - **`event` and `learning_material` (package 18).** Two more page types, after `listing`.
-  `page_type` reads them from schema.org: a JSON-LD `@type` or microdata `itemtype` ending in
-  `Event` (`Event`, `EducationEvent`, `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz`
-  and `Course` are `learning_material` (signal `schema_org`; the contact, about, search and
-  collection types keep their rank).
+  `page_type` reads them from schema.org: a type ending in `Event` (`Event`, `EducationEvent`,
+  `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz` and `Course` are
+  `learning_material` (signal `schema_org`; the contact, about, search and collection types keep
+  their rank 3 and are read from any node and any outermost scope, as before).
+  **Ruling AU3-R5 (third audit, A2: the main entity; revises package 18):** an event or
+  learning-resource type counts only when it is the page's *one main entity*. That vote ranks
+  above `url` and the title, as schema.org did in 0.1.6, with one exception: a `url` vote of a
+  type name that is the whole path, without an index file and after an optional language code
+  (`/impressum`, `/datenschutz/`, `/de/impressum`, `/impressum/index.html`, `/kategorie`), beats
+  it (`_type_name_path`; the decision order is then `_DECISIVE_URL_FIRST`), so `/impressum` with
+  a Quiz node stays `imprint`. Anywhere else in the path, and for the query rules, the entity
+  wins: `/kurse/datenschutz` with a main Course is `learning_material`,
+  `/fortbildungen/barrierefreiheit` with a main Event is `event`, and these take their main
+  entity's type too: `/service/impressum`, `/kontakt/anfahrt`, `/kategorie/mathe`,
+  `/kontakt/workshop-anmeldung` and `/ueber-uns/termine/tag-der-offenen-tuer`. (The first cut of
+  this ruling ranked every `url` vote above the entity; a type word as the last segment then beat
+  a page's single Course or Event, a regression from 0.1.6, fixed in the final review.) The main
+  entities are the `mainEntity` values of the JSON-LD nodes typed
+  `*Page` (`WebPage`, `ItemPage` ...; inline, or an `{"@id"}` reference whose `@id` is a string
+  naming a node of the page; at most 200 values are read, each node once), else every JSON-LD
+  node (top-level and `@graph`); when no JSON-LD entity is an article, an event or a learning
+  resource, the outermost microdata scopes on `<html>`, `<body>`, `<main>` or `<article>` that
+  are not inside `<aside>`, `<nav>`, `<header>` or `<footer>`. Of those, only articles (a type
+  ending in `Article`, and `BlogPosting`, `SocialMediaPosting`, `DiscussionForumPosting`,
+  `LiveBlogPosting`; a `JobPosting` is none), events and learning resources count, one per
+  `@id`, else per type list, `name`, `startDate` and `url` (a recurring event with one name and
+  several dates is several entities); a node typed both an article and an event is an
+  article. There must be exactly one (the count stops at the second), and it must not be an
+  article. So an article with a
+  sidebar Event in microdata, with JSON-LD `[NewsArticle, Event]`, or with a Yoast `@graph`
+  `[WebPage, Article, Course]` is `content`; an event page whose only typed entity besides the
+  site's `WebPage`, `WebSite`, `Organization` and `BreadcrumbList` is an `Event`, or whose
+  `WebPage.mainEntity` is an `Event`, is `event`; and `/veranstaltungen/` with two Event nodes
+  and a page of links is `listing` (several events are no main entity). Before, any type ending
+  in `Event` or any of the three material types in any top-level node or any of the first 50
+  outermost scopes decided over `url`, the title and the article override.
 - **`guess_type(url, link_text, region, sitemap_hint)`** answers `TypeGuess(type, reason)` or
   None for a URL that was not fetched. First rule that applies:
   1. `url_type(url)` (`url`);
@@ -2747,7 +2813,23 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      `listing`; a last segment ending in `__trashed` is `other`;
   3. a `sitemap_hint` other than `content` (`sitemap`);
   4. the link text equals a type word of the headings (`Kontakt`, `Impressum` ...), or `region` is
-     `pagination` (`link_text`);
+     `pagination` (`link_text`).
+     **Ruling AU3-R2 (third audit, A3: link texts):** a link text type word counts only when the
+     URL's path, without a trailing index file and a leading language code, has at most one
+     segment, or its last segment is no slug of words (parts joined by `-` or `_`, at least two
+     of which hold two letters in a row; `seite-2`, `123`, a UUID or a hex id are none). A
+     link names what it does as often as what it points to: "Anmelden" to
+     `/fortbildungen/mathe-workshop-2026` (then `event` by keywords), "Datenschutz" to
+     `/themen/medienbildung-und-privatsphaere` (then `content` by default) and "Kontakt" to
+     `/kurse/oer-einfuehrung` (then `learning_material` by keywords) no longer type the page;
+     "Impressum" to `/p/123`, `/node/42` or `/impressum-und-datenschutz/` still does. The brief
+     proposed slugs of three or more parts; two are needed, or `/kurse/oer-einfuehrung` would
+     stay `contact`. The pagination region is unchanged. In the site tree a `link_text` reason
+     also never replaces a sitemap entry's `default` content guess (`_Found.merge`): a URL listed
+     in a plain sitemap and linked as "Datenschutz" stays `content` and ticked by "Select content
+     pages", also when the sitemap source is full and the entry merges into the held link (the
+     entry's guess then replaces the link's `link_text` guess); between links alone a
+     `link_text` reason still beats a `default` one;
   5. a keyword token in the path (split on `/ - _ .`) or in the link text (`keywords`); event
      words (`veranstaltung`, `termine`, `workshop`, `symposium` ...) before material words
      (`arbeitsblatt`, `quiz`, `lernpfad`, `oer` ...); whole tokens only, so `eventually` is none;
@@ -2769,9 +2851,23 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   An imprint or privacy URL still wins over the sitemap and the link text (rule 1).
 - **Older results.** `page_type` and `category` default to null, so results cached and items
   stored before package 14 load unchanged.
+- **Newer values (ruling AU3-R1, third audit).** Results are read back by pods of other releases
+  during a rolling upgrade, and package 18's new page types and `crawl: sitemap_first` broke 0.1.5
+  readers. The result models therefore read `PageType`, `LinkCategory` and `Crawl` through
+  `TolerantPageType`, `TolerantLinkCategory` and `TolerantCrawl` (`page_types.unknown_as`, a pure
+  before-validator): a string outside the Literal becomes the catch-all, `other`, `content` (what
+  `link_category` answers for a link no rule names) and `listed` (not followed); a value that is
+  no string still fails. The OpenAPI enums stay the Literals, and request models keep the plain
+  Literals, so an unknown value in a request is still 422. Job options still forbid unknown
+  fields: `_options_json` leaves an option out while it is at its default (`site.discovery` while
+  it is `crawl`), so a new option needs an upgrade order only once a request sets it. The other
+  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SitemapInfo.format`,
+  `SiteInfo.role`) stay strict, so a new value there still needs the upgrade order (API pods
+  first).
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
-  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own
+  marked guessed with its reason; a URL that `guess_type` cannot type shows "Type open" with its
+  reason and is counted as such. A crawled page's own
   verdict, even none, wins over a guess for the same URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
   (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
@@ -2782,7 +2878,12 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
-  home unless the page's `lang` names another language (A26-R3).
+  home unless the page's `lang` names another language (A26-R3). A main event or learning
+  resource in microdata on a plain wrapper (`<div itemscope itemtype=".../Event">` around the
+  content, not on `<html>`, `<body>`, `<main>` or `<article>`) no longer types the page
+  (AU3-R5): a sidebar widget looks the same; JSON-LD or `mainEntity` still does. Unnamed events
+  without `@id`, `startDate` and `url` count as one entity, so a list of such events can be
+  `event`.
 - **Crawl speed (package 18).** Measured by the live harness (`tests/live/run_site.py`, depth 1,
   `max_pages` 25, `compliance: enforce`, on GitHub runners): at the old 1 s spacing a crawl took
   26 to 46 s for its 25 pages; at 500 ms it takes 17 to 32 s (wirlernenonline.de 46 -> 26 s,
@@ -3136,12 +3237,38 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
 - **Site rules in the site tree (package 16).** The tree judges every shown URL when it is shown,
   not when the crawl ran, against the site's current robots.txt, tdmrep.json and ai.txt (from the
-  cache, or loaded once per site within the per-host limits; at most 20 sites, 12 s). A blocked
-  URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or "TDM", with the
-  reason as tooltip; the links the crawl skipped because of the rules are "linked only" leaves.
-  Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons skip it;
-  under `report` and `ignore` it can be ticked. The batch below the tree starts with the step the
-  crawl ran with.
+  cache, or loaded once per site within the per-host limits; at most 20 sites, 12 s). **Ruling
+  AU3-R6 (third audit, S1 and S2: bounded rule checks):** the files are loaded only for the origins
+  the job contacted, derived from its own items (the start page, the pages, robots.txt and sitemaps,
+  fetched or queued, and their final URLs; `SiteTree.contacted`, no stored state), and those come
+  first among the 20; any other origin (a sitemap may list URLs on any host and port, a page may
+  link anywhere) is read from the compliance cache alone and is unchecked when its files are not
+  cached, so one view never sends requests to hosts the crawl did not visit. The tree judges with a
+  capped copy of the rules (`TREE_RULES_MAX_RULES`, 1,000): the first 1,000 Allow/Disallow lines per
+  user agent of robots.txt and ai.txt (grouped as protego groups them) and the first 1,000
+  tdmrep.json entries, so one URL costs about 0.25 ms against the tested hostile 500 KiB files
+  instead of up to 8 ms; wildcard-heavy rules (1,000 patterns such as `/*a*a*…*b` against a URL of
+  2,000 characters) still cost up to about 10 ms per URL, which `TREE_JUDGE_SECONDS` bounds. A real
+  fetch (`before_fetch`) still reads the whole file, so for a file with more rules the tree's marks
+  are best effort, in both directions (a rule past the cap is not shown, and a rule a group shares
+  with an agent already at the cap is left out for all of them), and the crawl or batch decides; the
+  tree shows no sign that a file was cut. The capped copies are parsed and kept apart from a fetch's
+  (64 in the pod), and protego's directive reader they need is read when first used: a protego
+  release without it leaves those origins unchecked (logged once) instead of stopping the service.
+  tdmrep.json is parsed in a worker thread, also for a real fetch. The leaves are judged on a thread
+  of the UI's own (`app.state.ui_tree_pool`, one thread, never the conversion pool, so a tree does
+  not queue behind conversions) within 1 s (`TREE_JUDGE_SECONDS`; the origins not judged by then are
+  unchecked); the 1 s run from the view's call, so waiting for the thread counts, and a view whose
+  judgement has not ended 0.5 s after that shows every origin with rules as unchecked (the thread
+  only reads the tree and the view applies its judgement after it ended, so a late one is dropped
+  and never changes a tree already shown), and a tree without rules to judge does not wait for it at
+  all; and a live refresh reuses, with the rules, the judgements of the refreshes before (per job
+  and origin set for 30 s, at most 100,000 judgements in the pod's memo), so it judges only the URLs
+  that are new. A URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or
+  "TDM", with the reason as tooltip; the links the crawl skipped because of the rules are "linked
+  only" leaves. Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons
+  skip it; under `report` and `ignore` it can be ticked. The batch below the tree starts with the
+  step the crawl ran with.
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
   "Extract selected", so a keyboard user does not tab through every checkbox.

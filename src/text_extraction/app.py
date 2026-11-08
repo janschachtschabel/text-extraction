@@ -159,6 +159,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ui_images: ImageFetcher | None = app.state.ui_images
         if ui_images is not None:
             await ui_images.aclose()
+        tree_pool: ConversionPool | None = app.state.ui_tree_pool
+        if tree_pool is not None:
+            tree_pool.shutdown()
         post_pool: ConversionPool = app.state.post_pool
         post_pool.shutdown()
 
@@ -185,7 +188,9 @@ def _add_mcp(app: FastAPI, settings: Settings, registry: CollectorRegistry) -> M
 def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
     """Serve the UI at ``/ui`` (rulings P10-S12 to P10-S16): its routes (left out of the OpenAPI
     spec), its static files at ``/ui/static``, the plain-text 403 of the ``/ui/run`` guard and
-    the previews' ``ImageFetcher`` in ``app.state.ui_images`` (with its counter).
+    the previews' ``ImageFetcher`` in ``app.state.ui_images`` (with its counter) and the one
+    thread that judges the site tree's URLs against the site rules, ``app.state.ui_tree_pool``
+    (its own, so a tree never waits behind conversions; the lifespan shuts it down).
     Returns the body limits of its ``/ui/run`` routes. The UI's modules are imported only here
     and in `_add_ui_headers`, so ``jinja2`` is not imported while the UI is off."""
     from fastapi.staticfiles import StaticFiles  # only with UI_ENABLED
@@ -204,6 +209,7 @@ def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
     # lifespan closes it.
     app.state.ui_images = create_image_fetcher(settings, app.state.valkey)
     app.state.ui_image_previews = preview_counter(app.state.registry)
+    app.state.ui_tree_pool = ConversionPool(1, name="tree")
     app.include_router(create_ui_router(settings))
     app.mount(STATIC_PREFIX, StaticFiles(directory=STATIC_DIR), name="ui-static")
     app.add_exception_handler(UiRefused, ui_refused_response)
@@ -368,6 +374,7 @@ def create_public_app(
     }
     app.state.mcp = None
     app.state.ui_images = None
+    app.state.ui_tree_pool = None
     if settings.mcp_enabled:
         app.state.mcp = _add_mcp(app, settings, registry)
         path_limits[MCP_PATH] = mcp_body_limit(settings)

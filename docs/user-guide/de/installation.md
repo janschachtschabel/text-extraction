@@ -45,7 +45,7 @@ uv run pre-commit install    # install the git hooks
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
 Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM) und ein
-Valkey mit Passwort. Es schaltet den Browsermodus, OCR, die Transkription, die Behandlung
+Valkey mit Passwort. Es schaltet den Browser-Modus, OCR, die Transkription, die Behandlung
 personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein.
 
 ```bash
@@ -76,7 +76,7 @@ gleich, und die Schalter funktionieren wie unten beschrieben.
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 ```
 
-`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.6`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.7`; `0.1`
 folgt der neuesten `0.1.x` nach `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
 denn ein Image, das schon auf dem Rechner liegt, wird nicht erneut geladen). Die Versionen und ihre Notizen stehen auf der
 [Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
@@ -160,7 +160,7 @@ den [Secrets](../../configuration.md#secrets).
 | `JOB_TTL_SECONDS` | `86400` | Wie lange ein Job und seine Ergebnisse aufbewahrt werden. |
 | `BATCH_MAX_URLS` | `1000` | Höchstens so viele URLs in einem Batch. |
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Höchstens so viele offene Batches und Website-Strukturen eines Schlüssels. |
-| `BROWSER_ENABLED` | `false` | Browsermodus: Seiten, die JavaScript brauchen, werden in Chromium gerendert. |
+| `BROWSER_ENABLED` | `false` | Browser-Modus: Seiten, die JavaScript brauchen, werden in Chromium gerendert. |
 | `BROWSER_QUEUE_WAIT_SECONDS` | `10` | Wie lange eine Anfrage darauf wartet, dass ein Browser-Worker ihre Seite übernimmt. |
 | `BROWSER_UNBLOCK_ENABLED` | `false` | Erlaubt Admins die maximale Extraktion (Entsperrmodus). |
 | `DOCUMENT_MAX_BYTES` | `20000000` | Höchstens so viele Bytes eines hochgeladenen Dokuments. |

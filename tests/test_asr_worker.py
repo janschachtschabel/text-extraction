@@ -1607,6 +1607,7 @@ def test_missing_model_exit_1(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
     monkeypatch.setenv("LOG_FORMAT", "json")
     monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path))
 
@@ -1623,6 +1624,7 @@ def test_missing_model_exit_1(
 
 def test_check_exits_1_without_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
     monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path))
 
     with pytest.raises(SystemExit) as exit_info:
@@ -1631,10 +1633,104 @@ def test_check_exits_1_without_models(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert exit_info.value.code == 1
 
 
+def _asr_off_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    monkeypatch.setenv("ASR_ENABLED", "false")
+    monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path / "empty"))  # no model at all
+
+
+def test_download_models_with_asr_off_downloads_nothing_and_exits_0(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _asr_off_env(monkeypatch, tmp_path)
+
+    def download(root: Path, manifest: model_store.Manifest, **_kwargs: Any) -> bool:
+        raise AssertionError("ASR_ENABLED=false downloads no model")
+
+    monkeypatch.setattr(model_store, "download_models", download)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--download-models"])
+
+    assert exit_info.value.code == 0
+    assert "asr_disabled" in capsys.readouterr().out
+
+
+def test_check_with_asr_off_exits_0_without_a_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _asr_off_env(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--check"])
+
+    assert exit_info.value.code == 0
+    assert "asr_disabled" in capsys.readouterr().out
+
+
+def test_the_worker_with_asr_off_idles_without_models_or_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _asr_off_env(monkeypatch, tmp_path)
+    idled: list[Settings] = []
+
+    async def idle(settings: Settings) -> None:
+        idled.append(settings)
+
+    async def run(_settings: Settings) -> None:
+        raise AssertionError("no queue worker, no model, with ASR_ENABLED=false")
+
+    monkeypatch.setattr(asr_worker, "_idle", idle)
+    monkeypatch.setattr(asr_worker, "_run", run)
+
+    asr_worker.main([])  # returns: no SystemExit, no models_missing exit
+
+    assert len(idled) == 1
+    assert "asr_disabled" in capsys.readouterr().out
+
+
+class _IdleServer:
+    """Stands in for the internal server: serves until ``should_exit``."""
+
+    def __init__(self) -> None:
+        self.should_exit = False
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    async def serve(self) -> None:
+        self.started.set()
+        await self.finished.wait()
+
+
+@scenario
+async def test_an_idle_worker_is_ready_and_stops_on_its_signal() -> None:
+    from text_extraction.internal import Readiness
+
+    readiness = Readiness()
+    server = _IdleServer()
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(
+        asr_worker.serve_idle(server, readiness, stop=stop)  # type: ignore[arg-type]
+    )
+    await asyncio.wait_for(server.started.wait(), 5)
+    await asyncio.sleep(0.05)
+    assert readiness.ready  # /health and /ready answer 200 on the internal app
+
+    stop.set()
+    await asyncio.sleep(0.05)
+    assert not readiness.ready
+    assert server.should_exit
+    server.finished.set()  # the server ends once told to
+    await asyncio.wait_for(task, 5)
+
+
 def test_download_models_fetches_only_the_configured_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
     monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path))
     monkeypatch.setenv("ASR_MODEL", "small")
     seen: list[tuple[Path, model_store.Manifest]] = []
@@ -1658,6 +1754,7 @@ def test_a_failed_download_exits_1(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
     monkeypatch.setenv("LOG_FORMAT", "json")
     monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path))
 
@@ -1784,6 +1881,7 @@ def test_self_check_of_the_external_backend_fails(tmp_path: Path, answers: dict[
 
 def openai_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
     monkeypatch.setenv("LOG_FORMAT", "json")
     monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path / "empty"))  # no model at all
     monkeypatch.setenv("ASR_BACKEND", "openai")

@@ -32,7 +32,8 @@ from starlette.responses import HTMLResponse, Response
 
 from text_extraction import jobs_api
 from text_extraction.auth import Principal, authenticate
-from text_extraction.compliance import OriginRules
+from text_extraction.compliance import BlockReason, OriginRules
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobAccepted, JobItem, JobView
 from text_extraction.pipeline import Pipeline
@@ -67,6 +68,8 @@ from text_extraction.ui.site_tree import (
     NON_CONTENT_TYPES,
     SiteTree,
     TreeBuilder,
+    apply_judgement,
+    judge_leaves,
     leaf_origins,
     mark_blocked,
 )
@@ -694,90 +697,146 @@ def _add_all(builder: TreeBuilder, items: Iterable[JobItem]) -> None:
         builder.add(item)
 
 
-# The site tree judges the leaves of at most this many origins (most leaves first) against their
-# rule files, all loads together within this many seconds; judging the leaves then takes at most
-# TREE_JUDGE_SECONDS (the origins not judged in time are unchecked).
+# The site tree judges the leaves of at most this many origins (the origins the job contacted
+# first, then most leaves first) against their rule files, all loads together within this many
+# seconds; judging the leaves then takes at most TREE_JUDGE_SECONDS on the UI's one tree thread
+# (the origins not judged in time are unchecked), and a view that cannot get that thread within
+# TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS shows every origin with rules as unchecked. The
+# tree judges with a capped copy of the rules: at
+# most TREE_RULES_MAX_RULES rules per user agent of robots.txt and ai.txt and as many tdmrep.json
+# entries, the first ones (third audit S1; a real fetch still reads the whole file).
 TREE_RULES_MAX_ORIGINS: Final = 20
 TREE_RULES_SECONDS: Final = 12
-TREE_JUDGE_SECONDS: Final = 5
+TREE_JUDGE_SECONDS: Final = 1.0
+TREE_JUDGE_GRACE_SECONDS: Final = 0.5
+TREE_RULES_MAX_RULES: Final = 1000
 
 # The tree of a running job fetches itself again after this many seconds (``live=1``).
 TREE_REFRESH_SECONDS: Final = 4
-# A live refresh reuses the rule judgement of the refresh before for this long, per job and origin
-# set, and the memo holds at most this many of them.
+# A live refresh reuses the rules and the judgements of the refreshes before for this long, per
+# job and origin set; the memo holds at most this many entries and this many judgements in all.
 TREE_RULES_REUSE_SECONDS: Final = 30
 TREE_RULES_MEMO_SIZE: Final = 64
+TREE_JUDGE_MEMO_URLS: Final = 100_000
 
 _RulesKey = tuple[str, frozenset[str]]
+_Judged = dict[str, BlockReason | None]
+
+
+@dataclass
+class _MemoEntry:
+    expires: float
+    rules: dict[str, OriginRules | None]
+    judged: _Judged
 
 
 class _RulesMemo:
-    """A bounded in-process memo of the rules a live tree was judged by: derived data that any
-    pod may recompute, so Valkey stays the only state. An entry expires ``TREE_RULES_REUSE_SECONDS``
-    after it was put (``clock`` is a ``time.monotonic``); at most ``TREE_RULES_MEMO_SIZE`` live,
-    the oldest goes first."""
+    """A bounded in-process memo of the rules a live tree was judged by, and of the judgements
+    of its URLs under them: derived data that any pod may recompute, so Valkey stays the only
+    state. An entry expires ``TREE_RULES_REUSE_SECONDS`` after it was put (``clock`` is a
+    ``time.monotonic``); at most ``TREE_RULES_MEMO_SIZE`` live and at most
+    ``TREE_JUDGE_MEMO_URLS`` judgements in all, the oldest entry goes first."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._entries: dict[_RulesKey, tuple[float, dict[str, OriginRules | None]]] = {}
+        self._entries: dict[_RulesKey, _MemoEntry] = {}
 
     def __len__(self) -> int:
         return len(self._entries)
 
-    def get(self, key: _RulesKey) -> dict[str, OriginRules | None] | None:
+    def _alive(self, key: _RulesKey) -> _MemoEntry | None:
         found = self._entries.get(key)
         if found is None:
             return None
-        if self._clock() >= found[0]:
+        if self._clock() >= found.expires:
             del self._entries[key]
             return None
-        return found[1]
+        return found
 
-    def put(self, key: _RulesKey, rules: Mapping[str, OriginRules | None]) -> None:
-        """Remember ``rules``; they join the entry of ``key`` that is still alive, which keeps its
-        expiry (so rules read again later never keep older ones alive)."""
+    def get(self, key: _RulesKey) -> dict[str, OriginRules | None] | None:
+        found = self._alive(key)
+        return found.rules if found is not None else None
+
+    def judged(self, key: _RulesKey) -> _Judged:
+        """A copy of the judgements kept for ``key`` (empty when none are)."""
+        found = self._alive(key)
+        return dict(found.judged) if found is not None else {}
+
+    def put(
+        self,
+        key: _RulesKey,
+        rules: Mapping[str, OriginRules | None],
+        judged: Mapping[str, BlockReason | None] | None = None,
+    ) -> None:
+        """Remember ``rules`` and the ``judged`` URLs (judged under those rules); they join the
+        entry of ``key`` that is still alive, which keeps its expiry (so rules read again later
+        never keep older ones alive)."""
         now = self._clock()
         kept = self._entries.get(key)
-        if kept is not None and now >= kept[0]:
+        if kept is not None and now >= kept.expires:
             kept = None
-        for old in [old for old, (expires, _) in self._entries.items() if now >= expires]:
+        for old in [old for old, entry in self._entries.items() if now >= entry.expires]:
             del self._entries[old]
         if kept is None:
             while len(self._entries) >= TREE_RULES_MEMO_SIZE:
                 del self._entries[next(iter(self._entries))]
         self._entries.pop(key, None)
-        self._entries[key] = (
-            kept[0] if kept else now + TREE_RULES_REUSE_SECONDS,
-            {**(kept[1] if kept else {}), **rules},
+        self._entries[key] = _MemoEntry(
+            kept.expires if kept else now + TREE_RULES_REUSE_SECONDS,
+            {**(kept.rules if kept else {}), **rules},
+            {**(kept.judged if kept else {}), **(judged or {})},
         )
+        total = sum(len(entry.judged) for entry in self._entries.values())
+        while total > TREE_JUDGE_MEMO_URLS and len(self._entries) > 1:
+            total -= len(self._entries.pop(next(iter(self._entries))).judged)
 
 
 _RULES_MEMO: Final = _RulesMemo()
 
 
-async def _origin_rules(pipeline: Pipeline, origin: str, url: str) -> OriginRules | None:
-    """The rules of ``url``'s origin; None when they cannot be loaded."""
+async def _origin_rules(
+    pipeline: Pipeline, origin: str, url: str, contacted: bool
+) -> OriginRules | None:
+    """The capped rules of ``url``'s origin; loaded (in the host's turn) only for an origin the
+    job ``contacted``, read from the compliance cache alone for any other. None when they cannot
+    be loaded or are not cached."""
     try:
-        return await pipeline.origin_rules(url)
+        return await pipeline.origin_rules(
+            url, cached_only=not contacted, max_rules=TREE_RULES_MAX_RULES
+        )
     except Exception as error:  # a rule file that cannot be read marks nothing
         _log.warning("tree_rules_failed", origin=origin, error_type=type(error).__name__)
         return None
 
 
-async def _tree_rules(pipeline: Pipeline, tree: SiteTree, reuse_for: str | None = None) -> SiteTree:
+async def _tree_rules(
+    pipeline: Pipeline, pool: ConversionPool, tree: SiteTree, reuse_for: str | None = None
+) -> SiteTree:
     """``tree`` with its leaves marked that the rules of their origin block under ``enforce``:
-    the rules of the first ``TREE_RULES_MAX_ORIGINS`` origins are loaded concurrently within
-    ``TREE_RULES_SECONDS`` (loads still pending then are cancelled, also when the request itself
-    is cancelled); an origin whose load fails or times out counts as not read
-    (``SiteTree.unchecked``), one past the cap as not tried (``SiteTree.unchecked_more``). With
-    ``reuse_for`` (a job id: a live refresh) the rules read at the refreshes before for the same
-    origins are reused for ``TREE_RULES_REUSE_SECONDS`` (an origin whose rules were not read is
-    read again)."""
-    origins = list(leaf_origins(tree).items())[:TREE_RULES_MAX_ORIGINS]
+    the rules of the first ``TREE_RULES_MAX_ORIGINS`` origins (those the job contacted first,
+    `SiteTree.contacted`, then by leaves) are read concurrently within ``TREE_RULES_SECONDS``
+    (loads still pending then are cancelled, also when the request itself is cancelled): an
+    origin the job contacted from the cache or loaded in its host's turn, any other (a sitemap
+    may list URLs on any host) from the cache alone. An origin whose rules fail, time out or are
+    not cached counts as not read (``SiteTree.unchecked``), one past the cap as not tried
+    (``SiteTree.unchecked_more``). The leaves are judged on ``pool`` (the UI's own one thread,
+    never the conversion pool, so a tree does not queue behind conversions) within
+    ``TREE_JUDGE_SECONDS`` from the call (waiting for the thread counts); when the judgement has
+    not ended ``TREE_JUDGE_GRACE_SECONDS`` after that (the thread is busy with another tree),
+    every origin with rules is unchecked and a late judgement is dropped: the thread only reads
+    the tree (`judge_leaves`), its result is applied after the await (`apply_judgement`). Without
+    any rules nothing waits for the pool. With ``reuse_for`` (a job id: a live refresh) the
+    rules read and the URLs judged at the refreshes before for the same origins are reused for
+    ``TREE_RULES_REUSE_SECONDS`` (an origin whose rules were not read is read again, a URL not
+    judged yet is judged)."""
+    contacted = tree.contacted
+    ordered = sorted(leaf_origins(tree).items(), key=lambda pair: pair[0] not in contacted)
+    origins = ordered[:TREE_RULES_MAX_ORIGINS]
     key = (reuse_for, frozenset(origin for origin, _ in origins)) if reuse_for else None
     rules: dict[str, OriginRules | None] = dict(_RULES_MEMO.get(key) or {}) if key else {}
+    judged = _RULES_MEMO.judged(key) if key else {}
     loads = {
-        origin: asyncio.ensure_future(_origin_rules(pipeline, origin, url))
+        origin: asyncio.ensure_future(_origin_rules(pipeline, origin, url, origin in contacted))
         for origin, url in origins
         if origin not in rules
     }
@@ -798,14 +857,29 @@ async def _tree_rules(pipeline: Pipeline, tree: SiteTree, reuse_for: str | None 
         for load in pending:
             load.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+    if all(known is None for known in rules.values()):
+        return mark_blocked(tree, rules)  # nothing to judge
+    # The deadline runs from here, so time spent waiting for the thread counts; the thread only
+    # reads the tree, and its judgement is applied here, after the await, or never.
+    deadline = time.monotonic() + TREE_JUDGE_SECONDS
+    try:
+        judgement = await asyncio.wait_for(
+            pool.run(judge_leaves, tree, rules, deadline, judged),
+            TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS,
+        )
+    except TimeoutError:
+        # Not judged in time (the thread was busy): a late judgement is dropped, every origin
+        # with rules is unchecked, and nothing is remembered.
+        _log.warning("tree_judge_timeout", origins=len(rules))
+        return mark_blocked(tree, rules, deadline=0)
+    marked = apply_judgement(tree, rules, judgement)
     if key:
-        # What was read is kept; an origin that failed or ran late is tried again at the next
-        # refresh, the others are not.
+        # What was read is kept with the judgements made under it; an origin that failed or ran
+        # late is tried again at the next refresh, the others are not.
         found = {origin: known for origin, known in rules.items() if known is not None}
         if found:
-            _RULES_MEMO.put(key, found)
-    deadline = time.monotonic() + TREE_JUDGE_SECONDS
-    return await asyncio.to_thread(mark_blocked, tree, rules, deadline)
+            _RULES_MEMO.put(key, found, judged)
+    return marked
 
 
 async def site_tree_view(request: Request, settings: Settings) -> Response:
@@ -813,10 +887,11 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     pages of 20 items until ``next_offset`` is null, kept as the tree's fields only, and shown
     as a tree of checkboxes; while the job runs, as a snapshot. One rate-limit hit per 500
     items read (``TREE_ITEMS_PER_HIT``, a REST page, M4). The leaves are then judged against the
-    rule files (robots.txt, TDMRep, ai.txt) of their origins, which are loaded once per origin
-    (`_tree_rules`: the ``TREE_RULES_MAX_ORIGINS`` origins with most leaves, loaded within
-    ``TREE_RULES_SECONDS`` in all and judged within ``TREE_JUDGE_SECONDS``; origins that fail or
-    run out of time are ``unchecked``, those past the cap are counted in ``unchecked_more``); a
+    rule files (robots.txt, TDMRep, ai.txt) of their origins, which are read once per origin
+    (`_tree_rules`: the ``TREE_RULES_MAX_ORIGINS`` origins, those the job contacted first, read
+    within ``TREE_RULES_SECONDS`` in all, loaded only for an origin the job contacted, and
+    judged within ``TREE_JUDGE_SECONDS``; origins that fail, are not cached or run out of time
+    are ``unchecked``, those past the cap are counted in ``unchecked_more``); a
     leaf that ``enforce`` would block is marked and, while the form's "Site rules" is
     ``enforce``, cannot be selected. While the job runs, the tree is wrapped in an element that
     fetches it again after ``TREE_REFRESH_SECONDS`` (``live=1``: the rules are then reused, see
@@ -847,7 +922,12 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
-    tree = await _tree_rules(request.app.state.pipeline, tree, job_id if live else None)
+    tree = await _tree_rules(
+        request.app.state.pipeline,
+        request.app.state.ui_tree_pool,
+        tree,
+        job_id if live else None,
+    )
     access = access_offer(principal.role, settings)
     preset = access_value(access, tree.crawl_mode)
     context = {

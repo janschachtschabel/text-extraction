@@ -14,12 +14,12 @@ Antwort, auf die es ankommt. Eigene Dateien, Audio und Video beschreibt
 - „Format“: Markdown oder Text.
 - „Browser-Fallback“: wenn die Seite ihn braucht (der Standard), nie oder immer; siehe
   [Browser-Fallback](usage.md#browser-fallback).
-- „Website-Regeln“ (nur Admins): siehe [Website-Regeln](site-rules.md).
+- „Website-Regeln“: Regeln einhalten, nur prüfen und melden oder Prüfung aus, je nach Rolle; siehe [Website-Regeln](site-rules.md#in-der-spielwiese).
 - „Metadaten“ (standardmäßig an), „Metadaten, strukturiert“ (die schema.org- und LRMI-Felder,
   nach Namen gelesen) und „Bilder beschreiben“.
 - „Screenshot mitliefern“: die ganze Seite als PNG, im Browser aufgenommen; die Anfrage dauert
   daher länger. Das Kästchen ist bei „Browser-Fallback: nie“ und solange der Browser aus ist
-  gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Reiter Screenshot.
+  gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Tab **Screenshot**.
 - „Optionale Funktionen“: „OCR (Texterkennung)“ (automatisch, nie, immer), „Personenbezogene
   Daten“ (unverändert lassen, maskieren, schwärzen, hashen, nur markieren) und „Audio und Video
   ohne Untertitel transkribieren“. Standardmäßig ist nichts gewählt. Eine Funktion, die der Dienst
@@ -107,6 +107,17 @@ bleibt stehen, ebenso eine innerhalb von `pre`, `code`, `kbd`, `samp`, `var`, `t
 sie in einem zugeklappten Abschnitt nach „Bilder“. Eine Meldung, die über mehrere Zeilen geht,
 bleibt im Text: PHP 8 schreibt eine nicht abgefangene Ausnahme („Fatal error: Uncaught …“) mit
 ihrem Stacktrace, und die wird nicht entfernt.
+
+Eine Meldung, die eine Seite zitiert, bleibt ebenfalls stehen: In einem Zitat (`blockquote`, `q`,
+`cite`), einer Überschrift, einem Listeneintrag, einer Tabellenzelle, einer Definitionsliste oder
+einer Bildunterschrift wird nur die Form mit fettem Label und fettem Pfad entfernt
+(`<b>Warning</b>: … in <b>/var/www/page.php</b> on line <b>12</b>`), wie PHP sie
+mit eingeschaltetem `html_errors` schreibt. Eine als reiner Text kopierte Meldung bleibt dort
+stehen. Außerhalb dieser Stellen wird auch die reine Textform entfernt; ein Forenbeitrag, der eine
+Meldung in einem gewöhnlichen Absatz in eine eigene Zeile einfügt, verliert sie also, in einem
+Zitat bleibt sie stehen. Neben `.php`-Dateien erkennt die Umwandlung `.inc`, `.phtml` und
+Drupals `.module`, `.theme`, `.install` und `.engine`. Eine Tabelle, die Xdebug für eine Meldung
+ausgibt (sie beginnt mit „( ! )“), wird als Ganzes entfernt und einmal aufgeführt.
 
 Eine Lizenz hat eine `id` (etwa `CC-BY-SA-4.0`), eine `url`, ein `label`, ihre `source` (ein Link
 `rel-license`, JSON-LD, Microdata, RDFa, ein Meta-Tag oder der Text der Seite) und eine

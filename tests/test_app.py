@@ -350,3 +350,19 @@ def test_public_app_shuts_its_conversion_pool_down_on_exit(registry: CollectorRe
 
     with pytest.raises(RuntimeError, match="shutdown"):
         asyncio.run(app.state.conversion_pool.run(int, "1"))
+
+
+def test_the_ui_tree_pool_exists_only_with_the_ui_and_is_shut_down_on_exit(
+    registry: CollectorRegistry,
+) -> None:
+    without = create_public_app(make_settings(), FakeAsyncRedis(), registry)
+    with TestClient(without):
+        assert without.state.ui_tree_pool is None
+
+    settings = make_settings().model_copy(update={"ui_enabled": True})
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app):
+        assert asyncio.run(app.state.ui_tree_pool.run(int, "1")) == 1
+
+    with pytest.raises(RuntimeError, match="shutdown"):
+        asyncio.run(app.state.ui_tree_pool.run(int, "1"))

@@ -153,6 +153,7 @@ from text_extraction.job_models import (
     JobState,
 )
 from text_extraction.settings import Settings
+from text_extraction.site.types import SiteOptions
 from text_extraction.valkey import reply_text
 
 # What one result write did: finished its item (``first``), finished the item and with it the
@@ -501,7 +502,8 @@ def _options_json(options: JobOptions) -> str:
     ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none),
     ``describe_images`` (none), ``site`` (none) and ``screenshot_options`` (none) are left out
     while they are the default: pods of a release before them parse the options strictly, and
-    during a rolling upgrade they read the jobs that new pods create."""
+    during a rolling upgrade they read the jobs that new pods create. So is ``site.discovery``
+    while it is ``crawl`` (ruling AU3-R1: ``SiteOptions`` of 0.1.5 forbids unknown fields)."""
     defaults = JobOptions.model_fields
     omit = {
         name
@@ -518,7 +520,11 @@ def _options_json(options: JobOptions) -> str:
         )
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
-    return options.model_dump_json(exclude=omit or None)
+    exclude: dict[str, Any] = dict.fromkeys(omit, True)
+    site = options.site
+    if site is not None and site.discovery == SiteOptions.model_fields["discovery"].default:
+        exclude["site"] = {"discovery": True}
+    return options.model_dump_json(exclude=exclude or None)
 
 
 def _budget_member(job_id: str, index: int) -> str:

@@ -11,6 +11,7 @@ from protego import Protego
 from pytest_httpserver import HTTPServer
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from structlog.testing import capture_logs
 
 from text_extraction import compliance
 from text_extraction.auth import Principal
@@ -1580,3 +1581,210 @@ def test_origin_rules_parse_tdmrep_json_once_for_many_urls(monkeypatch: pytest.M
 
     assert loads == 0  # parsed when the rules were built, not per judged URL
     assert all(report.tdm_reserved is True for report in reports)
+
+
+# --- the site tree's capped copy of the rules (third audit S1) ----------------------------------
+
+HOSTILE_ROBOTS = "\n".join(
+    ["User-agent: *", "Disallow: /first"]
+    + [f"Disallow: /*q{i:05d}*zz" for i in range(24_998)]
+    + ["Disallow: /last"]
+)
+HOSTILE_TDMREP = json.dumps(
+    [{"location": "/first", "tdm-reservation": 1}]
+    + [{"location": "/*" + "q" * 20 + "*z", "tdm-reservation": 1}] * 7_998
+    + [{"location": "/last", "tdm-reservation": 1}]
+)
+
+
+def _average_judge_ms(rules: compliance.OriginRules) -> float:
+    urls = [f"{ORIGIN}/section/{i}/{'a' * 80}" for i in range(200)]
+    started = time.perf_counter()
+    for url in urls:
+        rules.judge(url, "enforce")
+    return (time.perf_counter() - started) * 1000 / len(urls)
+
+
+@pytest.mark.parametrize("path", [ROBOTS, AI_TXT])
+def test_capped_rules_keep_the_first_robots_rules_and_judge_fast(path: str) -> None:
+    files = origin_files()
+    files[path] = result(path, HOSTILE_ROBOTS)
+    checker, _, _ = make_checker(files)
+
+    async def run() -> None:
+        capped = await checker.origin_rules(PAGE, cached_only=False, max_rules=1000)
+        assert capped is not None
+        assert capped.judge(f"{ORIGIN}/first", "enforce").decision == "blocked"
+        assert capped.judge(f"{ORIGIN}/last", "enforce").decision == "allowed"
+        assert _average_judge_ms(capped) < 2  # uncapped: about 8 ms
+        # A real fetch still reads the whole file.
+        assert (await checker.before_fetch(f"{ORIGIN}/last", "enforce")).decision == "blocked"
+        full = await checker.origin_rules(PAGE, cached_only=False)
+        assert full is not None
+        assert full.judge(f"{ORIGIN}/last", "enforce").decision == "blocked"
+
+    asyncio.run(run())
+
+
+def test_capped_rules_keep_the_first_tdmrep_entries_and_judge_fast() -> None:
+    files = origin_files()
+    files[TDMREP] = result(TDMREP, HOSTILE_TDMREP)
+    checker, _, _ = make_checker(files)
+
+    async def run() -> None:
+        capped = await checker.origin_rules(PAGE, cached_only=False, max_rules=1000)
+        assert capped is not None
+        assert capped.tdm_entries is not None
+        assert len(capped.tdm_entries) == 1000
+        assert capped.tdm_entries[0].location == "/first"
+        assert capped.judge(f"{ORIGIN}/first", "enforce").tdm_reserved is True
+        assert capped.judge(f"{ORIGIN}/last", "enforce").tdm_reserved is None
+        assert _average_judge_ms(capped) < 2  # uncapped: about 4 ms
+        assert (await checker.before_fetch(f"{ORIGIN}/last", "enforce")).tdm_reserved is True
+
+    asyncio.run(run())
+
+
+def test_capped_rules_keep_the_record_groups() -> None:
+    """A group whose rules are all past the cap still ends where it ended: the next group's
+    rules apply to its own user agents only."""
+    robots = "\n".join(
+        [
+            "User-agent: *",
+            "Disallow: /a",
+            "Disallow: /b",
+            "",
+            "User-agent: *",
+            "Disallow: /c",
+            "User-agent: text-extraction",
+            "Disallow: /private",
+            "# a comment",
+            "user agent: OtherBot",
+            "Disallow /other",
+        ]
+    )
+    files = origin_files()
+    files[ROBOTS] = result(ROBOTS, robots)
+    checker, _, _ = make_checker(files)
+    capped = asyncio.run(checker.origin_rules(PAGE, cached_only=False, max_rules=1))
+    assert capped is not None
+    assert capped.robots_rules is not None
+
+    assert not capped.robots_rules.can_fetch(f"{ORIGIN}/private", "text-extraction")
+    assert not capped.robots_rules.can_fetch(f"{ORIGIN}/other", "otherbot")
+    assert not capped.robots_rules.can_fetch(f"{ORIGIN}/a", "somebot")
+    assert capped.robots_rules.can_fetch(f"{ORIGIN}/b", "somebot")  # past the cap
+    assert capped.robots_rules.can_fetch(f"{ORIGIN}/private", "somebot")
+
+
+def test_capped_rules_under_the_cap_judge_as_the_full_rules() -> None:
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        for path in ("/", "/private/x", "/tdm/a", "/ai/b"):
+            url = f"{ORIGIN}{path}"
+            capped = await checker.origin_rules(url, cached_only=False, max_rules=1000)
+            assert capped is not None
+            assert capped.judge(url, "enforce") == await checker.before_fetch(url, "enforce")
+        assert await checker.origin_rules(PAGE, cached_only=True, max_rules=1000) is not None
+
+    asyncio.run(run())
+
+
+def test_tdmrep_json_is_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: list[str] = []
+    real = compliance._parse_tdmrep
+
+    def recording(body: str) -> Any:
+        threads.append(threading.current_thread().name)
+        return real(body)
+
+    monkeypatch.setattr(compliance, "_parse_tdmrep", recording)
+    checker, _, _ = make_checker(origin_files())
+
+    report = asyncio.run(checker.before_fetch(f"{ORIGIN}/tdm/a", "enforce"))
+
+    assert report.tdm_reserved is True
+    assert threads
+    assert threading.main_thread().name not in threads
+
+
+def test_tdmrep_json_of_the_same_body_is_parsed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    real = compliance._parse_tdmrep
+
+    def counting(body: str) -> Any:
+        calls.append(body)
+        return real(body)
+
+    monkeypatch.setattr(compliance, "_parse_tdmrep", counting)
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        first = await checker.before_fetch(f"{ORIGIN}/tdm/a", "enforce")
+        second = await checker.before_fetch(f"{ORIGIN}/tdm/b", "enforce")
+        capped = await checker.origin_rules(PAGE, cached_only=False, max_rules=1000)
+        assert first.tdm_reserved is True
+        assert second.tdm_reserved is True
+        assert capped is not None
+
+    asyncio.run(run())
+
+    assert len(calls) == 1
+
+
+def test_the_tdmrep_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compliance, "_TDM_CACHE_SIZE", 2)
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        for index in range(4):
+            body = json.dumps([{"location": f"/x{index}", "tdm-reservation": 1}])
+            entry = compliance._Entry(state="found", body=body)
+            assert await checker._tdm_entries(entry, None)
+
+    asyncio.run(run())
+
+    assert len(checker._tdm_cache) == 2
+
+
+def test_capped_rules_without_protegos_reader_are_none_and_logged_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A protego release without the reader the capped copy uses: the tree gets no rules (its
+    origin is unchecked) and fetches nothing for them; real checks still work."""
+    monkeypatch.setattr(compliance, "_PROTEGO_PARSER", "protego._no_such_module")
+    compliance._protego_grouping.cache_clear()
+    try:
+        checker, fetcher, _ = make_checker(origin_files())
+        with capture_logs() as logs:
+            for _ in range(2):
+                capped = asyncio.run(checker.origin_rules(PAGE, cached_only=False, max_rules=10))
+                assert capped is None
+        assert fetcher.calls == []
+        unavailable = [log for log in logs if log["event"] == "compliance_capped_rules_unavailable"]
+        assert len(unavailable) == 1
+        assert unavailable[0]["log_level"] == "warning"
+        assert compliance.capped_rules_available() is False
+        assert asyncio.run(checker.origin_rules(PAGE, cached_only=False)) is not None
+    finally:
+        monkeypatch.undo()
+        compliance._protego_grouping.cache_clear()
+    assert compliance.capped_rules_available() is True
+
+
+def test_capped_copies_have_a_cache_of_their_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compliance, "_CAPPED_RULES_CACHE_SIZE", 2)
+    checker, _, _ = make_checker({})
+
+    async def run() -> None:
+        whole = compliance._Entry("found", "User-agent: *\nDisallow: /whole\n")
+        await checker._rules(whole)
+        for number in range(5):
+            entry = compliance._Entry("found", f"User-agent: *\nDisallow: /{number}\n")
+            await checker._rules(entry, 1000)
+
+    asyncio.run(run())
+
+    assert len(checker._capped_cache) == 2
+    assert len(checker._rules_cache) == 1  # the capped copies never push out a fetch's parse

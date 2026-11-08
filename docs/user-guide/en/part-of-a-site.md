@@ -66,8 +66,10 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
 ## In the playground
 
 - **Site structure**: enter the start URL, set "Scope" to "path: only below the start URL's
-  directory", "Link depth" and "Most pages", clear "robots.txt and sitemaps" for
-  `"sitemaps": false`, and press "Read the site structure". Once the job is completed, "Show as
+  directory", "Link depth" and "Most pages", choose "Thorough: follow links" under "How to read
+  the site" (the preset "Fast: sitemap first" reads only the start page when the site has a
+  sitemap, and a sitemap lists the whole site; clearing "robots.txt and sitemaps" chooses it for
+  you), clear "robots.txt and sitemaps" for `"sitemaps": false`, and press "Read the site structure". Once the job is completed, "Show as
   tree" lists its pages by host and path, each marked crawled, sitemap or linked only; while it
   runs, "Show tree now" shows a snapshot. Check the pages you want, or a section to check all
   its pages, and press "Extract selected": the checked URLs become batches, with the format,
@@ -102,10 +104,13 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   language and tracking parameters such as `?lang=en` do not count), "from the sitemap" (the file
   name of the sitemap that listed it, such as `post-sitemap.xml` or
   `wp-sitemap-posts-event-1.xml`), "from the link text" (a link named like a type, such as
-  "Kontakt", or in a pagination), "from keywords" (a word of the path or the link text, such as
+  "Kontakt", or in a pagination; a type's name counts only for a short address or one whose
+  last part is no name of several words, so "Anmelden" to `/fortbildungen/mathe-workshop-2026`
+  does not make a login page), "from keywords" (a word of the path or the link text, such as
   `veranstaltung` for "Event" or `arbeitsblatt` for "Learning material") or "a page with a name,
   not fetched" ("Content", the default for a URL with a readable name). A guess from the default
-  gives way to any other reason. Only a URL that no rule can guess (a number, a hex string
+  gives way to any other reason, but a link text does not replace it for a URL from a sitemap:
+  a listed page linked as "Datenschutz" stays "Content" and checked. Only a URL that no rule can guess (a number, a hex string
   or a UUID as its last part, a last part without a word of three letters, or a query that is not
   a language or tracking parameter) shows the badge "Type open", with the reason "Not fetched; its type shows when it is extracted" (as
   tooltip and for screen readers), and the "Types:" line and the chips count "Type open" as well. "Select
@@ -117,8 +122,12 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   the URL, or robots.txt could not be retrieved) or "TDM" (a tdmrep.json reservation, an ai.txt
   disallow or a noai statement). The reason is the badge's tooltip and is read out by screen
   readers. Every shown URL is judged when the tree is shown, against the site's current
-  robots.txt, tdmrep.json and ai.txt (from the cache, or loaded once per site within the per-host
-  limits; at most 20 sites and 12 s), so the marks show the rules at that time. Links that the
+  robots.txt, tdmrep.json and ai.txt, so the marks show the rules at that time. The rule files
+  are loaded (within the per-host limits; at most 20 sites and 12 s) only for the sites the crawl
+  contacted: the start site, sites it was redirected to, the robots.txt and sitemap hosts and the
+  pages it queued. Any other site is read from the cache only and, when it is not cached, listed
+  as not checked. A very large rule file (over 1,000 rules) is judged from its first 1,000 rules,
+  as a best effort; the check of the batch still decides. Links that the
   crawl did not follow because the rules blocked them appear as "linked only" leaves. A line above
   the tree counts the blocked URLs, and another names sites whose rules could not be read. Under
   "Respect the site's rules", blocked URLs cannot be checked, and "Select all", "Select content
@@ -147,7 +156,7 @@ completed.
 
 ## With MCP
 
-`site_structure` takes `url`, `depth`, `max_pages` and `scope`; `batch_extract` takes `urls`,
+`site_structure` takes `url`, `depth`, `max_pages`, `scope` and `discovery`; `batch_extract` takes `urls`,
 `format` and `mode`. Both answer a job: call `get_job` with its `job_id` until it is completed,
 and page through its items with `offset` and `limit`.
 

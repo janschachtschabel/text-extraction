@@ -143,6 +143,15 @@ autoscaling:
   # for the workers' HPAs; docs/handover.md item 8).
   targetCPUUtilizationPercentage: 70
 
+# PodDisruptionBudget for the API pods and for each enabled worker pool, so a node drain never
+# takes down more than `maxUnavailable` pods of one component at a time. A budget is rendered
+# only for a component with more than one replica (its `replicaCount`, or the HPA's or KEDA's
+# minimum): a budget on a single pod would block every drain. The ASR workers' transcriptions
+# in flight are interrupted by an eviction all the same (see `workers.asr`).
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
 # Jobs (POST /v1/batch, GET /v1/jobs/{id}, slow POST /v1/extract) are executed by the workers below.
 jobs:
   # Rendered as JOBS_ENABLED on the API pods. Unset (the default) means true while

@@ -77,6 +77,7 @@ Terms of the API and of this guide.
 | playground | Spielwiese | The web interface at `/ui`. |
 | result envelope | Ergebnis-Envelope | The shape of every answer: `status`, `data`, `error`. |
 | maximum extraction | maximale Extraktion | `compliance: ignore` with unblock mode, for contract partners. |
+| browser mode | Browser-Modus | Pages that need JavaScript are rendered in Chromium (`BROWSER_ENABLED`; `mode: browser` and the fallback of `auto`). |
 | unblock browser | Entsperr-Browser | The stealth Chrome of unblock mode. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | A site's reservation against text and data mining. |
 | page type | Seitentyp | The kind of a page (`page_type`), such as content, listing or imprint; found by rules. |

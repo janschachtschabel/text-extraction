@@ -42,6 +42,7 @@ requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playg
 | Valkey Deployment, Service, optional PVC | `valkey.enabled` | `redis://<release>-text-extraction-valkey:6379/0`. |
 | Ingress | `ingress.enabled` | Routes to the public Service port 8080 only. |
 | HorizontalPodAutoscaler | `autoscaling.enabled` | CPU utilisation. Replaces `replicaCount`. |
+| PodDisruptionBudget `<release>-text-extraction` and `<release>-text-extraction-worker-<pool>` | `podDisruptionBudget.enabled` | `maxUnavailable` (default 1) for the API pods and for each enabled worker pool, only for a component with more than one replica (`replicaCount`, or the HPA's or KEDA's minimum). |
 | ServiceMonitor | `metrics.serviceMonitor.enabled` | Scrapes the internal Services of the API pods and of the workers, port `internal`, path `/metrics`. |
 | PrometheusRule | `metrics.prometheusRule.enabled` | `TextExtractionDown`, `TextExtractionHigh5xx` and, with jobs enabled, the job alerts below. |
 
@@ -197,6 +198,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
+| `podDisruptionBudget.enabled` | `false` | Render PodDisruptionBudgets (above). On in `values-production.example.yaml`. |
+| `podDisruptionBudget.maxUnavailable` | `1` | Pods of one component that a node drain may take down at once. |
 | `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 400 `invalid_request` and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
 | `mcp.enabled` | `false` | Serve the MCP endpoint at `/mcp` on the API pods (`MCP_ENABLED`); see [MCP and playground](#mcp-and-playground). A `config.MCP_ENABLED` entry is ignored. |
 | `ui.enabled` | `false` | Serve the playground at `/ui` on the API pods (`UI_ENABLED`). Its password is an API key; under `config.AUTH_MODE=none` it is open to anyone who can reach the service, and the install notes warn. A `config.UI_ENABLED` entry is ignored. |
