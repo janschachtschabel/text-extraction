@@ -9,7 +9,7 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
-## [0.1.7] - 2026-11-07
+## [0.1.7] - 2026-11-08
 
 ### Changed
 
