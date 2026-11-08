@@ -16,9 +16,11 @@
 #
 # HTTPS: the api service carries Traefik labels (Traefik's Docker provider with
 # exposedbydefault=false, as on a Hostinger VPS). Set DOMAIN in .env to the bare host name (no
-# https://) whose DNS points at the server; the init service refuses anything else. The default
-# network is named TRAEFIK_NETWORK (default text-extraction-web): created when missing, shared when
-# it exists. Without Traefik the labels do nothing. The API is also published on API_PORT
+# https://) whose DNS points at the server; the init service refuses anything else. Until DOMAIN
+# is set, Traefik logs a rule error for the empty Host() (harmless). The api service also joins
+# the network TRAEFIK_NETWORK (default text-extraction-web, created when missing, shared when it
+# exists); Valkey and the workers stay on the project's own network `backend`. Without Traefik the
+# labels do nothing. The API is also published on API_PORT
 # (default 8080, all interfaces); `127.0.0.1:8080` keeps it to the server itself, so that only
 # Traefik's HTTPS reaches it from outside.
 #
@@ -42,6 +44,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-init"]
     restart: "no"
+    networks:
+      - backend
     environment:
       DOMAIN: ${DOMAIN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -55,6 +59,8 @@ services:
   valkey:
     image: valkey/valkey:8.1-alpine
     restart: unless-stopped
+    networks:
+      - backend
     # The password and a ping-only user for the health check come from the generated valkey.conf.
     # Jobs, the queue and counters are state: refuse writes when full, never evict.
     command:
@@ -83,6 +89,9 @@ services:
     image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.8}
     pull_policy: missing
     restart: unless-stopped
+    networks:
+      - default
+      - backend
     env_file:
       - path: .env
         required: false
@@ -139,6 +148,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -183,6 +194,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-browser-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -227,6 +240,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-docling-worker", "--download-models"]
     restart: "no"
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -260,6 +275,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-docling-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -306,6 +323,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-asr-worker", "--download-models"]
     restart: "no"
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -342,6 +361,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-asr-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -391,6 +412,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-nlp-worker", "--download-models"]
     restart: "no"
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -426,6 +449,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-nlp-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -474,6 +499,8 @@ services:
     pull_policy: missing
     command: ["text-extraction-llm-worker"]
     restart: unless-stopped
+    networks:
+      - backend
     env_file:
       - path: .env
         required: false
@@ -512,8 +539,12 @@ services:
     stop_grace_period: 45s
 
 networks:
+  # Shared with Traefik: only the api service joins it.
   default:
     name: ${TRAEFIK_NETWORK:-text-extraction-web}
+  # Valkey and the workers: scoped to this project, so a second stack on the same host (whose
+  # services carry the same names) never resolves this project's `valkey`.
+  backend: {}
 
 volumes:
   secrets:

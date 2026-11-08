@@ -71,7 +71,7 @@ http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
 
 `TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.8`; `0.1`
 follows the newest `0.1.x` after `docker compose pull`, since an image already on the machine is
-not pulled again). The releases and their notes are on the
+not pulled again). This file needs `0.1.8` or later: older images have no `init` service. The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).
 
 For HTTPS, the `api` service carries labels for a Traefik in front of it (Hostinger's VPS runs
@@ -94,7 +94,8 @@ repository. Plan a VPS with 8 GB of memory or more: with every worker the stack 
    (event `init_admin_key_created`).
 3. Edit the project: set `DOMAIN` in `.env` (for example the VPS host name
    `srvNNNNNN.hstgr.cloud` or your own domain with an A record pointing at the VPS), optionally
-   `API_PORT=127.0.0.1:8080`, then deploy again. Traefik gets the certificate itself.
+   `API_PORT=127.0.0.1:8080`, then deploy again. Traefik gets the certificate itself. Until
+   `DOMAIN` is set, Traefik's log shows an error about an empty `Host()` rule: that is harmless.
 4. Open `https://<DOMAIN>/ui` and log in with the key.
 
 A failed deploy shows only "Deployment failed" or "Project not found"; the web console (a root

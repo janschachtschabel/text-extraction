@@ -75,7 +75,8 @@ liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost
 
 `TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.8`; `0.1`
 folgt der neuesten `0.1.x` nach `docker compose pull`, denn ein Image, das schon auf dem Rechner
-liegt, wird nicht erneut geladen). Die Versionen und ihre Notizen stehen auf der
+liegt, wird nicht erneut geladen). Diese Datei braucht `0.1.8` oder neuer: Ältere Images haben
+keinen Dienst `init`. Die Versionen und ihre Notizen stehen auf der
 [Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
 
 Für HTTPS trägt der Dienst `api` Labels für ein vorgeschaltetes Traefik (der VPS von Hostinger hat
@@ -98,6 +99,8 @@ braucht der Stack im Leerlauf etwa 6 GiB.
 3. Das Projekt bearbeiten: `DOMAIN` in `.env` setzen (etwa den VPS-Hostnamen
    `srvNNNNNN.hstgr.cloud` oder Ihre eigene Domain mit einem A-Eintrag auf den VPS), wahlweise
    `API_PORT=127.0.0.1:8080`, dann erneut bereitstellen. Das Zertifikat holt Traefik selbst.
+   Solange `DOMAIN` leer ist, zeigt das Traefik-Log einen Fehler zu einer leeren `Host()`-Regel:
+   Der ist harmlos.
 4. `https://<DOMAIN>/ui` öffnen und mit dem Schlüssel anmelden.
 
 Eine fehlgeschlagene Bereitstellung zeigt nur „Bereitstellung fehlgeschlagen“ oder „Projekt nicht

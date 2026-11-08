@@ -23,7 +23,7 @@ kept; a row without a URL is skipped with a warning.
 ## Run it
 
 ```bash
-docker compose up --build          # API, workers and Valkey; or start them by hand (see below)
+docker compose -f docker-compose.build.yml up --build -d --wait  # the branch, not a release
 LIVE_API_KEY=... uv run python -m tests.live.run_live --urls tests/live/urls/wlo_200.csv \
   --mode auto --min-ok-rate 80
 ```
@@ -97,7 +97,7 @@ Its rows count as `ok` like any other (50 words or more); what matters is the Me
 ```bash
 # Subtitles and metadata only (no ASR worker), as the live workflow runs it:
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv --no-transcribe
-# With transcription (docker compose up, which starts the ASR worker): the media files are
+# With transcription (the compose stack, which starts the ASR worker): the media files are
 # transcribed as jobs, and an upload of the corpus clip with them.
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv \
   --upload tests/media/corpus/speech_de.ogg --timeout 120

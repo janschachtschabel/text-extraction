@@ -264,17 +264,27 @@ services apart from `init` (a test keeps the two in step).
   `PING`, and `valkey-url`, read through `VALKEY_URL_FILE`) and an admin API key (`api-keys.json`,
   read through `API_KEYS_FILE`, merged with `API_KEYS` from `.env`). The plain key appears once in
   `docker compose logs init`; `docker compose run --rm -T init text-extraction-init --show-admin-key`
-  prints it later. Deleting the volume `secrets` creates new ones on the next start.
+  prints it later. This one log line is the only place a secret is logged, on purpose: a Docker
+  panel shows logs, not volumes. Docker keeps it in the container log until `init` is recreated.
+  To rotate the key, delete `admin-key` from the volume
+  (`docker compose run --rm -T --entrypoint rm init /secrets/admin-key`), then
+  `docker compose up -d --force-recreate --wait`; deleting the volume `secrets` renews every secret
+  the same way.
 - **HTTPS through Traefik:** the `api` service carries Traefik labels for a Traefik with the Docker
   provider (a Hostinger VPS runs one): `DOMAIN` is the bare host name of the route (`init` exits 1
   on a scheme, port, path or slash), `TRAEFIK_ENTRYPOINT` (default `websecure`) and
   `TRAEFIK_CERTRESOLVER` (default `letsencrypt`) name Traefik's entry point and resolver,
   `TRAEFIK_ROUTER` (default `text-extraction`) the router and service, which must be unique in
-  Traefik. The default network is named `TRAEFIK_NETWORK` (default `text-extraction-web`): created
-  when missing, shared when it exists. Without Traefik the labels do nothing.
+  Traefik. The `api` service also joins the network `TRAEFIK_NETWORK` (default
+  `text-extraction-web`, created when missing, shared when it exists); Valkey and the workers stay
+  on the project's own network `backend`, so two stacks on one host never reach each other's
+  Valkey. Until `DOMAIN` is set, Traefik logs a rule error for the empty `Host()`; it is harmless.
+  Without Traefik the labels do nothing.
 - **Port:** the API is published on `API_PORT` (default `8080`, all interfaces);
   `127.0.0.1:8080` keeps it to the server, so that only Traefik's HTTPS reaches it from outside.
-- **Version:** `TEXT_EXTRACTION_VERSION` (default the release of the file) picks the images.
+- **Version:** `TEXT_EXTRACTION_VERSION` (default the release of the file) picks the images; the
+  root file needs 0.1.8 or later (`text-extraction-init` and the `/secrets` mount point came with
+  0.1.8), an older one fails at `init`.
 - Every service except the one-shot ones restarts `unless-stopped`.
 
 ## Response times

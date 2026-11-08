@@ -82,6 +82,15 @@ def test_no_build_bind_mount_or_external_network() -> None:
     assert root["networks"]["default"]["name"] == "${TRAEFIK_NETWORK:-text-extraction-web}"
 
 
+def test_only_the_api_joins_the_shared_network() -> None:
+    # Two stacks on one host share the named network; their `valkey` must not be found there.
+    root = _load(ROOT_FILE)
+    assert root["networks"]["backend"] == {}
+    for name, service in root["services"].items():
+        expected = ["default", "backend"] if name == "api" else ["backend"]
+        assert service["networks"] == expected, name
+
+
 def test_every_image_is_published() -> None:
     for name, service in _root_services().items():
         if name == "valkey":
