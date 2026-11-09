@@ -272,6 +272,40 @@ def test_a_heading_the_content_holds_keeps_its_section() -> None:
     )
 
 
+def test_a_held_heading_without_links_of_its_own_is_not_repeated() -> None:
+    def links(prefix: str) -> str:
+        return "".join(f'<li><a href="/{prefix}/{n}">{prefix}{n}</a></li>' for n in range(3))
+
+    page = (
+        "<html><body><h1>Optik</h1><h2>Topics</h2>"
+        f"<h3>Lower</h3><ul>{links('L')}</ul><h3>Upper</h3><ul>{links('U')}</ul></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="# Optik\n\n## Topics\n\nIntro")
+
+    assert out.startswith("### Lower\n\n- [L0]")
+    assert "## Topics" not in out
+    assert "### Upper" in out
+
+
+def test_links_to_the_same_page_in_two_spellings_are_listed_once() -> None:
+    page = (
+        "<html><body><h1>Index</h1><ul>"
+        '<li><a href="/wiki/Licht_(Physik)">Licht</a></li>'
+        '<li><a href="/wiki/Licht_%28Physik%29">Licht again</a></li>'
+        '<li><a href="/a">A</a></li><li><a href="/a/">A again</a></li>'
+        + "".join(f'<li><a href="/x/{n}">X{n}</a></li>' for n in range(4))
+        + "</ul></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="# Index")
+
+    assert "Licht again" not in out
+    assert "A again" not in out
+    assert "[Licht]" in out
+    assert "[A]" in out
+
+
 def _structure(out: str, fmt: str) -> list[tuple[str, str]]:
     """The headings and link labels of a rendered result, in order."""
     if fmt == "html":

@@ -2803,8 +2803,9 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   (matched whole: HTML entities read, `href` values and Markdown `<…>` targets taken whole,
   balanced parentheses kept, and `%28`, `%29`, `%20` equal to `(`, `)` and a space) or whose text
   is a whole line of the content (of an HTML result, a line of its text) is skipped; the page's
-  own URL (with a fragment or a trailing slash) is left out, and a repeated URL is listed once. A
-  heading the content already holds keeps its section in the lists. The added lists count
+  own URL (with a fragment or a trailing slash) is left out, and a repeated URL is listed once,
+  however it is spelled. A heading the content already holds is repeated only above links of
+  its own; as the parent of subsections it is left out. The added lists count
   towards `QUALITY_MIN_WORDS`: a thin listing they bring over the minimum is `success` and is
   not escalated as `content_too_short`. The lists are rendered in
   the requested format (Markdown headings and lists with `[`, `]` escaped and space and

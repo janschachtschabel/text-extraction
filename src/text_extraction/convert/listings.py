@@ -236,11 +236,12 @@ def _events(
             href = urldefrag(urljoin(url, attr(element, "href"))).url
             if urlsplit(href).scheme not in {"http", "https"} or _page_key(href) == page:
                 continue
-            if href in seen or url_key(href) in known_urls:
+            key = _page_key(url_key(href))
+            if key in seen or url_key(href) in known_urls:
                 continue
             label = page_tree.link_text(element)
             if label is not None and label not in known and not page_tree.is_chrome(element):
-                seen.add(href)
+                seen.add(key)
                 events.append(_Event(0, label, href))
     return events
 
@@ -275,7 +276,9 @@ def listing_lists(html: str, url: str, fmt: OutputFormat, *, existing: str) -> s
     sections = [
         LinkSection(draft.heading, draft.level, tuple(draft.links))
         for draft in drafts
-        if draft.links or draft.heading
+        # A heading the content holds is repeated only above links of its own, so that they do
+        # not run on under the list before them; a parent heading of subsections is not.
+        if draft.links or (draft.heading and draft.heading not in known)
     ]
     return render_link_sections(sections, fmt)
 

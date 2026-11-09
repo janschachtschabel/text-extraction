@@ -144,7 +144,7 @@ shape.
   and no deeper heading with links before the next heading of its level or higher is dropped,
   and so is a heading whose text is a heading line of `existing` (`#` marks stripped) — its
   links then join the section with `heading=None` (revised in fix wave 2: such a heading keeps
-  its section, `test_a_heading_the_content_holds_keeps_its_section`). Render with `render_link_sections`: markdown
+  its section when it has links of its own, `test_a_heading_the_content_holds_keeps_its_section`; a held parent heading without links of its own is left out, `test_a_held_heading_without_links_of_its_own_is_not_repeated`). Render with `render_link_sections`: markdown
   `"#" * level + " " + heading`, a blank line, `- [text](url)` lines, sections separated by a
   blank line; text the same without `#` and URLs; html `<hN>…</hN><ul><li><a href>…</a></li></ul>`
   with `html.escape(…, quote=True)`.
