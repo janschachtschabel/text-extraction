@@ -729,6 +729,46 @@ def test_entities_written_in_latex_stay_text() -> None:
     assert "\u03b1" in html  # latex2mathml's character reference becomes the character
 
 
+@pytest.mark.parametrize(
+    "latex", [r"\hspace{-500em}x", r"\kern-500em x", r"\mspace{-200mu}x", r"\hspace{ -5em}x"]
+)
+def test_negative_mathml_spaces_are_dropped(latex: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert "<mspace" in html
+    spaces = [(n, v) for n, v in attributes_of(html) if n in {"width", "lspace", "rspace"}]
+    assert spaces == []
+
+
+def test_positive_mathml_spaces_stay() -> None:
+    html = str(render_markdown(r"$$a\hspace{1em}b$$"))
+
+    assert ("width", "1em") in attributes_of(html)
+
+
+@pytest.mark.parametrize(
+    ("reference", "text"),
+    [
+        ("&#1;", "&#1;"),
+        ("&#x1F;", "&#x1F;"),
+        ("&#127;", "&#127;"),
+        ("&#x85;", "&#x85;"),
+        ("&#159;", "&#159;"),
+        ("&#9;", "\t"),
+        ("&#10;", "\n"),
+        ("&#13;", "\r"),
+        ("&#160;", "\u00a0"),
+    ],
+)
+def test_control_character_references_stay_text(reference: str, text: str) -> None:
+    element = Element("math")
+    SubElement(element, "mtext").text = reference
+
+    markdown._clean(element)
+
+    assert element[0].text == text
+
+
 def test_single_dollars_stay_text() -> None:
     assert str(render_markdown("5 $ und 10 $")) == "<p>5 $ und 10 $</p>\n"
 

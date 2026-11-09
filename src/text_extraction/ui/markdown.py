@@ -4,9 +4,9 @@ their alt text, so a page's content can neither run a script nor load anything.
 
 Equations, which the extraction writes as ``$$LaTeX$$``, become MathML on the server (the UI's
 CSP runs no inline script): latex2mathml builds the element tree, which keeps only MathML
-elements and MathML presentation attributes (colours only as a name or ``#hex``), and is
-serialised here so that every text and attribute value is escaped. LaTeX it cannot convert is
-shown as its escaped source in ``<code>``."""
+elements and MathML presentation attributes (colours only as a name or ``#hex``, no negative
+space), and is serialised here so that every text and attribute value is escaped. LaTeX it
+cannot convert is shown as its escaped source in ``<code>``."""
 
 import re
 from collections.abc import Sequence
@@ -48,6 +48,10 @@ _MATH_ATTRIBUTES: Final = frozenset(
     }
 )  # fmt: skip
 _COLOUR_ATTRIBUTES: Final = frozenset({"mathcolor", "mathbackground"})
+# The attributes of a space; a negative value is dropped.
+_SPACE_ATTRIBUTES: Final = frozenset({"width", "lspace", "rspace"})
+# The control characters a reference may stand for: tab, line feed and carriage return.
+_KEPT_CONTROLS: Final = frozenset({0x09, 0x0A, 0x0D})
 # A CSS colour name or a #hex colour (3, 4, 6 or 8 digits).
 _COLOUR: Final = re.compile(r"[a-z]{3,20}|#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})", re.I)
 # The numeric character references latex2mathml writes into texts. A named entity written in
@@ -112,15 +116,21 @@ def _math_display(state: StateCore) -> None:
 def _keeps(name: str, value: str) -> bool:
     if name in _COLOUR_ATTRIBUTES:
         return _COLOUR.fullmatch(value) is not None
+    if name in _SPACE_ATTRIBUTES and value.strip().startswith("-"):
+        return False  # a negative space pulls the formula over the text around it
     return name in _MATH_ATTRIBUTES
 
 
 def _character(match: re.Match[str]) -> str:
+    """The referenced character; a control character (C0 but tab, line feed and carriage
+    return, DEL and C1), a surrogate or no character at all stays the reference's text."""
     hexadecimal, decimal = match.groups()
     code = int(hexadecimal, 16) if hexadecimal else int(decimal)
-    if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF:
-        return chr(code)
-    return match.group()
+    if code < 0x20 and code not in _KEPT_CONTROLS:
+        return match.group()
+    if 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+        return match.group()
+    return chr(code)
 
 
 def _characters(text: str | None) -> str | None:

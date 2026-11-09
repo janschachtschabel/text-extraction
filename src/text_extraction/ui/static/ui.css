@@ -875,6 +875,18 @@ ul.server-errors {
   font-size: 1.1em;
 }
 
+/* A formula stays inside the card: a wide one (a huge \rule or space) scrolls on its own. */
+.reading .markdown math {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: middle;
+}
+
+.reading .markdown math[display="block"] {
+  display: block;
+}
+
 .reading details.source {
   margin: 24px 0 0;
 }
