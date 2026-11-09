@@ -29,8 +29,9 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString, PageElement, Tag
 from trafilatura import extract
 
-from text_extraction.convert.embedded import embedded_html
+from text_extraction.convert.embedded import Embedded, embedded_content
 from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
+from text_extraction.convert.listings import render_link_sections
 from text_extraction.convert.markup import (
     BLOCK_TAGS,
     attr,
@@ -420,6 +421,14 @@ def _extract(html: str, url: str, fmt: OutputFormat, *, recall: bool) -> str | N
     )
 
 
+def _with_attachments(text: str, embedded: Embedded | None, fmt: OutputFormat) -> str:
+    """``text`` followed by the link lists of the page's embedded attachments."""
+    rendered = render_link_sections(embedded.sections, fmt) if embedded else ""
+    if not rendered:
+        return text
+    return text + rendered if fmt == "html" else f"{text}\n\n{rendered}"
+
+
 def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     """The page's main content in ``fmt``.
 
@@ -429,9 +438,9 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     that the content links to are in the output.
     """
     soup = prepare_html(html)
-    embedded = embedded_html(soup, url)
+    embedded = embedded_content(soup, url)
     if embedded:
-        soup = prepare_html(embedded)
+        soup = prepare_html(embedded.html)
     strip_non_content(soup)
     server_errors = strip_server_errors(soup)
     notes = [SERVER_ERRORS_REMOVED_WARNING] if server_errors else []
@@ -460,7 +469,8 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
         text = None
     if text and text.strip():
         text = restore_equations(text.strip(), equations, markup=markup)
-        text = _with_documents(_with_heading(text, heading, fmt), documents, fmt)
+        text = _with_attachments(_with_heading(text, heading, fmt), embedded, fmt)
+        text = _with_documents(text, documents, fmt)
         if fmt == "markdown":
             text = enhance_table_structure(text)
         return Conversion(text, "trafilatura", title, warnings, server_errors)
@@ -472,5 +482,6 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
             "", "bs4", title, [*warnings, "No converter produced text"], server_errors
         )
     content = restore_equations(_as_format(fallback, fmt), equations, markup=markup)
-    content = _with_documents(_with_heading(content, heading, fmt), documents, fmt)
+    content = _with_attachments(_with_heading(content, heading, fmt), embedded, fmt)
+    content = _with_documents(content, documents, fmt)
     return Conversion(content, "bs4", title, warnings, server_errors)

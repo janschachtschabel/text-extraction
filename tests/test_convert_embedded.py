@@ -3,7 +3,8 @@ import json
 from bs4 import BeautifulSoup
 
 from text_extraction.convert import convert_html
-from text_extraction.convert.embedded import embedded_html
+from text_extraction.convert.embedded import embedded_content
+from text_extraction.convert.listings import LinkSection
 
 URL = "https://www.example.org/topic/1"
 BODY = "<p>" + "The lesson text is carried as data and not shown in the page shell. " * 4 + "</p>"
@@ -25,22 +26,24 @@ def test_article_body_with_headline_is_returned() -> None:
         {"@graph": [{"@type": "Article", "headline": "Data & more", "articleBody": BODY}]}
     )
 
-    result = embedded_html(soup(page), URL)
+    embedded = embedded_content(soup(page), URL)
 
-    assert result is not None
-    assert result.startswith("<h1>Data &amp; more</h1>")
-    assert "carried as data" in result
+    assert embedded is not None
+    assert embedded.html.startswith("<h1>Data &amp; more</h1>")
+    assert "carried as data" in embedded.html
 
 
 def test_visible_article_wins_over_the_data_block() -> None:
     visible = "<article>" + "A visible article with plenty of text. " * 10 + "</article>"
 
-    assert embedded_html(soup(ld_json({"articleBody": BODY}, visible)), URL) is None
+    assert embedded_content(soup(ld_json({"articleBody": BODY}, visible)), URL) is None
 
 
 def test_generic_description_is_not_a_document() -> None:
-    assert embedded_html(soup(ld_json({"description": BODY})), URL) is None
-    assert embedded_html(soup('<script type="application/ld+json">{broken</script>'), URL) is None
+    assert embedded_content(soup(ld_json({"description": BODY})), URL) is None
+    assert (
+        embedded_content(soup('<script type="application/ld+json">{broken</script>'), URL) is None
+    )
 
 
 def test_historic_topic_payload_resolves_inline_attachments() -> None:
@@ -55,13 +58,93 @@ def test_historic_topic_payload_resolves_inline_attachments() -> None:
     script = f'<script id="embedded-topic" type="json">var x = {json.dumps(payload)};</script>'
     page = f"<html><body>{script}</body></html>"
 
-    result = embedded_html(soup(page), URL)
+    embedded = embedded_content(soup(page), URL)
 
-    assert result is not None
-    assert 'href="https://www.example.org/topic/files/a.pdf"' in result
-    assert "<h2>Ideas</h2>" in result
-    assert "Extra idea" in result
-    assert "Sheet</a></li>" not in result  # used in the body, so not listed again
+    assert embedded is not None
+    assert 'href="https://www.example.org/topic/files/a.pdf"' in embedded.html
+    assert [(s.heading, s.links) for s in embedded.sections] == [
+        ("Ideas", (("Extra idea", "https://www.example.org/topic/files/b.pdf"),))
+    ]  # the sheet is used in the body, so not listed again
+
+
+def kmap_page(lang: str = ' lang="de"') -> str:
+    payload = {
+        "topic": "Physikalische Größen",
+        "description": '<p>Eine Größe hat Wert und Einheit.</p><img src="inline:Basisgrößen.png"/>',
+        "attachments": [
+            {
+                "tag": "explanation",
+                "name": "LEIFIphysik",
+                "type": "link",
+                "mime": "text/html",
+                "href": "https://www.leifiphysik.de/uebergreifend/allgemeines-und-hilfsmittel/grundwissen/si-basisgroessen-und-einheiten",
+            },
+            {
+                "tag": "explanation",
+                "name": "Physikunterricht Online",
+                "type": "link",
+                "mime": "text/html",
+                "href": "https://physikunterricht-online.de/hilfsmittel/physikalische-groessen-und-einheiten/",
+            },
+            {
+                "type": "file",
+                "name": "Basisgrößen.png",
+                "file": "Basisgrößen.png",
+                "mime": "image/png",
+                "href": "data/Physik/Basisgr%C3%B6%C3%9Fen.png",
+            },
+        ],
+    }
+    script = (
+        '<script id="embedded-topic" type="json">//<![CDATA[\n'
+        f"{json.dumps(payload)}\n//]]></script>"
+    )
+    return f'<html{lang}><head><base href="/app/"></head><body>{script}</body></html>'
+
+
+def test_link_attachments_keep_their_own_urls() -> None:
+    payload = {
+        "topic": "Lesson",
+        "description": "<p>Text.</p>",
+        "attachments": [
+            {"tag": "explanation", "name": "One", "type": "link", "href": "https://a.example/1"},
+            {"tag": "explanation", "name": "Two", "type": "link", "href": "https://b.example/2"},
+            {"type": "file", "name": "Sheet", "file": "s.pdf", "href": "files/s.pdf"},
+        ],
+    }
+    script = f'<script id="embedded-topic" type="json">{json.dumps(payload)}</script>'
+
+    embedded = embedded_content(soup(f"<html><body>{script}</body></html>"), URL)
+
+    assert embedded is not None
+    assert embedded.sections == (
+        LinkSection(
+            "Explanations", 2, (("One", "https://a.example/1"), ("Two", "https://b.example/2"))
+        ),
+        LinkSection("Attachments", 2, (("Sheet", "https://www.example.org/topic/files/s.pdf"),)),
+    )
+
+
+def test_attachment_headings_follow_the_page_language() -> None:
+    german = embedded_content(soup(kmap_page()), URL)
+    default = embedded_content(soup(kmap_page(lang="")), URL)
+
+    assert german is not None
+    assert default is not None
+    assert [s.heading for s in german.sections] == ["Erklärungen"]
+    assert [s.heading for s in default.sections] == ["Explanations"]
+
+
+def test_convert_html_keeps_kmap_attachment_links() -> None:
+    result = convert_html(kmap_page(), "https://kmap.eu/app/browser/Physik", "markdown")
+
+    assert result.content.endswith(
+        "## Erklärungen\n\n"
+        "- [LEIFIphysik](https://www.leifiphysik.de/uebergreifend/allgemeines-und-hilfsmittel/"
+        "grundwissen/si-basisgroessen-und-einheiten)\n"
+        "- [Physikunterricht Online](https://physikunterricht-online.de/hilfsmittel/"
+        "physikalische-groessen-und-einheiten/)"
+    )
 
 
 def test_youtube_watch_page_yields_video_details() -> None:
@@ -75,12 +158,13 @@ def test_youtube_watch_page_yields_video_details() -> None:
     script = f"<script>var ytInitialPlayerResponse = {json.dumps(player)};</script>"
     page = f"<html><body>{script}</body></html>"
 
-    result = embedded_html(soup(page), "https://www.youtube.com/watch?v=abc")
+    result = embedded_content(soup(page), "https://www.youtube.com/watch?v=abc")
 
-    assert result == (
+    assert result is not None
+    assert result.html == (
         "<h1>Fractions &lt;1&gt;</h1><p>Math Channel</p><p>Line one</p><p>Line two</p>"
     )
-    assert embedded_html(soup(page), "https://example.org/watch") is None
+    assert embedded_content(soup(page), "https://example.org/watch") is None
 
 
 def test_convert_html_uses_the_embedded_content() -> None:
