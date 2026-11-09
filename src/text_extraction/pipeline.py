@@ -27,7 +27,8 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
    compliance checks of step 4 before it is requested; one on another host gives the first
    host's turn back and takes the new host's, in which its missing files are fetched too.
-6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
+6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``,
+   or ``bot_protection`` when it is a 403, 429 or 503 bot challenge (``_refused``, package 20).
 7. ``documents.sniff`` names the body's kind: the declared type for HTML and XHTML, the bytes
    first otherwise (ruling F1). HTML and XHTML: decode, compliance after the fetch (headers,
    meta tags, ``noai``; may block), convert, strip domain boilerplate. ``text/plain``: decode,
@@ -276,7 +277,7 @@ from text_extraction.pipeline_render import (
     check_target,
     render_options,
 )
-from text_extraction.quality import Quality, assess, quality_error
+from text_extraction.quality import Quality, assess, is_challenge_answer, quality_error
 from text_extraction.render import (
     ArtifactSink,
     ArtifactUnavailable,
@@ -553,6 +554,29 @@ class _Run:
         details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
         return _failed(self.result(), code, message, retryable=retryable, details=details)
+
+
+def _refused(
+    run: _Run, status: int, headers: Mapping[str, str], body: bytes | str
+) -> Envelope[ExtractResult]:
+    """The failure of a page answered with an error ``status``: ``bot_protection`` when it is a
+    refusal (403, 429 or 503) that is a bot challenge (package 20), else ``target_http_error``.
+    Both keep the site's status in ``upstream_status`` and the same ``retryable`` rule."""
+    retryable = status in _RETRYABLE_STATUSES or status >= 500
+    if status in REFUSAL_STATUSES and is_challenge_answer(headers, body):
+        # Only Cloudflare's own mitigation header names it: a site that merely uses Cloudflare
+        # as its CDN (``server: cloudflare``) may run another challenge, such as Anubis.
+        vendor = " (Cloudflare)" if any(name.lower() == "cf-mitigated" for name in headers) else ""
+        return run.failed(
+            ErrorCode.BOT_PROTECTION,
+            f"The target answered HTTP {status} with a bot challenge{vendor}.",
+            retryable=retryable,
+        )
+    return run.failed(
+        ErrorCode.TARGET_HTTP_ERROR,
+        f"The target answered with HTTP status {status}.",
+        retryable=retryable,
+    )
 
 
 @dataclass(frozen=True)
@@ -1607,11 +1631,7 @@ class Pipeline:
                 return run.failed(block.code, block.message, retryable=block.retryable)
             return await self._revalidated(run, stored, fetched)
         if not 200 <= fetched.status < 300:  # also a 3xx the fetcher could not follow
-            failed = run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {fetched.status}.",
-                retryable=fetched.status in _RETRYABLE_STATUSES or fetched.status >= 500,
-            )
+            failed = _refused(run, fetched.status, fetched.headers, fetched.content)
             if failed.data is not None and self._assesses_refusal(run, fetched):
                 failed.data.quality = await self._refusal_quality(run, fetched)
             return failed
@@ -1771,7 +1791,10 @@ class Pipeline:
             quality = await self._pool.run(assess, text, "")
         finally:
             run.convert_ms += _ms(started)
-        return quality.model_copy(update={"challenge_status": quality.bot_challenge})
+        # The error code's own rule counts too (package 20), so ``challenge_status`` and a
+        # ``bot_protection`` refusal never disagree.
+        challenge = quality.bot_challenge or is_challenge_answer(fetched.headers, fetched.content)
+        return quality.model_copy(update={"challenge_status": challenge})
 
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
@@ -2459,13 +2482,9 @@ class Pipeline:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR, "The browser reported no document.", retryable=True
             )
-        status = rendered.responses[-1].status
-        if not 200 <= status < 300:  # a refused watch page: whatever the panel answered
-            return run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {status}.",
-                retryable=status in _RETRYABLE_STATUSES or status >= 500,
-            )
+        last = rendered.responses[-1]
+        if not 200 <= last.status < 300:  # a refused watch page: whatever the panel answered
+            return _refused(run, last.status, last.headers, rendered.html)
         return rendered
 
     async def _render_options(self, run: _Run, unblock: bool) -> RenderOptions:
@@ -2585,11 +2604,7 @@ class Pipeline:
         if not_cleared and not 200 <= last.status < 300:
             return run.failed(ErrorCode.BOT_PROTECTION, _QUALITY_MESSAGES[ErrorCode.BOT_PROTECTION])
         if not 200 <= last.status < 300:
-            return run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {last.status}.",
-                retryable=last.status in _RETRYABLE_STATUSES or last.status >= 500,
-            )
+            return _refused(run, last.status, last.headers, rendered.html)
         if _KINDS.get(last.content_type or "") != "html":  # a download, text, an image ...
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,

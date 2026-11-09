@@ -954,7 +954,7 @@ def test_challenge_answer_is_assessed_only_under_unblock(
 
     envelope = harness.run_once(mode="auto", compliance=compliance, principal=principal)
 
-    assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION  # a challenge refusal (package 20)
     quality = data_of(envelope).quality
     if assessed:
         assert quality is not None
@@ -1260,9 +1260,130 @@ def test_refusal_answer_is_assessed_under_unblock(
         assert data_of(envelope).quality is None
 
 
+# --- a refusal that is a bot challenge (package 20) ---------------------------------------------
+
+CLOUDFLARE = {"cf-mitigated": "challenge", "server": "cloudflare"}
+
+
+@pytest.mark.parametrize("status", [403, 429, 503])
+@pytest.mark.parametrize(
+    ("body", "headers", "vendor"),
+    [
+        (CHALLENGE_PAGE, {}, False),
+        ("Forbidden", CLOUDFLARE, True),  # the header alone is enough, whatever the body
+        ("", {"Cf-Mitigated": "challenge"}, True),
+        # A site that only uses Cloudflare as its CDN may run another challenge (Anubis).
+        (CHALLENGE_PAGE, {"server": "cloudflare"}, False),
+    ],
+    ids=["body", "header", "header-only", "cdn-only"],
+)
+def test_fast_challenge_refusal_is_bot_protection(
+    status: int, body: str, headers: dict[str, str], vendor: bool
+) -> None:
+    standard = FakeRenderer(rendered())
+    harness = RenderHarness(
+        {PAGE: fetched(body=body, status=status, headers=headers)}, renderer=standard
+    )
+
+    envelope = harness.run_once(mode="auto")
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BOT_PROTECTION
+    assert envelope.error.retryable is (status != 403)
+    suffix = " (Cloudflare)." if vendor else "."
+    assert envelope.error.message == (
+        f"The target answered HTTP {status} with a bot challenge{suffix}"
+    )
+    data = data_of(envelope)
+    assert data.upstream_status == status
+    assert data.mode_used == "fast"
+    assert standard.calls == []  # outside unblock mode a refusal never renders
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, FORBIDDEN_PAGE),
+        (404, "<html><body><p>Not here. Solve the captcha to search.</p></body></html>"),
+        (500, CHALLENGE_PAGE),  # only 403, 429 and 503 are refusals
+    ],
+)
+def test_fast_plain_refusal_stays_target_http_error(status: int, body: str) -> None:
+    harness = RenderHarness({PAGE: fetched(body=body, status=status)})
+
+    envelope = harness.run_once(mode="fast")
+
+    assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+    assert data_of(envelope).upstream_status == status
+
+
+def test_rendered_challenge_refusal_is_bot_protection() -> None:
+    challenge = rendered(CHALLENGE_PAGE, responses=[response(status=403, headers=CLOUDFLARE)])
+    harness = RenderHarness(renderer=FakeRenderer(challenge))
+
+    envelope = harness.run_once(mode="browser")
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BOT_PROTECTION
+    assert envelope.error.message == (
+        "The target answered HTTP 403 with a bot challenge (Cloudflare)."
+    )
+    data = data_of(envelope)
+    assert (data.mode_used, data.upstream_status, data.unblocked) == ("browser", 403, False)
+
+    plain = RenderHarness(
+        renderer=FakeRenderer(rendered(FORBIDDEN_PAGE, responses=[response(status=403)]))
+    )
+    assert code_of(plain.run_once(mode="browser")) == ErrorCode.TARGET_HTTP_ERROR
+
+
+@pytest.mark.parametrize(
+    ("body", "headers"),
+    [("", {"cf-mitigated": "challenge"}), (CHALLENGE_PAGE, {})],
+    ids=["header-only", "body"],
+)
+def test_an_assessed_challenge_refusal_says_so_in_both_facts(
+    body: str, headers: dict[str, str]
+) -> None:
+    """In unblock ``auto`` the refusal is assessed: ``challenge_status`` agrees with the code."""
+    harness = RenderHarness(
+        {PAGE: fetched(body=body, status=403, headers=headers)}, browser_unblock_enabled=True
+    )
+
+    envelope = harness.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION
+    quality = data_of(envelope).quality
+    assert quality is not None
+    assert quality.challenge_status is True
+
+
+def test_unblock_auto_escalates_a_challenge_refusal() -> None:
+    answers: dict[str, Answer] = {
+        PAGE: fetched(body=CHALLENGE_PAGE, status=403, headers=CLOUDFLARE)
+    }
+    standard, unblock = FakeRenderer(rendered()), FakeRenderer(rendered())
+    harness = RenderHarness(
+        answers,
+        renderer=standard,
+        unblock_renderer=unblock,
+        clearance=FakeClearance(),
+        browser_unblock_enabled=True,
+    )
+
+    envelope = harness.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+
+    assert envelope.status == "success", envelope.error
+    assert data_of(envelope).unblocked is True
+    assert len(unblock.calls) == 1
+    assert standard.calls == []
+
+
 def test_refusal_body_over_the_convert_limit_is_assessed_as_an_empty_page() -> None:
     """A refused HTML body over ``CONVERT_MAX_BYTES`` is not decoded: it is assessed as an empty
-    page, so even a challenge body is no challenge then, and the refusal still escalates."""
+    page (no ``bot_challenge``); the head of its body still makes it a challenge refusal, and the
+    refusal still escalates."""
     big_challenge = CHALLENGE_PAGE.replace("</body>", "<!--" + "x" * 2_000 + "--></body>")
     assert len(big_challenge.encode()) > 1_024
     answers: dict[str, Answer] = {PAGE: fetched(body=big_challenge, status=403)}
@@ -1278,8 +1399,10 @@ def test_refusal_body_over_the_convert_limit_is_assessed_as_an_empty_page() -> N
     assert quality is not None
     assert (quality.visible_chars, quality.word_count) == (0, 0)
     assert quality.bot_challenge is False
-    assert quality.challenge_status is False
-    assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+    # The error code's rule reads only the body's head, whatever the convert limit, and
+    # ``challenge_status`` agrees with it (package 20).
+    assert quality.challenge_status is True
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION
     assert needs_browser(envelope, unblock=True)
 
 

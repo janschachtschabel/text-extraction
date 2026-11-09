@@ -41,7 +41,8 @@ Maximum extraction needs three things:
 - an admin key (a user key that sends `compliance: ignore` gets 403 `forbidden`);
 - `"compliance": "ignore"` in the request (or none, where the operator set
   `COMPLIANCE_DEFAULT=ignore`);
-- `BROWSER_UNBLOCK_ENABLED=true` (with `BROWSER_ENABLED=true`), switched on by the operator.
+- `BROWSER_UNBLOCK_ENABLED=true` (with `BROWSER_ENABLED=true`), the operator's consent: on by
+  default in docker compose since 0.1.9, off by default in Helm and in the code.
 
 With `compliance: ignore` but unblock mode off, the checks are skipped and the normal browser is
 used: that is not maximum extraction. Under `AUTH_MODE=none` every caller is an admin. Use
@@ -69,6 +70,22 @@ maximum extraction only for a site whose owner allowed it.
 
 Where you can, ask the site owner for an allowlist rule instead: a secret header that you send
 with `headers`, or an exemption for the service's outgoing IP address.
+
+### Sites behind a bot protection
+
+Many sites sit behind a bot protection such as Cloudflare. It may refuse the service with a bot
+check, while the same page opens in a normal browser. The service then answers `failed` with
+`bot_protection`, `upstream_status` 403, 429 or 503, and an `error.message` such as "The target
+answered HTTP 403 with a bot challenge (Cloudflare).".
+
+- The normal browser says honestly that it is an automated, headless browser
+  (`HeadlessChrome` and `text-extraction/<version>` in its user agent). A protection that refuses
+  headless browsers refuses it from any network, so `mode: browser` does not help.
+- A data-centre IP address (a VPS, a cloud server) gets refused more often than a home
+  connection, even in the fast mode.
+- Ways past it: the site's operator allows the service (the service's user agent `text-extraction`
+  or the server's outgoing IP address), or, for a site that allowed extraction by contract, maximum
+  extraction with `BROWSER_UNBLOCK_ENABLED=true` (see above).
 
 ## The pause after a 429 or 503
 
@@ -158,7 +175,9 @@ Where the operator also switched on unblock mode (`BROWSER_ENABLED` and
 `compliance` in "Options (JSON)" (under "Advanced"), the form refuses it: compliance is given
 twice. With "Browser fallback" set to "never", maximum extraction stays with HTTP. The result
 shows the compliance mode, and the badge "maximum extraction (unblocked)" when `data.unblocked` is
-true.
+true. A `bot_protection` error comes with a note on the ways past the protection (left out after
+an unblocked render), and an admin whose server runs the browser without unblock mode reads at
+"Checks off" that `BROWSER_UNBLOCK_ENABLED` is off.
 
 In the site tree, URLs that the site's rules block are marked; see
 [Part of a site](part-of-a-site.md#in-the-playground).

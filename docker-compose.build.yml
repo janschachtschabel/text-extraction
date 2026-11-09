@@ -49,7 +49,7 @@ x-app: &app
     # This file always starts a browser worker, so browser mode is on for every service (an entry
     # in .env does not change it). Unblock mode is read from .env or the shell, default off.
     BROWSER_ENABLED: "true"
-    BROWSER_UNBLOCK_ENABLED: ${BROWSER_UNBLOCK_ENABLED:-false}
+    BROWSER_UNBLOCK_ENABLED: ${BROWSER_UNBLOCK_ENABLED:-true}
     # The four optional features are on for every service unless their switch is false in .env or
     # the shell (then also scale the feature's services to 0, see the top of this file); this file
     # always starts their workers. Their other settings (ASR_BACKEND, PII_MODEL_SIZE, PII_HASH_KEY,

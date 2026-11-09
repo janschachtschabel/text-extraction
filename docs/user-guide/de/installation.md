@@ -73,7 +73,7 @@ gehören wie bisher in `API_KEYS` in `.env` (siehe unten); sie gelten zusammen m
 Der interne Port 9090 (`/health`, `/ready`, `/metrics`) wird nicht veröffentlicht. Die Spielwiese
 liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
 
-`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.8`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.9`; `0.1`
 folgt der neuesten `0.1.x` nach `docker compose pull`, denn ein Image, das schon auf dem Rechner
 liegt, wird nicht erneut geladen). Diese Datei braucht `0.1.8` oder neuer: Ältere Images haben
 keinen Dienst `init`. Die Versionen und ihre Notizen stehen auf der
@@ -172,7 +172,9 @@ Die Spielwiese zeigt eine solche Auswahl deaktiviert, mit einem Hinweis. Admin-S
 jede Funktion nutzen, die der Dienst hat.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
-`BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).
+`BROWSER_UNBLOCK_ENABLED=true`. Das setzen docker compose und `.env.example` seit 0.1.9 (ein Admin
+muss weiterhin `compliance: ignore` wählen); `false` in `.env` schaltet es aus. Siehe
+[Website-Regeln](site-rules.md#maximale-extraktion).
 
 ## Kubernetes mit Helm
 

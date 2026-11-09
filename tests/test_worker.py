@@ -1620,9 +1620,9 @@ async def test_bot_wall_moves_only_for_admin_ignore_jobs_with_unblock(
 
     assert (await harness.browser_queue.counts()).pending == (1 if moves else 0)
     assert await harness.completed(job_id) is not moves
-    if not moves:  # the fast answer stays: the bot wall's 403, not a refused compliance mode
+    if not moves:  # the fast answer stays: the bot wall, not a refused compliance mode
         [item] = await harness.items(job_id)
-        assert error_of(item)[0] == ErrorCode.TARGET_HTTP_ERROR
+        assert error_of(item)[0] == ErrorCode.BOT_PROTECTION  # a challenge refusal (package 20)
 
 
 @scenario

@@ -331,11 +331,13 @@ def _access(fields: Fields, form: Mapping[str, str]) -> None:
 class AccessOffer:
     """The "Site rules" steps a caller is offered: ``modes`` in the order enforce, report,
     ignore; ``default`` is the deployment's default step; ``unblock`` tells that ``ignore`` also
-    unlocks the unblock browser for this caller."""
+    unlocks the unblock browser for this caller; ``unblock_off`` tells an admin that it would,
+    but ``BROWSER_UNBLOCK_ENABLED`` is off while the browser is on (package 20)."""
 
     modes: tuple[ComplianceMode, ...]
     default: ComplianceMode
     unblock: bool
+    unblock_off: bool = False
 
     @property
     def shown(self) -> bool:
@@ -354,8 +356,12 @@ def access_offer(role: str, settings: Settings) -> AccessOffer:
         allowed = {"enforce", "report", default}
     else:
         allowed = {default}
-    unblock = role == "admin" and settings.browser_enabled and settings.browser_unblock_enabled
-    return AccessOffer(tuple(m for m in _ACCESS_ORDER if m in allowed), default, unblock)
+    browser_admin = role == "admin" and settings.browser_enabled
+    unblock = browser_admin and settings.browser_unblock_enabled
+    unblock_off = browser_admin and not settings.browser_unblock_enabled
+    return AccessOffer(
+        tuple(m for m in _ACCESS_ORDER if m in allowed), default, unblock, unblock_off
+    )
 
 
 def access_value(offer: AccessOffer, mode: ComplianceMode | None) -> str:

@@ -296,7 +296,8 @@ the 64 KiB of `structured` and of `chunking` and the small fields, R18) and `DOC
 `POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
 also on failure, as far as the request got. `partial` keeps the content and names
 `content_too_short`; a failed quality verdict (`bot_protection`, `likely_error_page`,
-`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
+`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none
+(nor has a `bot_protection` refusal, B17).
 `data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
 result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
 Only `success` and `partial` results are cached and fingerprinted (per URL and output format; a
@@ -655,7 +656,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
      and DOM of the final response. A block discards the render. The first request of a hop to
      another host went out before its check (the accepted gap of D1); the hop gets its turn from
      then on.
-  5. The final response is judged as in fast mode: a non-2xx status is `target_http_error`, a
+  5. The final response is judged as in fast mode: a non-2xx status is `target_http_error`
+     (`bot_protection` for a challenge refusal, B17), a
      download or non-HTML type is `unsupported_content_type`, except that a download or a
      document type without caller secrets is fetched directly (package 5, F18).
   A document that cannot be loaded because the egress proxy refused its host (a private address)
@@ -762,8 +764,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   CLAUDE.md rule 6).
 - **B9, switches.** `BROWSER_ENABLED` (default false) turns browser mode on; compose and Helm set
   it from the browser worker toggle. Off, the browser options answer 400 and `auto` never
-  escalates. `BROWSER_UNBLOCK_ENABLED` (default false): off, `compliance: ignore` renders in the
-  standard browser.
+  escalates. `BROWSER_UNBLOCK_ENABLED` (default false; docker compose and `.env.example` set it to true
+  since package 20, Helm keeps it off): off, `compliance: ignore` renders in the standard
+  browser.
 - **B10, browser results.** `mode_used: "browser"` and `timings.render_ms`. Cached while fresh
   but never revalidated (no validators are stored; `raw_sha256` is the hash of the rendered HTML).
   `unblocked` is true when unblock mode rendered the result.
@@ -775,7 +778,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
   `aria-modal` overlay whose text is about cookies or consent (warning
   `consent_overlay_removed`, R22). The `accept_cookies` action opts in instead; when there is no
   banner it is a no-op success (R14).
-- **B12, challenges in standard mode.** Nothing waits for or solves a challenge. The rendered page
+- **B12, challenges in standard mode.** Nothing waits for or solves a challenge. A refused
+  document answer that is a challenge fails `bot_protection` (B17). The rendered page
   goes through the quality gate. In addition `bot_challenge` is set on a thin page (under 100
   words) whose render contacted a challenge host: `challenges.cloudflare.com`, `hcaptcha.com` or
   a subdomain, `geo.captcha-delivery.com`. reCAPTCHA is left out: it sits on too many ordinary
@@ -827,23 +831,39 @@ while `BROWSER_ENABLED` is false, are unchanged.
   every fetch and sub-request, the byte and time caps and the per-host outbound gate (with its
   429/503 pause) stay; it adds no IP or proxy rotation and no captcha solving (B15).
   - Fallback (P12-S1): under unblock `auto`, `escalation.needs_browser` also returns true for
-    (a) a fast page answer `failed`/`target_http_error` whose `upstream_status` is in
-    `REFUSAL_STATUSES` (403, 429, 503), whatever its body or content type, and (b) a 2xx HTML
+    (a) a fast page answer `failed`/`target_http_error` (or `bot_protection`, B17) whose
+    `upstream_status` is in `REFUSAL_STATUSES` (403, 429, 503), whatever its body or content type, and (b) a 2xx HTML
     fast result whose status is not `success` (for example `content_too_short` or
     `empty_content`). The exclusions of B5 stay: a document, a platform video or media file, a
     cache `hit` or `revalidated` result, a result that is not fast, and a `mode` other than
     `auto`. For (a) the pipeline sets `quality` on every refused answer in unblock `auto` mode
     with `BROWSER_ENABLED` (`Pipeline._assesses_refusal`, `_refusal_quality`): it assesses an HTML
     body up to `CONVERT_MAX_BYTES`, any other body as an empty page; `challenge_status` is true
-    only for a challenge body. `better()` keeps the better of the fast and the rendered result.
-    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` in the respect
-    mode (the leifiphysik case of package 10).
+    only for a challenge (its body, or the `cf-mitigated` header, B17). `better()` keeps the better of the fast and the rendered result.
+    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` and a challenge
+    403 (the leifiphysik case of package 10) is `bot_protection` since package 20 (B17); in the
+    respect mode neither renders.
   - The host's pause (P12-S2): a fast 429 or 503 still records its pause (`Retry-After`, else
     `OUTBOUND_BACKOFF_SECONDS`, at most `OUTBOUND_MAX_BACKOFF_SECONDS`). The render takes its turn
     after the pause: the browser worker gives the item back on `CircuitOpen`, as for any paused
     host. A sync call answers within its B13 bound, often with `browser_unavailable`; a call with
     `wait_seconds` becomes a job that finishes after the pause. A render that gets past the
     refusal keeps it out of the host's backoff (`answers_for_gate`, B14 unchanged).
+- **B17, challenge refusals (package 20).** A page answer with status 403, 429 or 503 that is a
+  bot challenge fails `bot_protection` instead of `target_http_error`, in fast and in browser mode
+  (`pipeline._refused`, `quality.is_challenge_answer`). It is a challenge when the answer has
+  Cloudflare's `cf-mitigated: challenge` header, or when the first 64 KiB of its body hold
+  challenge markup (`cf-chl`, Anubis), a phrase only a challenge says, or Cloudflare's exact
+  title "Just a moment...". `upstream_status` keeps the site's status and `retryable` the rule of
+  `target_http_error` (429, 503 and 5xx); the message names Cloudflare when the
+  `cf-mitigated` header says so. In unblock `auto` the assessed refusal's
+  `quality.challenge_status` is true for such an answer too, so both facts agree. Escalation counts it as a refusal (`escalation._is_refusal`), so
+  unblock `auto` still tries it in the browser and the respect mode never does. Found on
+  leifiphysik.de (2026-11-09): Cloudflare answers the standard browser's `HeadlessChrome` user
+  agent and curl with a managed challenge, from a home connection too, and let the fast mode's
+  own user agent through there. The standard browser's user agent stays as it is (B8, CLAUDE.md
+  rule 6). The playground explains the error and tells an admin when `BROWSER_UNBLOCK_ENABLED` is
+  off while the browser is on.
 
 **The transcript view option (package 13).** `RenderOptions.transcript_panel` asks a render to
 read YouTube's new transcript view (`browser_panel.py`): after the load, the consent handling and

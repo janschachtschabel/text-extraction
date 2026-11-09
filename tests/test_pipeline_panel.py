@@ -430,6 +430,28 @@ def test_a_refused_panel_render_is_the_draft_with_the_warning(case: str) -> None
         assert renderer.calls == []  # never rendered
 
 
+@pytest.mark.parametrize(
+    ("headers", "code"),
+    [({"cf-mitigated": "challenge"}, "bot_protection"), ({}, "target_http_error")],
+    ids=["challenge", "plain"],
+)
+def test_a_refused_watch_page_is_logged_with_its_code(headers: dict[str, str], code: str) -> None:
+    """Package 20: the watch page's refusal takes the same rule as any page answer."""
+    draft, valkey = draft_of()
+    answers = [response(CANONICAL, status=403, headers=headers)]
+    renderer = FakeRenderer(
+        rendered(WATCH_PAGE, url=CANONICAL, responses=answers, transcript_panel=PANEL)
+    )
+    harness = Harness(renderer=renderer, valkey=valkey)
+
+    with capture_logs() as logs:
+        envelope = harness.run(draft=draft)
+
+    assert TRANSCRIPT_PANEL_UNAVAILABLE in data_of(envelope).warnings
+    failed = [log for log in logs if log["event"] == "media_transcript_panel_render_failed"]
+    assert [log["error_code"] for log in failed] == [code]
+
+
 @pytest.mark.parametrize("in_worker_draft", [True, False], ids=["draft", "own_request"])
 def test_a_panel_render_past_the_runs_deadline_is_the_draft_with_the_warning(
     in_worker_draft: bool,

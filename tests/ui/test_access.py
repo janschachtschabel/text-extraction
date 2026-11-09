@@ -142,6 +142,11 @@ def test_access_offer_by_role_and_settings() -> None:
     assert not access_offer("user", on).unblock
     assert not access_offer("admin", make_settings(browser_enabled=True)).unblock
     assert not access_offer("admin", make_settings(browser_unblock_enabled=True)).unblock
+    # An admin learns that the unblock browser is off only while the browser is on (package 20).
+    assert access_offer("admin", make_settings(browser_enabled=True)).unblock_off
+    assert not access_offer("admin", on).unblock_off
+    assert not access_offer("admin", make_settings()).unblock_off
+    assert not access_offer("user", make_settings(browser_enabled=True)).unblock_off
 
 
 def test_access_value_presets_a_mode() -> None:
@@ -203,6 +208,24 @@ def test_ignore_hint_depends_on_unblock() -> None:
             assert described(admin, ignore) == [
                 en("hint.access.ignore", value="compliance: ignore")
             ]
+    with running(api_keys=KEYS, browser_enabled=True) as client:
+        admin = app_root(client, ADMIN)  # the browser on, its unblock mode off (package 20)
+        for name in WITH_CHOICE:
+            ignore = radios_of(admin, name)[2]
+            # A site crawl never renders, so the switched-off unblock browser does not matter.
+            hint = (
+                "hint.access.ignore"
+                if name == "site-structure"
+                else "hint.access.ignore_unblock_off"
+            )
+            assert described(admin, ignore) == [
+                en(hint, value="compliance: ignore", setting="BROWSER_UNBLOCK_ENABLED")
+            ], name
+        assert "BROWSER_UNBLOCK_ENABLED" in en(
+            "hint.access.ignore_unblock_off",
+            value="compliance: ignore",
+            setting="BROWSER_UNBLOCK_ENABLED",
+        )
 
 
 def test_file_form_has_no_access_choice(admin_client: TestClient) -> None:
@@ -393,6 +416,42 @@ def test_result_shows_the_unblocked_badge() -> None:
     terms = texts(root, "//dl[@class='facts']//dt")
     values = texts(root, "//dl[@class='facts']//dd")
     assert dict(zip(terms, values, strict=True))[en("access.compliance")] == "enforce"
+
+
+def test_a_bot_protection_result_says_what_helps() -> None:
+    """Package 20: a refusal that is a bot challenge names the ways past it."""
+    for language in ("en", "de"):
+        for code, shown in (("bot_protection", True), ("target_http_error", False)):
+            envelope = {
+                "status": "failed",
+                "error": {"code": code, "message": "m", "retryable": False},
+                "data": result_data(PAGE, upstream_status=403),
+                "trace_id": "t",
+            }
+            root = tree(
+                render_result(op="extract", http_status=200, envelope=envelope, language=language)
+            )
+            hint = texts(root, "//*[contains(@class, 'error-hint')]")
+            expected = [
+                " ".join(
+                    translate(
+                        language,
+                        "result.bot_protection_hint",
+                        choice=translate(language, "access.ignore"),
+                        setting="BROWSER_UNBLOCK_ENABLED",
+                    ).split()
+                )
+            ]
+            assert hint == (expected if shown else []), (language, code)
+    # An unblock render that still met the challenge: the admin did choose "Checks off" already.
+    unblocked = {
+        "status": "failed",
+        "error": {"code": "bot_protection", "message": "m", "retryable": False},
+        "data": result_data(PAGE, upstream_status=403, mode_used="browser", unblocked=True),
+        "trace_id": "t",
+    }
+    root = tree(render_result(op="extract", http_status=200, envelope=unblocked))
+    assert root.xpath("//*[contains(@class, 'error-hint')]") == []
 
 
 def test_choice_and_result_follow_the_language(admin_client: TestClient) -> None:
