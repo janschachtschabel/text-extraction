@@ -564,6 +564,15 @@ def test_rendered_markdown_is_safe() -> None:
     assert "javascript:" not in "".join(a.get("href") for a in root.xpath("//a"))
 
 
+def test_render_markdown_renders_tables() -> None:
+    html = str(render_markdown("| Größe | Link |\n|---|---|\n| Länge | [x](javascript:alert(1)) |"))
+
+    assert "<table>" in html
+    assert "<th>Größe</th>" in html
+    assert "<td>Länge</td>" in html
+    assert "<a" not in html
+
+
 def test_markdown_shown_rendered_and_as_source(client: TestClient) -> None:
     html = run(client, "extract", **fields()).text
     root = tree(html)

@@ -48,3 +48,33 @@ def test_revealing_many_formulas_under_one_parent_takes_linear_time() -> None:
         markup._reveal(replacement)
 
     assert time.perf_counter() - started < 5
+
+
+def test_table_rows_are_padded_to_the_widest_row() -> None:
+    text = (
+        "| 7 Basisgrößen |\n|---|\n"
+        "| Größe | Symbol | Zeichen | Einheit |\n| Länge | l | m | Meter |"
+    )
+    assert enhance_table_structure(text) == (
+        "| 7 Basisgrößen |  |  |  |\n|---|---|---|---|\n"
+        "| Größe | Symbol | Zeichen | Einheit |\n| Länge | l | m | Meter |"
+    )
+
+
+def test_padding_keeps_the_trailing_space_of_trafilatura_rows() -> None:
+    text = "| 7 Basisgrößen | \n| --- | \n| Länge | l | m | Meter | \nafter"
+    assert enhance_table_structure(text) == (
+        "| 7 Basisgrößen |  |  |  | \n| --- |---|---|---| \n| Länge | l | m | Meter | \nafter"
+    )
+
+
+def test_padding_ignores_escaped_pipes_and_fenced_code() -> None:
+    text = "| a \\| b |\n|---|\n| c | d |"
+    assert enhance_table_structure(text) == "| a \\| b |  |\n|---|---|\n| c | d |"
+    fenced = "```\n| a |\n| b | c |\n```"
+    assert enhance_table_structure(fenced) == fenced
+
+
+def test_table_with_equal_rows_stays_byte_for_byte() -> None:
+    text = "| a | b | \n| --- | --- | \n| c | d | "
+    assert enhance_table_structure(text) == text

@@ -193,8 +193,49 @@ def _is_row(line: str) -> bool:
     return line.startswith("|") and line.endswith("|")
 
 
+def _is_separator(line: str) -> bool:
+    return all(_SEPARATOR_CELL.fullmatch(cell) for cell in _cells(line.strip()))
+
+
+def _pad_tables(text: str) -> str:
+    """Pad every row of a table block to the block's widest row, so a spanning header row does
+    not cut the table to one column. Trailing whitespace after the last pipe is kept."""
+    lines = text.split("\n")
+    fence: str | None = None
+    block: list[int] = []
+
+    def flush() -> None:
+        widths = [len(_cells(lines[i].strip())) for i in block]
+        widest = max(widths, default=0)
+        if not any(_is_separator(lines[i]) for i in block):
+            block.clear()  # not a table Markdown recognises: leave it alone
+            return
+        for i, width in zip(block, widths, strict=True):
+            if width < widest:
+                body = lines[i].rstrip()
+                tail = lines[i][len(body) :]
+                lines[i] = (
+                    body + ("---|" if _is_separator(body) else "  |") * (widest - width) + tail
+                )
+        block.clear()
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if _FENCE.match(stripped):
+            flush()
+            marker = stripped[0]
+            fence = None if fence == marker else (fence or marker)
+        elif not fence and _is_row(stripped):
+            block.append(index)
+            continue
+        flush()
+    flush()
+    return "\n".join(lines)
+
+
 def enhance_table_structure(text: str) -> str:
-    """Add the ``| --- |`` separator row to a table that has none, so Markdown renders it."""
+    """Add the ``| --- |`` separator row to a table that has none, so Markdown renders it, and
+    pad the rows of a table to its widest row."""
     lines = text.split("\n")
     result: list[str] = []
     fence: str | None = None
@@ -214,4 +255,4 @@ def enhance_table_structure(text: str) -> str:
             if len(cells) == len(next_cells) and not separator:
                 result.append("|" + "|".join(" --- " for _ in cells) + "|")
         in_table = row
-    return "\n".join(result)
+    return _pad_tables("\n".join(result))

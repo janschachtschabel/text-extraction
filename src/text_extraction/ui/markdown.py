@@ -36,7 +36,7 @@ def _image(
 
 
 def _parser() -> MarkdownIt:
-    parser = MarkdownIt("commonmark", {"html": False})
+    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
     parser.validateLink = is_http  # type: ignore[method-assign]
     renderer: Any = parser.renderer
     renderer.rules["link_open"] = _link_open.__get__(renderer)
