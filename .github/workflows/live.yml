@@ -5,7 +5,9 @@ name: live
 # sites. Start it by hand, label a pull request `live`, or wait for the weekly run.
 #
 # The browser worker runs next to the API with browser mode on and unblock mode off: the gate
-# measures standard behaviour, which is what a partner gets without the admin exception.
+# measures standard behaviour, which is what a partner gets without the admin exception. A
+# manual run with `site_rules: off` measures the contract-partner setting instead: compliance
+# ignore and unblock mode on (Chrome under Xvfb).
 on:
   workflow_dispatch:
     inputs:
@@ -32,6 +34,14 @@ on:
         type: choice
         options: [crawl, sitemap_first, both]
         default: both
+      site_rules:
+        description: >-
+          check: the requests send compliance report and unblock mode is off (the gate's
+          standard). off: the contract-partner setting ("Prüfung aus"): the requests send
+          compliance ignore as the anonymous admin and unblock mode (Chrome under Xvfb) is on
+        type: choice
+        options: [check, "off"]
+        default: check
       service_ref:
         description: >-
           Measure the service of this branch, tag or full commit SHA (empty: this commit), with
@@ -60,7 +70,8 @@ concurrency:
     && format('-other-label-{0}', github.run_id) || '' }}${{ inputs.service_ref
     && format('-service-{0}', inputs.service_ref) || '' }}${{ inputs.url_set == 'wlo_4000'
     && '-set-wlo_4000' || '' }}${{ inputs.mode && inputs.mode != 'auto'
-    && format('-mode-{0}', inputs.mode) || '' }}
+    && format('-mode-{0}', inputs.mode) || '' }}${{ inputs.site_rules == 'off'
+    && '-site-rules-off' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -87,6 +98,13 @@ jobs:
       MODE: ${{ inputs.mode || 'auto' }}
       # Pull requests and the weekly run crawl both ways; a manual run can pick one.
       SITE_DISCOVERY: ${{ inputs.site_discovery || 'both' }}
+      # Site rules off (a manual run only): compliance ignore and unblock mode, the setting of a
+      # contract partner (CLAUDE.md rule 6 exception). The site structure crawl keeps enforce.
+      COMPLIANCE: ${{ inputs.site_rules == 'off' && 'ignore' || 'report' }}
+      UNBLOCK: ${{ inputs.site_rules == 'off' && 'true' || 'false' }}
+      # An unblock render may take BROWSER_UNBLOCK_TIMEOUT_SECONDS (60 s) after the fast phase
+      # (25 s) and the queue wait (30 s), so the client waits longer then.
+      CLIENT_TIMEOUT: ${{ inputs.site_rules == 'off' && '150' || '120' }}
     services:
       valkey:
         image: valkey/valkey:8.1-alpine
@@ -127,6 +145,15 @@ jobs:
       # and Xvfb) is off here, so nothing more is installed.
       - run: uv run playwright install --with-deps --only-shell chromium
 
+      # Unblock mode (site rules off) renders with Google Chrome stable under Xvfb, as the browser
+      # image does.
+      - name: Install Chrome and Xvfb for unblock mode
+        if: env.UNBLOCK == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb
+          uv run patchright install --with-deps chrome
+
       # Browser mode is on for the API and the worker; unblock mode stays off. The browser worker
       # serves /ready on its own internal port, since the API holds 9090.
       - name: Start the service and the browser worker
@@ -135,7 +162,7 @@ jobs:
           RATE_LIMIT_ENABLED: "false"
           VALKEY_URL: redis://127.0.0.1:6379/0
           BROWSER_ENABLED: "true"
-          BROWSER_UNBLOCK_ENABLED: "false"
+          BROWSER_UNBLOCK_ENABLED: ${{ env.UNBLOCK }}
           # One browser worker with 4 pages at once serves every escalation of the run: a sync
           # request waits up to 30 s for a free page, so a burst of escalations is measured as
           # the product's answer, not as a browser_unavailable of the test rig.
@@ -180,8 +207,9 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
             --mode "$MODE" \
+            --compliance "$COMPLIANCE" \
             "${concurrency[@]}" \
-            --timeout 120 \
+            --timeout "$CLIENT_TIMEOUT" \
             --out "results/live_${URL_SET}_${MODE}.jsonl" \
             --summary-out "results/summary_${URL_SET}_${MODE}.md" \
             "${gate[@]}"
@@ -197,7 +225,8 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/smoke.csv \
             --mode auto \
-            --timeout 120 \
+            --compliance "$COMPLIANCE" \
+            --timeout "$CLIENT_TIMEOUT" \
             --out results/live_smoke_auto.jsonl \
             --summary-out results/summary_smoke_auto.md
 
@@ -207,8 +236,9 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/wlo_200.csv \
             --mode browser \
+            --compliance "$COMPLIANCE" \
             --concurrency 4 \
-            --timeout 120 \
+            --timeout "$CLIENT_TIMEOUT" \
             --out results/live_wlo_200_browser.jsonl \
             --summary-out results/summary_wlo_200_browser.md
 
@@ -223,8 +253,9 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/media.csv \
             --mode auto \
+            --compliance "$COMPLIANCE" \
             --no-transcribe \
-            --timeout 120 \
+            --timeout "$CLIENT_TIMEOUT" \
             --out results/live_media_auto.jsonl \
             --summary-out results/summary_media_auto.md
 
