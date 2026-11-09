@@ -230,8 +230,11 @@ jobs:
             --out results/live_smoke_auto.jsonl \
             --summary-out results/summary_smoke_auto.md
 
+      # Not with site rules off: every one of the 200 URLs through the unblock browser (headful
+      # Chrome under Xvfb, four at once) took the runner down after 35 minutes on 2026-11-09, and
+      # the job's logs were lost with it.
       - name: Run wlo_200 in browser mode (report only)
-        if: always() && env.URL_SET != 'wlo_4000'
+        if: always() && env.URL_SET != 'wlo_4000' && env.UNBLOCK != 'true'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/wlo_200.csv \
