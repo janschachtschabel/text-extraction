@@ -4,10 +4,11 @@ their alt text, so a page's content can neither run a script nor load anything.
 
 Equations, which the extraction writes as ``$$LaTeX$$``, become MathML on the server (the UI's
 CSP runs no inline script): latex2mathml builds the element tree, which keeps only MathML
-elements and no link, source or handler attribute, and is serialised here so that every text
-is escaped. LaTeX it cannot convert is shown as its escaped source in ``<code>``."""
+elements and MathML presentation attributes (colours only as a name or ``#hex``), and is
+serialised here so that every text and attribute value is escaped. LaTeX it cannot convert is
+shown as its escaped source in ``<code>``."""
 
-import html
+import re
 from collections.abc import Sequence
 from typing import Any, Final
 from xml.etree.ElementTree import Element, tostring
@@ -34,6 +35,25 @@ _MATH_TAGS: Final = frozenset(
         "none", "semantics",
     }
 )  # fmt: skip
+# The MathML presentation attributes latex2mathml emits (3.81.1: commands.py, walker.py,
+# converter.py) that an equation keeps; any other (``class``, ``style``, ``href``, a namespaced
+# one, ...) is dropped. The colour attributes carry page text and are checked by _COLOUR.
+_MATH_ATTRIBUTES: Final = frozenset(
+    {
+        "accent", "accentunder", "columnalign", "columnlines", "columnspacing", "depth", "display",
+        "displaystyle", "fence", "form", "height", "largeop", "linebreak", "linethickness",
+        "lspace", "mathsize", "mathvariant", "maxsize", "minsize", "movablelimits", "notation",
+        "rowalign", "rowlines", "rowspacing", "rspace", "scriptlevel", "separator", "stretchy",
+        "symmetric", "voffset", "width", "xmlns",
+    }
+)  # fmt: skip
+_COLOUR_ATTRIBUTES: Final = frozenset({"mathcolor", "mathbackground"})
+# A CSS colour name or a #hex colour (3, 4, 6 or 8 digits).
+_COLOUR: Final = re.compile(r"[a-z]{3,20}|#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})", re.I)
+# The numeric character references latex2mathml writes into texts. A named entity written in
+# the LaTeX (``\text{&lt;}``) stays text; a numeric one becomes its character, like the
+# library's own.
+_CHARACTER_REFERENCE: Final = re.compile(r"&#(?:x([0-9a-f]+)|([0-9]+));", re.I)
 
 
 def is_http(url: object) -> bool:
@@ -63,8 +83,10 @@ def _math_inline(state: StateInline, silent: bool) -> bool:
     if not state.src.startswith(_MATH_MARK, start):
         return False
     end = state.src.find(_MATH_MARK, start + len(_MATH_MARK))
+    if end < 0:
+        return False
     source = state.src[start + len(_MATH_MARK) : end]
-    if end < 0 or not source.strip():
+    if not source.strip():
         return False
     if not silent:
         token = state.push("math", "math", 0)
@@ -87,22 +109,35 @@ def _math_display(state: StateCore) -> None:
             children[0].meta["display"] = "block"
 
 
-def _local_name(name: str) -> str:
-    return name.rpartition("}")[2].rpartition(":")[2].lower()
+def _keeps(name: str, value: str) -> bool:
+    if name in _COLOUR_ATTRIBUTES:
+        return _COLOUR.fullmatch(value) is not None
+    return name in _MATH_ATTRIBUTES
+
+
+def _character(match: re.Match[str]) -> str:
+    hexadecimal, decimal = match.groups()
+    code = int(hexadecimal, 16) if hexadecimal else int(decimal)
+    if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF:
+        return chr(code)
+    return match.group()
+
+
+def _characters(text: str | None) -> str | None:
+    return _CHARACTER_REFERENCE.sub(_character, text) if text else text
 
 
 def _clean(element: Element) -> None:
-    """Keep only MathML elements, drop link, source and handler attributes, and turn the
-    character references latex2mathml writes into the characters (serialising escapes them)."""
+    """Keep only MathML elements and their allowed attributes, and turn the character
+    references latex2mathml writes into the characters (serialising escapes every text)."""
     for node in element.iter():
         if node.tag not in _MATH_TAGS:
             raise ValueError(f"not a MathML element: {node.tag}")
-        for name in list(node.attrib):
-            local = _local_name(name)
-            if local in {"href", "src"} or local.startswith("on"):
+        for name, value in list(node.attrib.items()):
+            if not _keeps(name, value):
                 del node.attrib[name]
-        node.text = html.unescape(node.text) if node.text else node.text
-        node.tail = html.unescape(node.tail) if node.tail else node.tail
+        node.text = _characters(node.text)
+        node.tail = _characters(node.tail)
 
 
 def _mathml(source: str, display: str) -> str:
