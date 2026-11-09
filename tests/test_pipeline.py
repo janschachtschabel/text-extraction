@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes import (
     ARTICLE,
+    HUB_PAGE,
     ORIGIN,
     PAGE,
     PARAGRAPH,
@@ -47,6 +48,7 @@ from text_extraction.pipeline import (
     create_outbound,
     create_pipeline,
 )
+from text_extraction.quality import assess
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -704,6 +706,53 @@ def test_a_fast_html_page_has_a_page_type() -> None:
     article_type = data_of(article).page_type
     assert article_type is not None
     assert (article_type.type, article_type.signals) == ("content", ["word_count"])
+
+
+def test_a_listing_page_keeps_its_link_lists() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert data.page_type.type == "listing"
+    assert data.content is not None
+    assert "## Biology" in data.content
+    assert "## Physics" in data.content
+    assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
+    assert "- [Physics topic 12](https://example.org/physics/12.html)" in data.content
+    assert data.quality is not None
+    before = convert_html(HUB_PAGE, PAGE, "markdown").content
+    assert data.quality.word_count == assess(HUB_PAGE, data.content).word_count
+    assert data.quality.word_count > assess(HUB_PAGE, before).word_count
+
+
+def test_a_content_page_with_related_links_is_unchanged() -> None:
+    related = "".join(
+        f'<li><a href="/related/{n}.html">Related item {n}</a></li>' for n in range(6)
+    )
+    page = ARTICLE.replace("</article>", f"<ul>{related}</ul></article>", 1)
+    assert "Related item 3" in page
+    harness = Harness({PAGE: fetched(PAGE, page)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert data.page_type.type == "content"
+    assert data.content == convert_html(page, PAGE, "markdown").content
+    assert data.content is not None
+    assert "- [Related item" not in data.content
+
+
+def test_listing_lists_pass_the_boilerplate_rules() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+    line = "- [Biology topic 2](https://example.org/biology/2.html)"
+    harness.pipeline._rules = {"example.org": frozenset({line})}
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.content is not None
+    assert "- [Biology topic 1](" in data.content
+    assert line not in data.content
 
 
 def test_a_page_type_failure_does_not_fail_the_extraction(

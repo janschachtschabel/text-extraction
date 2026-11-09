@@ -31,6 +31,26 @@ PARAGRAPH = (
     "sunlight to synthesize foods from carbon dioxide and water. It generally involves the "
     "green pigment chlorophyll and generates oxygen as a byproduct of the reaction. "
 )
+
+
+def _hub_list(topic: str, count: int) -> str:
+    items = "".join(
+        f'<li><a href="/{topic}/{number}.html">{topic.title()} topic {number}</a></li>'
+        for number in range(1, count + 1)
+    )
+    return f"<ul>{items}</ul>"
+
+
+# A hub page: a short introduction and 24 standalone links under two headings, so the
+# classifier finds a listing (link density) and the link lists are all that Trafilatura drops.
+HUB_PAGE = (
+    '<!doctype html><html lang="en"><head><title>Learning topics</title></head><body><main>'
+    "<h1>Learning topics</h1><p>Pick a topic to start learning about it today.</p>"
+    f"<h2>Biology</h2>{_hub_list('biology', 12)}"
+    f"<h2>Physics</h2>{_hub_list('physics', 12)}"
+    "</main></body></html>"
+)
+
 ARTICLE = f"""<!doctype html>
 <html lang="en">
 <head>

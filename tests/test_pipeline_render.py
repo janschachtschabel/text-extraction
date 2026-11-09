@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes import (
     ARTICLE,
+    HUB_PAGE,
     ORIGIN,
     PAGE,
     PARAGRAPH,
@@ -218,6 +219,19 @@ def test_browser_mode_renders_after_compliance_and_turn() -> None:
     assert call.options.unblock is False
     assert call.options.blocked_resources == frozenset({"image", "media", "font"})
     assert call.options.screenshot is False
+
+
+def test_rendered_listing_keeps_its_link_lists() -> None:
+    harness = RenderHarness(renderer=FakeRenderer(rendered(HUB_PAGE)))
+
+    data = data_of(harness.run_once(mode="browser", format="markdown"))
+
+    assert data.mode_used == "browser"
+    assert data.page_type is not None
+    assert data.page_type.type == "listing"
+    assert data.content is not None
+    assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
+    assert "- [Physics topic 12](https://example.org/physics/12.html)" in data.content
 
 
 def test_robots_block_of_start_url_never_renders() -> None:

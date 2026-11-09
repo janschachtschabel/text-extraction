@@ -179,6 +179,7 @@ from text_extraction.convert import (
     decode_html_checked,
     page_links,
 )
+from text_extraction.convert.listings import listing_lists
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
@@ -2845,6 +2846,18 @@ class Pipeline:
                     )
                 except Exception as error:  # an extra: a bug in its rules leaves it null
                     _log.warning("page_type_failed", host=host, error_type=type(error).__name__)
+            if found_type is not None and found_type.type == "listing":
+                try:  # the link lists Trafilatura drops; a bug here keeps the content as it was
+                    lists = listing_lists(text, final_url, req.format, existing=conversion.content)
+                except Exception as error:
+                    lists = ""
+                    _log.warning("listing_lists_failed", host=host, error_type=type(error).__name__)
+                if lists:
+                    glue = "" if req.format == "html" else "\n\n"
+                    content = strip_boilerplate(
+                        host, f"{conversion.content}{glue}{lists}", self._rules
+                    )
+                    quality = assess(text, content)
         else:
             if fetched.content_type in _MARKDOWN_TYPES:
                 conversion = Conversion(

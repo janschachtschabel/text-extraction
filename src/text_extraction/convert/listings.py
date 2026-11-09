@@ -16,7 +16,8 @@ from bs4 import Tag
 
 from text_extraction.convert.markup import attr, is_outside_content, prepare_html, strip_non_content
 
-# The same type as ``convert.html.OutputFormat``, declared here because that module imports this one.
+# The same type as ``convert.html.OutputFormat``, declared here because that module imports
+# this one.
 OutputFormat = Literal["markdown", "text", "html"]
 
 # A page needs this many collected links to count as a listing.
