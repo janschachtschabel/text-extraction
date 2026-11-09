@@ -715,3 +715,25 @@ def test_a_long_server_error_path_wraps(php_ui: tuple[str, str], width: int) -> 
         width_now = page.evaluate("[document.scrollingElement.scrollWidth, innerWidth]")
         assert width_now[0] <= width_now[1]
     assert console == []
+
+
+@pytest.mark.parametrize("width", [1280, 1024])
+def test_the_session_line_shares_the_masthead_row_on_a_laptop(
+    ui: tuple[str, str], width: int
+) -> None:
+    """The German session line (the longest) stays on the title's row at laptop widths, so the
+    login neither adds a row nor moves the header; the intro wraps in its own column instead
+    (Jan, 2026-11-09: no extra line for the login info)."""
+    url, _ = ui
+    with browsing(f"{url}?lang=de") as (page, _):
+        page.set_viewport_size({"width": width, "height": 900})
+        (before,) = boxes(page, ".masthead")
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        heading, session, after = boxes(page, ".masthead h1", "#session", ".masthead")
+        assert session["top"] < heading["bottom"], "the session line wrapped below the title"
+        assert session["right"] <= width
+        if width >= 1280:
+            # The login moves nothing (a little slack for other fonts on other machines); at
+            # 1024 px the squeezed intro may take a third line, depending on the font.
+            assert abs(after["height"] - before["height"]) <= 4

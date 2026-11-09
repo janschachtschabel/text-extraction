@@ -452,7 +452,8 @@ def test_workspace_holds_the_panels_then_the_result(admin: TestClient) -> None:
     assert [p.get("id") for p in settings.xpath("./section")] == [f"panel-{t.name}" for t in TABS]
     assert workspace.xpath("./section[@id='result']")
     (bar,) = page.xpath("//div[@class='app-bar']")
-    assert bar.xpath(".//div[@class='who']")
+    assert not bar.xpath(".//div[@class='who']")  # the session line is in the masthead
+    assert page.xpath("//header[@class='masthead']//div[@id='session'][@class='who']")
     assert bar.xpath(".//*[@role='tablist']")
 
 

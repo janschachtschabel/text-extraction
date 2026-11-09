@@ -79,7 +79,7 @@ Jede Antwort hat dieselbe Ergebnishülle (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototyp `v0.1.10`: Die Pakete 0 bis 21 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.11`: Die Pakete 0 bis 21 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
@@ -136,11 +136,15 @@ personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die wichtigsten Ei
 
 ## Aktualisieren
 
-Stellen Sie die `docker-compose.yml` der neuen Version bereit (bei Hostinger: über die URL des
-Repositorys neu bereitstellen), dann `docker compose pull` und `docker compose up -d --wait`: Die
-Datei nennt die Images der Version. Ein `TEXT_EXTRACTION_VERSION` in `.env` geht vor, also erhöhen
-oder entfernen Sie es. Ihre `.env` bleibt erhalten, und ein Wert darin geht einem geänderten
-Standard vor: Vergleichen Sie sie nach einem Update mit `.env.example`.
+Stellen Sie neu bereit (bei Hostinger: über die URL des Repositorys neu bereitstellen) oder
+führen Sie `docker compose up -d --wait` aus: Die `docker-compose.yml` im Hauptordner lädt bei
+jedem `docker compose up` und jedem Neu-Bereitstellen die neueste Version `0.1.x` (Tag `0.1`,
+`pull_policy: always`); ein Container, den Docker nur neu startet, behält sein Image, und
+laufende Container aktualisiert nichts von selbst. Jedes `up` braucht deshalb ghcr.io. Setzen Sie
+`TEXT_EXTRACTION_VERSION` in `.env` nur, um eine Version festzuhalten, etwa `0.1.10`; entfernen
+Sie einen alten festen Wert, damit wieder die neueste geladen wird. Ihre `.env` bleibt erhalten,
+und ein Wert darin geht einem geänderten Standard vor: Vergleichen Sie sie nach einem Update mit
+`.env.example`.
 [CHANGELOG.md](CHANGELOG.md) (Englisch) nennt jede Änderung und unter „Upgrade“, was zu tun ist.
 
 ## Anwendungsfälle

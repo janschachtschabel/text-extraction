@@ -3136,10 +3136,16 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   untied, the status line still shows it).
   The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
 - **Look (package 15).** A redesign of the templates and `ui.css` only; no new field, endpoint,
-  setting or htmx behaviour besides the result toolbar. The page is a white header (three rows:
-  the masthead with the logo, `h1` and intro, outside the `#app` that the login replaces; the
-  session line; the tabs), then two columns, the settings on the left and the result on the
-  right, stacked below 60rem (settings first). Every colour, radius, font stack and size is a
+  setting or htmx behaviour besides the result toolbar. The page is a white header (two rows:
+  the masthead with the logo, `h1`, intro and, at its right end, the session line, outside the
+  `#app` that the login replaces; the tabs), then two columns, the settings on the left and the
+  result on the right, stacked below 60rem (settings first). **Session line in the masthead
+  (0.1.11, Jan 2026-11-09: no extra row for the login info).** `session.html` (who is signed in,
+  logout, language switch) fills the masthead's slot `div#session.who`: `GET /ui` renders it
+  empty before the login (`.who:empty` hides it) and filled under `AUTH_MODE=none`; the login's
+  answer carries it as an htmx out-of-band swap (`hx-swap-oob`) beside the app it puts into
+  `#app`, so the page always holds one slot and one language switch. The intro gives way
+  (`flex: 1 1 16rem`) so the session line keeps the title's row down to tablet widths. Every colour, radius, font stack and size is a
   token on `:root` (`--page`, `--paper`, `--ink`, `--muted`, `--line`, `--field-line`,
   `--accent`, `--accent-strong`, `--focus`, `--radius-card`, `--radius-field`, `--control`,
   `--gutter`, `--font-ui`, `--font-read`, `--font-code`); no colour stands outside `:root`, and

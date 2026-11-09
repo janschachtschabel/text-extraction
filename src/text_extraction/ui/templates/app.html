@@ -1,13 +1,9 @@
 <section id="app-shell" class="shell">
   <div class="app-bar"><div class="bar-inner">
   {% if auth_none %}<p class="banner" role="note">{{ t(banner) }}</p>{% endif %}
-  <div class="who">
-    {% set signed_in_name %}<strong>{{ principal_name }}</strong>{% endset %}
-    {% set signed_in_role %}<span class="role">{{ role }}</span>{% endset %}
-    <span>{{ t("shell.signed_in", name=signed_in_name, role=signed_in_role) }}</span>
-    <button type="button" class="secondary" data-action="logout">{{ t("shell.logout") }}</button>
-    {% with switch_hint=true %}{% include "language_switch.html" %}{% endwith %}
-  </div>
+  {#- After the login the session line moves into the masthead's slot (an out-of-band swap), so
+  the bar holds no line of its own above the tabs. #}
+  {% if session_oob %}<div id="session" class="who" hx-swap-oob="true">{% include "session.html" %}</div>{% endif %}
   {% if auth_none %}
   <details class="keys">
     <summary>{{ t("keys.optional") }}</summary>

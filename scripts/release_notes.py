@@ -77,9 +77,10 @@ Five images, each tagged `{version}` and `{minor}` (linux/amd64):
 
 ### Start
 
-- Docker Compose with these images: the root `docker-compose.yml` of the tag, with
-  `TEXT_EXTRACTION_VERSION={version}` in `.env` (it starts without other variables; Docker panels
-  such as Hostinger's Docker Manager deploy it from the repository): `{compose}`
+- Docker Compose with these images: the root `docker-compose.yml` (it starts without variables;
+  Docker panels such as Hostinger's Docker Manager deploy it from the repository) follows the
+  newest `{minor}.x` release (tag `{minor}`) and pulls it on every start;
+  `TEXT_EXTRACTION_VERSION={version}` in `.env` pins this one: `{compose}`
   ([installation guide]({guide}/en/installation.md), [German]({guide}/de/installation.md)).
 - Kubernetes: the Helm chart with `image.tag: "{version}"` ([chart README]({chart})).
 """

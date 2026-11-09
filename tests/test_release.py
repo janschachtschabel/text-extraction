@@ -71,10 +71,11 @@ def test_dependabot_watches_uv_actions_docker_and_compose() -> None:
             assert set(group["update-types"]) == {"minor", "patch"}
 
 
-def test_the_root_compose_file_defaults_to_the_version() -> None:
-    # The root docker-compose.yml runs the published images; a release moves its default along.
+def test_the_root_compose_file_follows_the_minor_line() -> None:
+    # The root docker-compose.yml runs the published images of the newest release of the
+    # version's minor line (tag `0.1` for 0.1.x); TEXT_EXTRACTION_VERSION pins another.
     text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     defaults = set(re.findall(r"\$\{TEXT_EXTRACTION_VERSION:-([^}]*)\}", text))
-    assert defaults == {_project_version()}
+    assert defaults == {".".join(_project_version().split(".")[:2])}
     services = yaml.safe_load(text)["services"]
     assert len(services) == 12

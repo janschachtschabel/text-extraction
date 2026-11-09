@@ -73,10 +73,12 @@ gehören wie bisher in `API_KEYS` in `.env` (siehe unten); sie gelten zusammen m
 Der interne Port 9090 (`/health`, `/ready`, `/metrics`) wird nicht veröffentlicht. Die Spielwiese
 liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
 
-`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.10`; `0.1`
-folgt der neuesten `0.1.x` nach `docker compose pull`, denn ein Image, das schon auf dem Rechner
-liegt, wird nicht erneut geladen). Diese Datei braucht `0.1.8` oder neuer: Ältere Images haben
-keinen Dienst `init`. Die Versionen und ihre Notizen stehen auf der
+Die Datei folgt von selbst der neuesten Version `0.1.x`: Ihr Standard-Tag ist `0.1`, und jedes
+`docker compose up` (auch das Neu-Bereitstellen in einem Panel) lädt es erneut, braucht also
+ghcr.io; ein Container, den Docker nur neu startet, behält sein Image.
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell hält eine Version fest, etwa `0.1.10`;
+setzen Sie es nur, wenn Sie das wollen. Diese Datei braucht `0.1.8` oder neuer: Ältere Images
+haben keinen Dienst `init`. Die Versionen und ihre Notizen stehen auf der
 [Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
 
 Für HTTPS trägt der Dienst `api` Labels für ein vorgeschaltetes Traefik (der VPS von Hostinger hat

@@ -9,6 +9,23 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-09
+
+### Changed
+
+- The root `docker-compose.yml` follows the newest `0.1.x` release on its own: the default image
+  tag is `0.1` instead of the release of the file, and `pull_policy: always` pulls it on every
+  `docker compose up`, so a Docker panel's redeploy (Hostinger's Docker Manager) brings the
+  newest release without `docker compose pull`. `TEXT_EXTRACTION_VERSION` pins one release only
+  when it is set.
+- The playground's session line (who is signed in, Log out, the language switch) sits at the
+  right end of the masthead instead of a row of its own above the tabs.
+
+### Upgrade
+
+- Remove `TEXT_EXTRACTION_VERSION` from `.env` (or the panel's variables) to follow the newest
+  release; a value there still pins that release.
+
 ## [0.1.10] - 2026-11-09
 
 ### Added
@@ -647,7 +664,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...v0.1.8

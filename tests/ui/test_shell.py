@@ -142,6 +142,21 @@ def test_login_page_under_api_key_mode(client: TestClient) -> None:
         assert " name=" not in tag
         assert 'autocomplete="off"' in tag
     assert BANNER not in page
+    # The masthead's session slot waits empty for the login's out-of-band swap.
+    assert '<div id="session" class="who"></div>' in page
+
+
+def test_login_puts_the_session_line_into_the_masthead(client: TestClient) -> None:
+    answer = login(client).text
+
+    tree = lxml.html.fragment_fromstring(answer, create_parent="div")
+    (session,) = tree.xpath('//div[@id="session"]')
+    assert session.get("class") == "who"
+    assert session.get("hx-swap-oob") == "true"
+    assert "alice" in session.text_content()
+    assert session.xpath('.//button[@data-action="logout"]')
+    assert session.xpath('.//*[contains(concat(" ", @class, " "), " language-switch ")]')
+    assert len(tree.xpath('//*[@data-action="logout"]')) == 1
 
 
 def test_login_ok_renders_app_with_principal(client: TestClient) -> None:

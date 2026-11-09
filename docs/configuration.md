@@ -282,9 +282,13 @@ services apart from `init` (a test keeps the two in step).
   Without Traefik the labels do nothing.
 - **Port:** the API is published on `API_PORT` (default `8080`, all interfaces);
   `127.0.0.1:8080` keeps it to the server, so that only Traefik's HTTPS reaches it from outside.
-- **Version:** `TEXT_EXTRACTION_VERSION` (default the release of the file) picks the images; the
-  root file needs 0.1.8 or later (`text-extraction-init` and the `/secrets` mount point came with
-  0.1.8), an older one fails at `init`.
+- **Version:** `TEXT_EXTRACTION_VERSION` (default `0.1`, the newest 0.1.x release, pulled again
+  on every `docker compose up` or panel redeploy: `pull_policy: always`; a daemon restart keeps
+  the image) pins the images when set. Every `up`, `docker compose run --rm -T init …` included,
+  needs ghcr.io; a redeploy while a release is still publishing its five images can briefly mix
+  two patch releases until the next `up`. The root file needs 0.1.8 or later
+  (`text-extraction-init` and the `/secrets` mount point came with 0.1.8), an older one fails at
+  `init`.
 - Every service except the one-shot ones restarts `unless-stopped`.
 
 ## Response times
