@@ -21,7 +21,10 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   and `error.message` names Cloudflare when the answer says so. Unblock mode still tries such a
   refusal in the browser; the respect mode still does not. Found on leifiphysik.de, whose
   Cloudflare protection answers the standard browser's `HeadlessChrome` user agent with a
-  challenge. The browser's user agent is unchanged.
+  challenge. The browser's user agent is unchanged. Counts by error code (the `outcome` label of
+  the metrics, the live harness's buckets) move such answers from `target_http_error` to
+  `bot_protection`; the success rate is unaffected. Other vendors' challenges (DataDome,
+  PerimeterX, Akamai) are not recognised yet.
 
 ### Added
 

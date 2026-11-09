@@ -51,10 +51,14 @@ _CHALLENGE_PHRASES = (
 _WEAK_CHALLENGE_WORDS = re.compile(r"just a moment|captcha|datadome|perimeterx")
 # Markup of the challenge itself (Cloudflare's ``__cf_chl_*`` / ``cf-chl-*``, Anubis' script).
 _CHALLENGE_MARKUP = re.compile(r"cf[-_]chl|within\.website/x/cmd/anubis")
-# The head of a refused answer's body that ``is_challenge_answer`` reads, in bytes.
+# The head of a refused answer's body that ``is_challenge_answer`` reads: bytes of a fetched
+# body, characters of rendered HTML.
 CHALLENGE_SCAN_BYTES: Final = 65536
-# The title of Cloudflare's challenge page ("Just a moment..."), at the start of the title only.
-_CHALLENGE_TITLE = re.compile(r"<title[^>]*>\s*just a moment")
+# The title of Cloudflare's challenge page, exactly "Just a moment..." (a maintenance page titled
+# "Just a moment, we are updating" is no challenge).
+_CHALLENGE_TITLE = re.compile(
+    r"<title[^>]*>\s*just a moment(?:\.\.\.|\N{HORIZONTAL ELLIPSIS})\s*</title>"
+)
 _SOFT_404_PHRASES = re.compile(
     r"\b404\b|not found|nicht gefunden|existiert nicht|does not exist|no longer available"
     r"|nicht mehr verfügbar"
@@ -129,8 +133,9 @@ def _is_bot_challenge(page_text: str, own_text: str, markup: _Markup | None, wor
 def is_challenge_answer(headers: Mapping[str, str], body: bytes | str) -> bool:
     """Whether a refused answer (403, 429 or 503; the caller checks the status) is a bot
     challenge: Cloudflare's ``cf-mitigated: challenge`` header (names in any letter case), or in
-    the first ``CHALLENGE_SCAN_BYTES`` of the body challenge markup, a phrase only a challenge
-    says, or a title that starts with "Just a moment" (package 20). Cheap: no HTML parse."""
+    the first ``CHALLENGE_SCAN_BYTES`` of the body (characters of a ``str``) challenge markup, a
+    phrase only a challenge says, or Cloudflare's title "Just a moment..." (package 20). Cheap:
+    no HTML parse."""
     if any(
         name.lower() == "cf-mitigated" and value.strip().lower() == "challenge"
         for name, value in headers.items()

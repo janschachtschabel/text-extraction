@@ -279,6 +279,7 @@ def test_cf_mitigated_header_is_a_challenge(name: str) -> None:
         ("<html><body><script src='/cdn-cgi/cf-chl.js'></script></body></html>", True),
         ("<html><body><p>Checking your browser before accessing.</p></body></html>", True),
         ("<html><body><p>Forbidden</p></body></html>", False),
+        ("<html><head><title>Just a moment, we are updating</title></head></html>", False),
         (
             "<html><head><title>Denied</title></head><body>Just a moment, please</body></html>",
             False,

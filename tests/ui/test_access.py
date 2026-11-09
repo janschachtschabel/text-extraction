@@ -440,6 +440,15 @@ def test_a_bot_protection_result_says_what_helps() -> None:
                 )
             ]
             assert hint == (expected if shown else []), (language, code)
+    # An unblock render that still met the challenge: the admin did choose "Checks off" already.
+    unblocked = {
+        "status": "failed",
+        "error": {"code": "bot_protection", "message": "m", "retryable": False},
+        "data": result_data(PAGE, upstream_status=403, mode_used="browser", unblocked=True),
+        "trace_id": "t",
+    }
+    root = tree(render_result(op="extract", http_status=200, envelope=unblocked))
+    assert root.xpath("//*[contains(@class, 'error-hint')]") == []
 
 
 def test_choice_and_result_follow_the_language(admin_client: TestClient) -> None:

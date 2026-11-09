@@ -27,7 +27,8 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
    compliance checks of step 4 before it is requested; one on another host gives the first
    host's turn back and takes the new host's, in which its missing files are fetched too.
-6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
+6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``,
+   or ``bot_protection`` when it is a 403, 429 or 503 bot challenge (``_refused``, package 20).
 7. ``documents.sniff`` names the body's kind: the declared type for HTML and XHTML, the bytes
    first otherwise (ruling F1). HTML and XHTML: decode, compliance after the fetch (headers,
    meta tags, ``noai``; may block), convert, strip domain boilerplate. ``text/plain``: decode,
@@ -2481,13 +2482,9 @@ class Pipeline:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR, "The browser reported no document.", retryable=True
             )
-        status = rendered.responses[-1].status
-        if not 200 <= status < 300:  # a refused watch page: whatever the panel answered
-            return run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {status}.",
-                retryable=status in _RETRYABLE_STATUSES or status >= 500,
-            )
+        last = rendered.responses[-1]
+        if not 200 <= last.status < 300:  # a refused watch page: whatever the panel answered
+            return _refused(run, last.status, last.headers, rendered.html)
         return rendered
 
     async def _render_options(self, run: _Run, unblock: bool) -> RenderOptions:

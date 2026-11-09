@@ -1750,7 +1750,9 @@ def test_bot_wall_escalates_only_for_admin_ignore_with_unblock(
             assert worker.seen[0].job.options.compliance == "ignore"
             assert worker.seen[0].job.owner_role == "admin"
         else:
-            assert response.json()["error"]["code"] == "target_http_error"
+            assert (
+                response.json()["error"]["code"] == "bot_protection"
+            )  # a challenge refusal (package 20)
             assert data["mode_used"] == "fast"
             assert BROWSER_UNAVAILABLE_WARNING not in data["warnings"]
             assert worker.seen == []
