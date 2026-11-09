@@ -382,15 +382,21 @@ button.secondary:hover:not(:disabled) {
   margin: 12px 0 0;
 }
 
+/* The session line sits at the right end of the masthead's row (it wraps below the intro on a
+   narrow screen); before the login it is empty and takes no room. */
 .who {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem 0.75rem;
   align-items: center;
   justify-content: flex-end;
-  padding-top: 8px;
+  margin-left: auto;
   font-size: 14px;
   color: var(--muted);
+}
+
+.who:empty {
+  display: none;
 }
 
 .who button.secondary {

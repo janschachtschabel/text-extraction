@@ -282,7 +282,8 @@ services apart from `init` (a test keeps the two in step).
   Without Traefik the labels do nothing.
 - **Port:** the API is published on `API_PORT` (default `8080`, all interfaces);
   `127.0.0.1:8080` keeps it to the server, so that only Traefik's HTTPS reaches it from outside.
-- **Version:** `TEXT_EXTRACTION_VERSION` (default the release of the file) picks the images; the
+- **Version:** `TEXT_EXTRACTION_VERSION` (default `0.1`, the newest 0.1.x release, pulled again
+  on every start: `pull_policy: always`) pins the images when set; the
   root file needs 0.1.8 or later (`text-extraction-init` and the `/secrets` mount point came with
   0.1.8), an older one fails at `init`.
 - Every service except the one-shot ones restarts `unless-stopped`.

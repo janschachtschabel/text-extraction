@@ -72,7 +72,7 @@ Every answer is the same result envelope (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototype `v0.1.10`: packages 0-21 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.11`: packages 0-21 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,
@@ -125,10 +125,10 @@ LLM, speech recognition), Kubernetes and the key settings.
 
 ## Updating
 
-Deploy the `docker-compose.yml` of the new release (on Hostinger: redeploy from the repository
-URL), then `docker compose pull` and `docker compose up -d --wait`: the file names the release's
-images. A `TEXT_EXTRACTION_VERSION` in `.env` wins over that, so raise or remove it. Your `.env`
-is kept, and a value in it wins over a changed default: compare it with `.env.example` after an
+Redeploy (on Hostinger: redeploy from the repository URL) or run `docker compose up -d --wait`:
+the root `docker-compose.yml` pulls the newest `0.1.x` release on every start (tag `0.1`,
+`pull_policy: always`). Set `TEXT_EXTRACTION_VERSION` in `.env` only to pin one release, for
+example `0.1.10`; remove an old pinned value to follow the newest again. Your `.env` is kept, and a value in it wins over a changed default: compare it with `.env.example` after an
 update. [CHANGELOG.md](CHANGELOG.md) lists every change and, under "Upgrade", what to do.
 
 ## Use cases

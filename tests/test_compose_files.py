@@ -16,7 +16,7 @@ ROOT_FILE = ROOT_DIR / "docker-compose.yml"
 BUILD_FILE = ROOT_DIR / "docker-compose.build.yml"
 IMAGE = re.compile(
     r"^ghcr\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?"
-    r":\$\{TEXT_EXTRACTION_VERSION:-[0-9]+\.[0-9]+\.[0-9]+\}$"
+    r":\$\{TEXT_EXTRACTION_VERSION:-[0-9]+\.[0-9]+\}$"
 )
 # The build file's image names -> the published image of the same target.
 PUBLISHED = {
@@ -97,7 +97,8 @@ def test_every_image_is_published() -> None:
             assert service["image"] == _build_services()["valkey"]["image"]
             continue
         assert IMAGE.match(service["image"]), name
-        assert service["pull_policy"] == "missing", name
+        # A redeploy picks up the newest release of the minor line without a manual pull.
+        assert service["pull_policy"] == "always", name
 
 
 def test_ports_80_and_443_stay_free() -> None:

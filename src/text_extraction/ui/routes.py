@@ -313,6 +313,7 @@ def create_ui_router(settings: Settings) -> APIRouter:
         data = (answer.body or {}).get("data")
         if answer.status == 200 and isinstance(data, dict):
             context = _app_context(settings, str(data.get("principal")), str(data.get("role")))
+            context["session_oob"] = True  # the session line goes into the masthead's slot
             return templates.TemplateResponse(request, "app.html", context)
         if answer.status == 401:
             return templates.TemplateResponse(

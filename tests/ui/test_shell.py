@@ -142,6 +142,21 @@ def test_login_page_under_api_key_mode(client: TestClient) -> None:
         assert " name=" not in tag
         assert 'autocomplete="off"' in tag
     assert BANNER not in page
+    # The masthead's session slot waits empty for the login's out-of-band swap.
+    assert '<div id="session" class="who"></div>' in page
+
+
+def test_login_puts_the_session_line_into_the_masthead(client: TestClient) -> None:
+    answer = login(client).text
+
+    session = re.findall(
+        r'<div id="session" class="who" hx-swap-oob="true">(.*?)</div>', answer, re.S
+    )
+    assert len(session) == 1
+    assert "alice" in session[0]
+    assert 'data-action="logout"' in session[0]
+    assert 'class="language-switch"' in session[0]
+    assert answer.count('data-action="logout"') == 1
 
 
 def test_login_ok_renders_app_with_principal(client: TestClient) -> None:
