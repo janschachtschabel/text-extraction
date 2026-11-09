@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from text_extraction.convert import convert_html
 from text_extraction.convert.embedded import embedded_content
 from text_extraction.convert.listings import LinkSection
+from text_extraction.pii.html import HtmlText
 
 URL = "https://www.example.org/topic/1"
 BODY = "<p>" + "The lesson text is carried as data and not shown in the page shell. " * 4 + "</p>"
@@ -145,6 +146,52 @@ def test_convert_html_keeps_kmap_attachment_links() -> None:
         "- [Physikunterricht Online](https://physikunterricht-online.de/hilfsmittel/"
         "physikalische-groessen-und-einheiten/)"
     )
+
+
+def test_html_keeps_kmap_attachment_links_inside_the_body() -> None:
+    content = convert_html(kmap_page(), "https://kmap.eu/app/browser/Physik", "html").content
+
+    body_end = content.rindex("</body>")
+    assert content.index("<h2>Erklärungen</h2>") < body_end
+    assert content.index("LEIFIphysik") < body_end
+    assert content.rstrip().endswith("</html>")
+    analysed = HtmlText.parse(content)
+    assert not analysed.has_unread
+    assert "LEIFIphysik" in analysed.text
+    assert "LEIFIphysik" in analysed.render([], drop_unread=True)
+
+
+def test_an_attachment_without_a_label_is_left_out() -> None:
+    payload = {
+        "topic": "Lesson",
+        "description": "<p>Text.</p>",
+        "attachments": [
+            {"tag": "idea", "type": "link", "href": "https://a.example/1"},
+            {"tag": "idea", "name": "Named", "type": "link", "href": "https://b.example/2"},
+        ],
+    }
+    script = f'<script id="embedded-topic" type="json">{json.dumps(payload)}</script>'
+
+    embedded = embedded_content(soup(f"<html><body>{script}</body></html>"), URL)
+
+    assert embedded is not None
+    assert embedded.sections == (LinkSection("Ideas", 2, (("Named", "https://b.example/2"),)),)
+
+
+def test_an_attachment_with_an_unknown_tag_is_an_attachment() -> None:
+    payload = {
+        "topic": "Lesson",
+        "description": "<p>Text.</p>",
+        "attachments": [
+            {"tag": "quiz", "name": "Quiz", "type": "link", "href": "https://a.example/q"},
+        ],
+    }
+    script = f'<script id="embedded-topic" type="json">{json.dumps(payload)}</script>'
+
+    embedded = embedded_content(soup(f"<html><body>{script}</body></html>"), URL)
+
+    assert embedded is not None
+    assert embedded.sections == (LinkSection("Attachments", 2, (("Quiz", "https://a.example/q"),)),)
 
 
 def test_youtube_watch_page_yields_video_details() -> None:

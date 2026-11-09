@@ -13,11 +13,13 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Added
 
-- A page of type `listing` keeps the link lists of its content area: `content` ends with their
-  headings and standalone links (navigation, footer, breadcrumbs, cookie and feedback elements
-  and everything before the `<h1>` stay out; fewer than five links add nothing; a text or URL
-  that the content already holds, the page's own URL and a repeated URL are skipped), in
-  Markdown, text and HTML. Found on https://www.leifiphysik.de/optik, which kept only its
+- A page of type `listing` keeps the link lists of its content area when it is dense with links
+  (`link_density`) or its content has fewer than `QUALITY_MIN_WORDS` words: `content` ends with
+  their headings and standalone links (navigation, footer, breadcrumbs, cookie and feedback
+  elements and everything before the `<h1>` stay out; fewer than five links add nothing; a text or
+  URL that the content already holds, the page's own URL and a repeated URL are skipped), in
+  Markdown, text and HTML (inside `<body>`). An article that is a `listing` by its pagination
+  alone is unchanged. Found on https://www.leifiphysik.de/optik, which kept only its
   introduction. No new field, setting or warning; other page types are unchanged.
 - The playground renders tables, strikethrough and formulas in a Markdown result: `$$LaTeX$$` as
   MathML, converted on the server with latex2mathml 3.81.1 (MIT; the page's content security

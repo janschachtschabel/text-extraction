@@ -78,3 +78,18 @@ def test_padding_ignores_escaped_pipes_and_fenced_code() -> None:
 def test_table_with_equal_rows_stays_byte_for_byte() -> None:
     text = "| a | b | \n| --- | --- | \n| c | d | "
     assert enhance_table_structure(text) == text
+
+
+def test_a_bare_pipe_line_is_no_separator() -> None:
+    assert enhance_table_structure("text\n|\n| a | b |") == "text\n|\n| a | b |"
+    assert enhance_table_structure("|\n|") == "|\n|"
+
+
+def test_append_to_body_puts_the_block_inside_the_body() -> None:
+    assert markup.append_to_body("<html><body><p>a</p></body>\n</html>", "<ul></ul>") == (
+        "<html><body><p>a</p><ul></ul></body>\n</html>"
+    )
+    assert markup.append_to_body("<html><p>a</p></HTML>", "<ul></ul>") == (
+        "<html><p>a</p><ul></ul></HTML>"
+    )
+    assert markup.append_to_body("<p>a</p>", "<ul></ul>") == "<p>a</p><ul></ul>"

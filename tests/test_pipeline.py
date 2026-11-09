@@ -40,11 +40,14 @@ from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.page_types import PageTypeInfo
+from text_extraction.pii.html import HtmlText
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline import (
     CHARSET_MISMATCH_WARNING,
     Pipeline,
     _cache_options,
+    _wants_listing_lists,
     create_outbound,
     create_pipeline,
 )
@@ -769,6 +772,66 @@ def test_a_content_page_with_related_links_is_unchanged() -> None:
     assert data.content == convert_html(page, PAGE, "markdown").content
     assert data.content is not None
     assert "- [Related item" not in data.content
+
+
+def test_listing_lists_stay_inside_the_html_body() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    data = data_of(harness.run_once(format="html"))
+
+    assert data.content is not None
+    body_end = data.content.rindex("</body>")
+    assert data.content.index("<h3>Biology</h3>") < body_end
+    assert data.content.index("https://example.org/physics/20.html") < body_end
+    assert data.content.rstrip().endswith("</html>")
+    analysed = HtmlText.parse(data.content)  # what the PII stage reads
+    assert not analysed.has_unread
+    assert "Biology topic 1" in analysed.text
+    assert "Physics topic 20" in analysed.render([], drop_unread=True)
+
+
+def test_an_article_typed_listing_by_pagination_gets_no_link_lists() -> None:
+    prose = "Die Photosynthese wandelt Licht in chemische Energie um und ist wichtig. " * 30
+    tags = "".join(f"<li><a href='/tag/t{n}'>Schlagwort {n}</a></li>" for n in range(6))
+    related = "".join(f"<li><a href='/2026/10/p{n}/'>Beitrag {n}</a></li>" for n in range(4))
+    page = (
+        "<html lang='de'><head><title>Photosynthese erklaert</title></head><body><main>"
+        f"<article><h1>Photosynthese erklaert</h1><p>{prose}</p>"
+        f"<ul class='post-tags'>{tags}</ul><h3>Weitere Beitraege</h3><ul>{related}</ul>"
+        "</article><div class='post-links'><a rel='prev' href='/2026/10/x/'>Vorheriger "
+        "Beitrag</a></div></main></body></html>"
+    )
+    harness = Harness({PAGE: fetched(PAGE, page)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert (data.page_type.type, data.page_type.signals) == ("listing", ["pagination"])
+    assert data.word_count is not None
+    assert data.word_count >= 300
+    assert data.content == convert_html(page, PAGE, "markdown").content
+    assert "Schlagwort" not in data.content
+
+
+@pytest.mark.parametrize(
+    ("page_type", "signals", "words", "wanted"),
+    [
+        ("listing", ["link_density"], 400, True),
+        ("listing", ["pagination", "link_density"], 400, True),
+        ("listing", ["pagination"], 49, True),
+        ("listing", ["pagination"], 50, False),
+        ("listing", ["url"], 400, False),
+        ("content", ["word_count"], 10, False),
+    ],
+)
+def test_listing_lists_need_link_density_or_thin_content(
+    page_type: str, signals: list[str], words: int, wanted: bool
+) -> None:
+    found = PageTypeInfo.model_validate({"type": page_type, "signals": signals})
+    quality = assess(None, "").model_copy(update={"word_count": words})
+
+    assert _wants_listing_lists(found, quality, 50) is wanted
+    assert _wants_listing_lists(None, quality, 50) is False
 
 
 def test_listing_lists_pass_the_boilerplate_rules() -> None:

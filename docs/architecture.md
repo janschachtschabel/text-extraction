@@ -106,8 +106,9 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    key.
 5. **Convert:** the body's bytes decide what it is (`documents/sniff.py`, F1). HTML →
    Trafilatura (keep link-only lists of linked files, domain boilerplate rules, MathML →
-   LaTeX); a page of type `listing` keeps the link lists of its content area (package 21, below);
-   a Markdown table gets all its rows padded to the widest one; `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
+   LaTeX); a page of type `listing` keeps the link lists of its content area (see "Link lists of
+   a listing page"). A Markdown table gets all its rows padded to the widest one.
+   `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
    to each output format as a document's Markdown is (issue #15). PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
@@ -2781,17 +2782,24 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   failed. In results `error` therefore comes from soft 404s (`soft_404`).
 - **Link lists of a listing page (package 21).** Trafilatura drops a page that is mostly lists of
   links, so a page whose `page_type.type` is `listing` gets the link lists of its content area
-  appended to `content` (`convert/listings.py`, `listing_lists`; the pipeline calls it for no other
-  type, and uploads, documents and media never get it). The collector walks the page in document
+  appended to `content` (`convert/listings.py`, `listing_lists`) when `link_density` is among its
+  signals or its content has fewer than `QUALITY_MIN_WORDS` words: an article that is a `listing`
+  by its pagination alone keeps its text as it is. The pipeline calls it for no other type, and
+  uploads, documents and media never get it. The collector walks the page in document
   order and gathers headings and standalone links (a link that is most of its item, at most
-  `MAX_ITEM_CHARS` = 150 characters, `LINK_SHARE_OF_ITEM` = 0.8; an inline link inside a paragraph
-  is never one). Chrome is left out: `header`, `nav`, `footer`, `aside`, forms and any element
-  whose class or id holds `footer`, `breadcrumb(s)`, `cookie`, `consent`, `sidebar`, `social`,
-  `share`, `skip`, `pagination`, `pager`, `menu` or `feedback`, and everything before the `<h1>`.
-  Fewer than `LISTING_MIN_LINKS` = 5 links add nothing. A URL or a link text that the content
-  already holds, the page's own URL (with a fragment) and a repeated URL are listed at most once.
-  The lists are rendered in the requested format (Markdown headings and lists, plain text, HTML
-  `<h2>`/`<ul>`) and appended before the PII stage. No new field, setting or warning code.
+  `MAX_ITEM_CHARS` = 150 characters, `LINK_SHARE_OF_ITEM` = 0.8; the item is the closest `li`,
+  `div`, `p`, `dd`, `dt`, `td` or `th`, past inline wrappers such as `span`, so an inline link
+  inside a paragraph is never one). Chrome is left out: the landmarks of `is_outside_content`
+  (`nav`, the page's `header` and `footer`, a sidebar `aside`, their ARIA roles, hidden elements)
+  and any element whose class or id holds `footer`, `breadcrumb(s)`, `cookie`,
+  `consent`, `sidebar`, `social`, `share`, `skip`, `pagination`, `pager`, `menu` or `feedback`,
+  except an element that holds the first `<h1>` (a layout wrapper such as `has-sidebar`), and
+  everything before the `<h1>`. Fewer than `LISTING_MIN_LINKS` = 5 links add nothing. A URL
+  (matched whole, HTML entities read) or a link text that the content already holds, the page's
+  own URL (with a fragment) and a repeated URL are listed at most once. The lists are rendered in
+  the requested format (Markdown headings and lists with `[`, `]` escaped and space and
+  parentheses of the URL percent-encoded, plain text, HTML `<h2>`/`<ul>` inside `<body>`) and
+  appended before the PII stage. No new field, setting or warning code.
   A KMap lesson (`kmap.eu`) ends with its attachment links as such link lists, each link with its
   own URL, under headings in the page language (`<html lang>` `de`: Erklärungen, Ideen, Anwendungen,
   Anhänge; else Explanations, Ideas, Applications, Attachments).

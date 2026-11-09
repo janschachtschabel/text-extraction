@@ -1,3 +1,5 @@
+import time
+
 from text_extraction.convert.listings import LinkSection, listing_lists, render_link_sections
 
 BASE = "https://example.org/optik"
@@ -111,3 +113,99 @@ def test_render_link_sections_in_each_format() -> None:
     headless = [LinkSection(None, 1, (("A", "https://x.org/a"),))]
     assert render_link_sections(headless, "markdown") == "- [A](https://x.org/a)"
     assert render_link_sections([], "markdown") == ""
+
+
+def _topics(count: int = 6) -> str:
+    return "".join(f'<li><a href="/t/{n}">Topic {n}</a></li>' for n in range(count))
+
+
+def test_many_links_in_one_block_take_linear_time() -> None:
+    links = "".join(f'<a href="/p/{n}">Page {n}</a><br>' for n in range(5_000))
+    page = f"<html><body><h1>Hub</h1><div>{links}</div></body></html>"
+
+    started = time.perf_counter()
+    listing_lists(page, BASE, "markdown", existing="")
+
+    assert time.perf_counter() - started < 5
+
+
+def test_a_wrapper_with_the_h1_is_no_chrome_by_its_name() -> None:
+    page = (
+        '<html><body><div id="page" class="layout has-sidebar">'
+        f"<h1>Hub</h1><ul>{_topics()}</ul></div></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert "- [Topic 0](https://example.org/t/0)" in out
+    assert "- [Topic 5](https://example.org/t/5)" in out
+
+
+def test_a_landmark_wrapping_the_h1_still_is_chrome() -> None:
+    page = f"<html><body><aside><h1>Hub</h1><ul>{_topics()}</ul></aside></body></html>"
+
+    assert listing_lists(page, BASE, "markdown", existing="") == ""
+
+
+def test_a_landmark_after_the_h1_is_left_out() -> None:
+    nav = "".join(f'<li><a href="/nav/{n}">Nav {n}</a></li>' for n in range(6))
+    footer = "".join(f'<div><a href="/foot/{n}">Foot {n}</a></div>' for n in range(6))
+    page = (
+        f"<html><body><h1>Hub</h1><nav><ul>{nav}</ul></nav><ul>{_topics()}</ul>"
+        f"<footer>{footer}</footer></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert "Topic 0" in out
+    assert "Nav" not in out
+    assert "Foot" not in out
+
+
+def test_breadcrumbs_are_chrome() -> None:
+    page = f'<html><body><h1>Hub</h1><ul class="breadcrumbs">{_topics()}</ul></body></html>'
+
+    assert listing_lists(page, BASE, "markdown", existing="") == ""
+
+
+def test_a_url_of_the_content_is_matched_whole() -> None:
+    page = f"<html><body><h1>Hub</h1><ul>{_topics()}</ul></body></html>"
+
+    out = listing_lists(
+        page, BASE, "markdown", existing="See [deeper](https://example.org/t/1/deeper)."
+    )
+
+    assert "- [Topic 1](https://example.org/t/1)" in out
+
+
+def test_a_url_with_an_ampersand_in_html_content_is_known() -> None:
+    items = "".join(f'<li><a href="/q?a={n}&amp;b=1">Query {n}</a></li>' for n in range(6))
+    page = f"<html><body><h1>Hub</h1><ul>{items}</ul></body></html>"
+    existing = '<html><body><p><a href="https://example.org/q?a=0&amp;b=1">x</a></p></body></html>'
+
+    out = listing_lists(page, BASE, "html", existing=existing)
+
+    assert "Query 0" not in out
+    assert "Query 1" in out
+
+
+def test_a_link_wrapped_in_a_span_inside_running_text_is_not_standalone() -> None:
+    prose = (
+        "<p>Long prose about physics " + "word " * 40 + '<span class="x"><a href="/inline">'
+        "inline link</a></span> and more prose " + "word " * 20 + "</p>"
+    )
+    page = f"<html><body><h1>Hub</h1>{prose}<ul>{_topics()}</ul></body></html>"
+
+    out = listing_lists(page, BASE, "text", existing="")
+
+    assert "Topic 0" in out
+    assert "inline link" not in out
+
+
+def test_markdown_link_text_and_url_are_escaped() -> None:
+    items = "".join(f'<li><a href="/w/{n}_(x) y">A [b] {n}</a></li>' for n in range(6))
+    page = f"<html><body><h1>Hub</h1><ul>{items}</ul></body></html>"
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert out.splitlines()[0] == r"- [A \[b\] 0](https://example.org/w/0_%28x%29%20y)"

@@ -14,6 +14,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 from bs4 import Tag
 
+from text_extraction.convert.links import markdown_link, markdown_target, urls_in
 from text_extraction.convert.markup import attr, is_outside_content, prepare_html, strip_non_content
 
 # The same type as ``convert.html.OutputFormat``, declared here because that module imports
@@ -28,11 +29,14 @@ MAX_ITEM_CHARS: Final = 150
 LINK_SHARE_OF_ITEM: Final = 0.8
 
 _HEADINGS: Final = ["h1", "h2", "h3", "h4", "h5", "h6"]
-_ITEM_TAGS: Final = ["li", "div", "p", "dd", "dt", "td", "th", "span"]
+# The blocks a link's item can be. Inline wrappers (span, em, strong, b, i, small) are climbed
+# past, so a link wrapped in one inside a paragraph is that paragraph's.
+_ITEM_TAGS: Final = ["li", "div", "p", "dd", "dt", "td", "th"]
 # Words in an id or class that mark the site's furniture, not the page's content.
 _CHROME_WORDS: Final = frozenset(
     {
-        *("footer", "breadcrumb", "cookie", "consent", "sidebar", "social", "share", "skip"),
+        *("footer", "breadcrumb", "breadcrumbs", "cookie", "consent", "sidebar", "social"),
+        *("share", "skip"),
         *("pagination", "pager", "menu", "feedback"),
     }
 )
@@ -77,45 +81,86 @@ def _known_lines(existing: str) -> frozenset[str]:
     )
 
 
-def _is_chrome(tag: Tag) -> bool:
-    """The element or an ancestor is a landmark outside the content or named like furniture."""
-    for node in (tag, *tag.parents):
-        if not isinstance(node, Tag) or node.name in {"html", "body", "[document]"}:
-            break
+class _Page:
+    """The prepared page with what its links share, computed once per element: whether an
+    element is chrome and how long an item's text is. Without the caches a block of thousands
+    of links costs quadratic time."""
+
+    def __init__(self, html: str) -> None:
+        self.soup = prepare_html(html)
+        strip_non_content(self.soup)
+        self.first_h1 = self.soup.find("h1")
+        # The wrappers of the page's heading: an id or class word on them names the layout
+        # ("has-sidebar"), not furniture.
+        self._holds_h1 = (
+            {id(node) for node in (self.first_h1, *self.first_h1.parents)}
+            if self.first_h1 is not None
+            else set()
+        )
+        self._chrome: dict[int, bool] = {}
+        self._item_chars: dict[int, int] = {}
+
+    def _own_chrome(self, node: Tag) -> bool:
         if is_outside_content(node):
             return True
+        if id(node) in self._holds_h1:
+            return False
         words = _TOKEN_SPLIT.split(f"{attr(node, 'id')} {attr(node, 'class')}".lower())
-        if _CHROME_WORDS.intersection(words):
-            return True
-    return False
+        return not _CHROME_WORDS.isdisjoint(words)
+
+    def is_chrome(self, tag: Tag) -> bool:
+        """The element or an ancestor is a landmark outside the content or named like
+        furniture."""
+        path: list[Tag] = []
+        result = False
+        for node in (tag, *tag.parents):
+            if not isinstance(node, Tag) or node.name in {"html", "body", "[document]"}:
+                break
+            if (cached := self._chrome.get(id(node))) is not None:
+                result = cached
+                break
+            path.append(node)
+        for node in reversed(path):
+            result = result or self._own_chrome(node)
+            self._chrome[id(node)] = result
+        return result
+
+    def link_text(self, link: Tag) -> str | None:
+        """The link's text when it is a list entry of its own, else None."""
+        text = _norm(link.get_text(" "))
+        if not text or link.find_parent(_HEADINGS) is not None:
+            return None
+        item = link.find_parent(_ITEM_TAGS)
+        if item is None:
+            return None
+        if (item_chars := self._item_chars.get(id(item))) is None:
+            item_chars = len(_norm(item.get_text(" ")))
+            self._item_chars[id(item)] = item_chars
+        if item_chars > MAX_ITEM_CHARS or len(text) < LINK_SHARE_OF_ITEM * item_chars:
+            return None
+        return text
 
 
-def _link_text(link: Tag) -> str | None:
-    """The link's text when it is a list entry of its own, else None."""
-    text = _norm(link.get_text(" "))
-    if not text or link.find_parent(_HEADINGS) is not None:
-        return None
-    item = link.find_parent(_ITEM_TAGS)
-    if item is None:
-        return None
-    item_text = _norm(item.get_text(" "))
-    if len(item_text) > MAX_ITEM_CHARS or len(text) < LINK_SHARE_OF_ITEM * len(item_text):
-        return None
-    return text
+def _known_urls(existing: str, fmt: OutputFormat) -> frozenset[str]:
+    """The URLs ``existing`` holds, whole and without their fragment."""
+    return frozenset(
+        urldefrag(found).url for found in urls_in(existing, unescape_entities=fmt == "html")
+    )
 
 
-def _events(html: str, url: str, existing: str, known: frozenset[str]) -> list[_Event]:
+def _events(
+    html: str, url: str, fmt: OutputFormat, existing: str, known: frozenset[str]
+) -> list[_Event]:
     """Headings and links in document order, without a link whose URL is in ``existing`` or
-    whose text is in ``known``."""
-    soup = prepare_html(html)
-    strip_non_content(soup)
-    first_h1 = soup.find("h1")
-    started = first_h1 is None
+    whose text is a line of it."""
+    page_tree = _Page(html)
+    known_urls = _known_urls(existing, fmt)
+    started = page_tree.first_h1 is None
     page = urldefrag(url).url
     seen: set[str] = set()
     events: list[_Event] = []
-    for element in soup.find_all(True):
-        if element is first_h1:
+    for element in page_tree.soup.find_all(True):
+        if element is page_tree.first_h1:
             started = True
             continue
         if not started:
@@ -123,16 +168,16 @@ def _events(html: str, url: str, existing: str, known: frozenset[str]) -> list[_
         if element.name in _HEADINGS:
             # Of nested headings the outer one carries the text; the inner one repeats it.
             text = _norm(element.get_text(" "))
-            if text and element.find_parent(_HEADINGS) is None and not _is_chrome(element):
+            if text and element.find_parent(_HEADINGS) is None and not page_tree.is_chrome(element):
                 events.append(_Event(int(element.name[1]), text))
         elif element.name == "a" and element.get("href"):
             href = urldefrag(urljoin(url, attr(element, "href"))).url
             if urlsplit(href).scheme not in {"http", "https"} or href == page:
                 continue
-            if href in seen or href in existing:
+            if href in seen or href in known_urls or markdown_target(href) in known_urls:
                 continue
-            label = _link_text(element)
-            if label is not None and label not in known and not _is_chrome(element):
+            label = page_tree.link_text(element)
+            if label is not None and label not in known and not page_tree.is_chrome(element):
                 seen.add(href)
                 events.append(_Event(0, label, href))
     return events
@@ -151,10 +196,10 @@ def _has_links(events: Sequence[_Event], start: int) -> bool:
 
 def listing_lists(html: str, url: str, fmt: OutputFormat, *, existing: str) -> str:
     """The standalone-link lists of the page as headed sections in ``fmt``; ``""`` when the page
-    has fewer than ``LISTING_MIN_LINKS`` of them. Links whose URL occurs in ``existing`` and
-    headings that are heading lines of ``existing`` are not repeated."""
+    has fewer than ``LISTING_MIN_LINKS`` of them. Links whose URL is one of the URLs in
+    ``existing`` (in ``fmt``) and texts that are lines of ``existing`` are not repeated."""
     known = _known_lines(existing)
-    events = _events(html, url, existing, known)
+    events = _events(html, url, fmt, existing, known)
     if sum(1 for event in events if event.url is not None) < LISTING_MIN_LINKS:
         return ""
     drafts: list[_Draft] = []
@@ -196,7 +241,7 @@ def render_link_sections(sections: Sequence[LinkSection], fmt: OutputFormat) -> 
             mark = "#" * section.level + " " if fmt == "markdown" else ""
             lines += [mark + section.heading] + ([""] if section.links else [])
         if fmt == "markdown":
-            lines += [f"- [{text}]({link})" for text, link in section.links]
+            lines += [f"- {markdown_link(text, link)}" for text, link in section.links]
         else:
             lines += [f"- {text}" for text, _ in section.links]
         parts.append("\n".join(lines))

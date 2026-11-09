@@ -3,7 +3,9 @@
 Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 """
 
+import re
 from dataclasses import dataclass
+from html import unescape
 from typing import Annotated, Literal
 from urllib.parse import urldefrag, urljoin, urlsplit
 
@@ -65,6 +67,30 @@ class Link:
     category: Annotated[
         TolerantLinkCategory | None, Field(description=LINK_CATEGORY_DESCRIPTION)
     ] = None
+
+
+_URL = re.compile(r"https?://[^\s<>\"'()\[\]]+")
+
+
+def urls_in(text: str, *, unescape_entities: bool) -> set[str]:
+    """The URLs the text holds, whole: a link to ``a.pdf.zip`` is no link to ``a.pdf``.
+    ``unescape_entities`` reads HTML, whose ``&`` in a URL is ``&amp;``."""
+    if unescape_entities:
+        text = unescape(text)
+    return {url.rstrip(".,;:") for url in _URL.findall(text)}
+
+
+def markdown_target(url: str) -> str:
+    """``url`` with its space and parentheses percent-encoded, so that it does not end a
+    Markdown link early."""
+    return url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+
+
+def markdown_link(text: str, url: str) -> str:
+    """``[text](url)`` with the brackets of the text escaped and the URL as
+    ``markdown_target`` writes it."""
+    label = text.replace("[", r"\[").replace("]", r"\]")
+    return f"[{label}]({markdown_target(url)})"
 
 
 def absolute_url(base: str, href: str) -> str | None:
