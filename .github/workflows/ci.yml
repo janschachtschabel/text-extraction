@@ -496,8 +496,8 @@ jobs:
           jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
           jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 11
             and all(.value.build == null
-              and (.value.pull_policy == "missing" or .value.pull_policy == "if_not_present")
-              and (.value.image | test("^ghcr\\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?:[0-9]+\\.[0-9]+\\.[0-9]+$")))' compose.json
+              and .value.pull_policy == "always"
+              and (.value.image | test("^ghcr\\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?:[0-9]+\\.[0-9]+$")))' compose.json
           jq -e '.services | .["browser-worker"].image | contains("/text-extraction-browser:")' compose.json
           jq -e '.services.api.ports == [{"mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp"}]' compose.json
           jq -e '.networks.default.name == "text-extraction-web"' compose.json
