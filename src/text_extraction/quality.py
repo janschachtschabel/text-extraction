@@ -11,7 +11,8 @@ is that count over the extracted content; the pipeline and the live harness rely
 """
 
 import re
-from typing import Literal
+from collections.abc import Mapping
+from typing import Final, Literal
 
 from pydantic import BaseModel
 
@@ -50,6 +51,10 @@ _CHALLENGE_PHRASES = (
 _WEAK_CHALLENGE_WORDS = re.compile(r"just a moment|captcha|datadome|perimeterx")
 # Markup of the challenge itself (Cloudflare's ``__cf_chl_*`` / ``cf-chl-*``, Anubis' script).
 _CHALLENGE_MARKUP = re.compile(r"cf[-_]chl|within\.website/x/cmd/anubis")
+# The head of a refused answer's body that ``is_challenge_answer`` reads, in bytes.
+CHALLENGE_SCAN_BYTES: Final = 65536
+# The title of Cloudflare's challenge page ("Just a moment..."), at the start of the title only.
+_CHALLENGE_TITLE = re.compile(r"<title[^>]*>\s*just a moment")
 _SOFT_404_PHRASES = re.compile(
     r"\b404\b|not found|nicht gefunden|existiert nicht|does not exist|no longer available"
     r"|nicht mehr verfügbar"
@@ -119,6 +124,26 @@ def _is_bot_challenge(page_text: str, own_text: str, markup: _Markup | None, wor
     if markup is not None and _CHALLENGE_MARKUP.search(markup.raw):
         return True
     return words < THIN_PAGE_BELOW_WORDS and bool(_WEAK_CHALLENGE_WORDS.search(own_text))
+
+
+def is_challenge_answer(headers: Mapping[str, str], body: bytes | str) -> bool:
+    """Whether a refused answer (403, 429 or 503; the caller checks the status) is a bot
+    challenge: Cloudflare's ``cf-mitigated: challenge`` header (names in any letter case), or in
+    the first ``CHALLENGE_SCAN_BYTES`` of the body challenge markup, a phrase only a challenge
+    says, or a title that starts with "Just a moment" (package 20). Cheap: no HTML parse."""
+    if any(
+        name.lower() == "cf-mitigated" and value.strip().lower() == "challenge"
+        for name, value in headers.items()
+    ):
+        return True
+    head = body[:CHALLENGE_SCAN_BYTES]
+    raw = head.decode("utf-8", errors="replace") if isinstance(head, bytes) else head
+    text = _normalise(raw)
+    return (
+        _CHALLENGE_MARKUP.search(text) is not None
+        or _CHALLENGE_TITLE.search(text) is not None
+        or any(phrase in text for phrase in _CHALLENGE_PHRASES)
+    )
 
 
 def assess(html: str | None, content: str) -> Quality:

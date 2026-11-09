@@ -9,6 +9,28 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-09
+
+### Changed
+
+- A page answer with status 403, 429 or 503 that is a bot challenge now fails `bot_protection`
+  instead of `target_http_error`, in fast and in browser mode. It is a challenge when the answer
+  has Cloudflare's `cf-mitigated: challenge` header, or when the head of its body is a challenge
+  page (Cloudflare's "Just a moment...", `cf-chl` markup, Anubis, "Checking your browser").
+  `upstream_status` keeps the site's status, `retryable` keeps the rule of `target_http_error`,
+  and `error.message` names Cloudflare when the answer says so. Unblock mode still tries such a
+  refusal in the browser; the respect mode still does not. Found on leifiphysik.de, whose
+  Cloudflare protection answers the standard browser's `HeadlessChrome` user agent with a
+  challenge. The browser's user agent is unchanged.
+
+### Added
+
+- The playground explains a `bot_protection` error: the site's operator can allow the service, or
+  an admin can use "Checks off (contract partners)" with the unblock browser
+  (`BROWSER_UNBLOCK_ENABLED`). An admin whose server runs the browser without unblock mode is told
+  so at the "Checks off" choice.
+- User guide (English and German), "Site rules": a section on sites behind a bot protection.
+
 ## [0.1.8] - 2026-11-09
 
 ### Changed

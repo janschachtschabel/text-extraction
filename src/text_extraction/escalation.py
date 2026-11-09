@@ -43,11 +43,18 @@ def _is_ok_html(result: ExtractResult) -> bool:
     return media_type in _HTML_TYPES and status is not None and 200 <= status < 300
 
 
+# The codes of a refused page answer: a plain refusal, or a bot challenge (package 20).
+_REFUSAL_CODES: Final[frozenset[ErrorCode]] = frozenset(
+    {ErrorCode.TARGET_HTTP_ERROR, ErrorCode.BOT_PROTECTION}
+)
+
+
 def _is_refusal(envelope: Envelope[ExtractResult], result: ExtractResult) -> bool:
-    """A page answer refused with a 403, 429 or 503, whatever its body or content type."""
+    """A page answer refused with a 403, 429 or 503, whatever its body or content type, also
+    one reported as a bot challenge."""
     return (
         envelope.error is not None
-        and envelope.error.code == ErrorCode.TARGET_HTTP_ERROR
+        and envelope.error.code in _REFUSAL_CODES
         and result.upstream_status in REFUSAL_STATUSES
     )
 

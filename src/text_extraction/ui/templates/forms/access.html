@@ -5,8 +5,9 @@
 {%- set chosen_access = posted if posted == "default" or (posted in access.modes and posted != access.default) else preset %}
 {#- What "ignore" does differs by form (``access_variant``): a site crawl never renders, a
 screenshot always does, and a chunked text has no page. Without the unblock browser it only
-switches the checks off. -#}
-{%- if not access.unblock %}{% set ignore_hint = "hint.access.ignore" %}
+switches the checks off; an admin is told when that is because the server switched it off. -#}
+{%- if access.unblock_off and access_variant != "site" %}{% set ignore_hint = "hint.access.ignore_unblock_off" %}
+{%- elif not access.unblock %}{% set ignore_hint = "hint.access.ignore" %}
 {%- elif access_variant == "site" %}{% set ignore_hint = "hint.access.maximum_site" %}
 {%- elif access_variant == "screenshot" %}{% set ignore_hint = "hint.access.maximum_screenshot" %}
 {%- elif access_variant == "chunk" %}{% set ignore_hint = "hint.access.maximum_chunk" %}
@@ -16,7 +17,7 @@ switches the checks off. -#}
   {%- for mode in access.modes %}
   {%- set value = "default" if mode == access.default else mode %}
   <label class="inline" for="{{ prefix }}-access-{{ value }}"><input type="radio" id="{{ prefix }}-access-{{ value }}" name="access" value="{{ value }}" data-mode="{{ mode }}" aria-describedby="{{ prefix }}-access-{{ value }}-hint"{% if chosen_access == value %} checked{% endif %}> {{ t("access." ~ mode) }}{% if value == "default" %}{{ t("access.default") }}{% endif %}</label>
-  <p class="hint" id="{{ prefix }}-access-{{ value }}-hint">{% if mode == "ignore" %}{{ t(ignore_hint, value=code("compliance: ignore")) }}{% else %}{{ t("hint.access." ~ mode) }}{% endif %}</p>
+  <p class="hint" id="{{ prefix }}-access-{{ value }}-hint">{% if mode == "ignore" %}{{ t(ignore_hint, value=code("compliance: ignore"), setting=code("BROWSER_UNBLOCK_ENABLED")) }}{% else %}{{ t("hint.access." ~ mode) }}{% endif %}</p>
   {%- endfor %}
 </fieldset>
 {% endif %}

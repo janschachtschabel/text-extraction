@@ -1,7 +1,14 @@
 import pytest
 
 from text_extraction.envelope import ErrorCode
-from text_extraction.quality import Quality, assess, count_words, quality_error
+from text_extraction.quality import (
+    CHALLENGE_SCAN_BYTES,
+    Quality,
+    assess,
+    count_words,
+    is_challenge_answer,
+    quality_error,
+)
 
 ARTICLE_TEXT = " ".join(
     f"Sentence number {i} explains how photosynthesis turns light into sugar." for i in range(40)
@@ -244,3 +251,48 @@ def test_only_the_head_title_counts_as_title() -> None:
     # The page title still counts when it is in the head.
     q = assess("<html><head><title>404 Not Found</title></head><body></body></html>", "Sorry.")
     assert q.soft_404
+
+
+# --- a refused answer that is a bot challenge (package 20) --------------------------------------
+
+CLOUDFLARE_CHALLENGE = (
+    '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>'
+    '<meta name="robots" content="noindex,nofollow"></head><body>'
+    '<div id="challenge-error-text">Enable JavaScript and cookies to continue</div>'
+    "<script>window._cf_chl_opt={cvId: '3'};</script></body></html>"
+)
+
+
+@pytest.mark.parametrize("name", ["cf-mitigated", "CF-Mitigated"])
+def test_cf_mitigated_header_is_a_challenge(name: str) -> None:
+    assert is_challenge_answer({name: "challenge"}, b"") is True
+    assert is_challenge_answer({name: " Challenge "}, "") is True
+    assert is_challenge_answer({name: "block"}, b"") is False
+    assert is_challenge_answer({}, b"") is False
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (CLOUDFLARE_CHALLENGE, True),
+        ("<html><head><title>Just a moment...</title></head><body></body></html>", True),
+        ("<html><body><script src='/cdn-cgi/cf-chl.js'></script></body></html>", True),
+        ("<html><body><p>Checking your browser before accessing.</p></body></html>", True),
+        ("<html><body><p>Forbidden</p></body></html>", False),
+        (
+            "<html><head><title>Denied</title></head><body>Just a moment, please</body></html>",
+            False,
+        ),
+    ],
+)
+def test_challenge_markup_or_phrase_is_a_challenge(body: str, expected: bool) -> None:
+    assert is_challenge_answer({}, body) is expected
+    assert is_challenge_answer({}, body.encode()) is expected
+
+
+def test_only_the_head_of_the_body_is_read() -> None:
+    padding = "<!--" + "x" * CHALLENGE_SCAN_BYTES + "-->"
+    late = f"<html><body>{padding}<script>window._cf_chl_opt={{}};</script></body></html>"
+    assert CHALLENGE_SCAN_BYTES == 65536
+    assert is_challenge_answer({}, late.encode()) is False
+    assert is_challenge_answer({"cf-mitigated": "challenge"}, late.encode()) is True

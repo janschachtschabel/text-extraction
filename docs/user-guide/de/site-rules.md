@@ -76,6 +76,23 @@ Wo es geht, bitten Sie den Inhaber der Website besser um eine Freigaberegel: ein
 Header, den Sie mit `headers` senden, oder eine Ausnahme für die ausgehende IP-Adresse des
 Dienstes.
 
+### Websites hinter einem Bot-Schutz
+
+Viele Websites liegen hinter einem Bot-Schutz wie Cloudflare. Er kann den Dienst mit einer
+Bot-Prüfung ablehnen, obwohl dieselbe Seite in einem normalen Browser öffnet. Der Dienst antwortet
+dann `failed` mit `bot_protection`, `upstream_status` 403, 429 oder 503 und einer
+`error.message` wie „The target answered HTTP 403 with a bot challenge (Cloudflare).“.
+
+- Der normale Browser sagt ehrlich, dass er ein automatischer Browser ohne Fenster ist
+  (`HeadlessChrome` und `text-extraction/<version>` in seinem User-Agent). Ein Schutz, der solche
+  Browser ablehnt, lehnt ihn aus jedem Netz ab, `mode: browser` hilft also nicht.
+- Eine IP-Adresse aus einem Rechenzentrum (ein VPS, ein Cloud-Server) wird öfter abgelehnt als ein
+  Heimanschluss, auch im schnellen Modus.
+- Wege daran vorbei: Der Betreiber der Website schaltet den Dienst frei (seinen User-Agent
+  `text-extraction` oder die ausgehende IP-Adresse des Servers), oder, für eine Website, die die
+  Extraktion vertraglich erlaubt hat, die maximale Extraktion mit `BROWSER_UNBLOCK_ENABLED=true`
+  (siehe oben).
+
 ## Die Pause nach einem 429 oder 503
 
 Ein Host, der mit 429 oder 503 antwortet, bekommt eine Pause: so lange, wie sein `Retry-After`

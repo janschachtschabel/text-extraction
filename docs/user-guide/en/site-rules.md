@@ -70,6 +70,22 @@ maximum extraction only for a site whose owner allowed it.
 Where you can, ask the site owner for an allowlist rule instead: a secret header that you send
 with `headers`, or an exemption for the service's outgoing IP address.
 
+### Sites behind a bot protection
+
+Many sites sit behind a bot protection such as Cloudflare. It may refuse the service with a bot
+check, while the same page opens in a normal browser. The service then answers `failed` with
+`bot_protection`, `upstream_status` 403, 429 or 503, and an `error.message` such as "The target
+answered HTTP 403 with a bot challenge (Cloudflare).".
+
+- The normal browser says honestly that it is an automated, headless browser
+  (`HeadlessChrome` and `text-extraction/<version>` in its user agent). A protection that refuses
+  headless browsers refuses it from any network, so `mode: browser` does not help.
+- A data-centre IP address (a VPS, a cloud server) gets refused more often than a home
+  connection, even in the fast mode.
+- Ways past it: the site's operator allows the service (its user agent `text-extraction` or the
+  server's outgoing IP address), or, for a site that allowed extraction by contract, maximum
+  extraction with `BROWSER_UNBLOCK_ENABLED=true` (see above).
+
 ## The pause after a 429 or 503
 
 A host that answers 429 or 503 gets a pause: as long as its `Retry-After` says, else

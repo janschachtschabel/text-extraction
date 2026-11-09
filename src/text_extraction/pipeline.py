@@ -276,7 +276,7 @@ from text_extraction.pipeline_render import (
     check_target,
     render_options,
 )
-from text_extraction.quality import Quality, assess, quality_error
+from text_extraction.quality import Quality, assess, is_challenge_answer, quality_error
 from text_extraction.render import (
     ArtifactSink,
     ArtifactUnavailable,
@@ -553,6 +553,32 @@ class _Run:
         details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
         return _failed(self.result(), code, message, retryable=retryable, details=details)
+
+
+def _refused(
+    run: _Run, status: int, headers: Mapping[str, str], body: bytes | str
+) -> Envelope[ExtractResult]:
+    """The failure of a page answered with an error ``status``: ``bot_protection`` when it is a
+    refusal (403, 429 or 503) that is a bot challenge (package 20), else ``target_http_error``.
+    Both keep the site's status in ``upstream_status`` and the same ``retryable`` rule."""
+    retryable = status in _RETRYABLE_STATUSES or status >= 500
+    if status in REFUSAL_STATUSES and is_challenge_answer(headers, body):
+        names = {name.lower(): value.strip().lower() for name, value in headers.items()}
+        vendor = (
+            " (Cloudflare)"
+            if "cf-mitigated" in names or names.get("server") == "cloudflare"
+            else ""
+        )
+        return run.failed(
+            ErrorCode.BOT_PROTECTION,
+            f"The target answered HTTP {status} with a bot challenge{vendor}.",
+            retryable=retryable,
+        )
+    return run.failed(
+        ErrorCode.TARGET_HTTP_ERROR,
+        f"The target answered with HTTP status {status}.",
+        retryable=retryable,
+    )
 
 
 @dataclass(frozen=True)
@@ -1607,11 +1633,7 @@ class Pipeline:
                 return run.failed(block.code, block.message, retryable=block.retryable)
             return await self._revalidated(run, stored, fetched)
         if not 200 <= fetched.status < 300:  # also a 3xx the fetcher could not follow
-            failed = run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {fetched.status}.",
-                retryable=fetched.status in _RETRYABLE_STATUSES or fetched.status >= 500,
-            )
+            failed = _refused(run, fetched.status, fetched.headers, fetched.content)
             if failed.data is not None and self._assesses_refusal(run, fetched):
                 failed.data.quality = await self._refusal_quality(run, fetched)
             return failed
@@ -2585,11 +2607,7 @@ class Pipeline:
         if not_cleared and not 200 <= last.status < 300:
             return run.failed(ErrorCode.BOT_PROTECTION, _QUALITY_MESSAGES[ErrorCode.BOT_PROTECTION])
         if not 200 <= last.status < 300:
-            return run.failed(
-                ErrorCode.TARGET_HTTP_ERROR,
-                f"The target answered with HTTP status {last.status}.",
-                retryable=last.status in _RETRYABLE_STATUSES or last.status >= 500,
-            )
+            return _refused(run, last.status, last.headers, rendered.html)
         if _KINDS.get(last.content_type or "") != "html":  # a download, text, an image ...
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,

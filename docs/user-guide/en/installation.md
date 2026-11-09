@@ -69,7 +69,7 @@ of `init`; the `--show-admin-key` command above prints it at any time. Your own 
 9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
 http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
 
-`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.8`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.9`; `0.1`
 follows the newest `0.1.x` after `docker compose pull`, since an image already on the machine is
 not pulled again). This file needs `0.1.8` or later: older images have no `init` service. The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).

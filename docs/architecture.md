@@ -838,6 +838,20 @@ while `BROWSER_ENABLED` is false, are unchanged.
     only for a challenge body. `better()` keeps the better of the fast and the rendered result.
     Outside unblock mode nothing changes: a plain 403 stays `target_http_error` in the respect
     mode (the leifiphysik case of package 10).
+- **B17, challenge refusals (package 20).** A page answer with status 403, 429 or 503 that is a
+  bot challenge fails `bot_protection` instead of `target_http_error`, in fast and in browser mode
+  (`pipeline._refused`, `quality.is_challenge_answer`). It is a challenge when the answer has
+  Cloudflare's `cf-mitigated: challenge` header, or when the first 64 KiB of its body hold
+  challenge markup (`cf-chl`, Anubis), a phrase only a challenge says, or a title that starts with
+  "Just a moment". `upstream_status` keeps the site's status and `retryable` the rule of
+  `target_http_error` (429, 503 and 5xx); the message names Cloudflare when the header or
+  `server: cloudflare` says so. Escalation counts it as a refusal (`escalation._is_refusal`), so
+  unblock `auto` still tries it in the browser and the respect mode never does. Found on
+  leifiphysik.de (2026-11-09): Cloudflare answers the standard browser's `HeadlessChrome` user
+  agent and curl with a managed challenge, from a home connection too, and let the fast mode's
+  own user agent through there. The standard browser's user agent stays as it is (B8, CLAUDE.md
+  rule 6). The playground explains the error and tells an admin when `BROWSER_UNBLOCK_ENABLED` is
+  off while the browser is on.
   - The host's pause (P12-S2): a fast 429 or 503 still records its pause (`Retry-After`, else
     `OUTBOUND_BACKOFF_SECONDS`, at most `OUTBOUND_MAX_BACKOFF_SECONDS`). The render takes its turn
     after the pause: the browser worker gives the item back on `CircuitOpen`, as for any paused

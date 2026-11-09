@@ -274,6 +274,26 @@ def test_plain_refusal_escalates_only_under_unblock(status: int) -> None:
     assert not needs_browser(text, unblock=False)
 
 
+@pytest.mark.parametrize("status", [403, 429, 503])
+def test_a_challenge_refusal_escalates_only_under_unblock(status: int) -> None:
+    """A refusal reported as ``bot_protection`` (package 20) is still a refusal: unblock mode
+    tries it in the browser, the respect mode does not."""
+    challenge = envelope(
+        status="failed",
+        code=ErrorCode.BOT_PROTECTION,
+        words=0,
+        q=quality(visible_chars=9, word_count=1, bot_challenge=True, challenge_status=True),
+        upstream_status=status,
+    )
+    unassessed = envelope(
+        status="failed", code=ErrorCode.BOT_PROTECTION, words=0, q=None, upstream_status=status
+    )
+
+    assert needs_browser(challenge, unblock=True)
+    assert not needs_browser(challenge, unblock=False)
+    assert not needs_browser(unassessed, unblock=True)  # not assessed: outside unblock auto
+
+
 @pytest.mark.parametrize("status", [401, 404, 410, 500, 502])
 def test_other_error_statuses_never_escalate(status: int) -> None:
     assert not needs_browser(refusal(status), unblock=True)
