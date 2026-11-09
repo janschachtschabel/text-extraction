@@ -118,7 +118,8 @@ shape.
     introduction's inline link, no pre-footer link, no "Feedback", no `#degree-1`.
   - `test_known_urls_and_headings_are_not_repeated`: with `existing` holding
     `"[Sehvorgang](https://example.org/optik/lichtausbreitung/sehvorgang)"` and the line
-    `"### Lichtreflexion"`: no Sehvorgang item, no Lichtreflexion heading, its links stay.
+    `"### Lichtreflexion"`: no Sehvorgang item, no Lichtreflexion heading, its links stay
+    (revised in fix wave 2: the heading stays with its links).
   - `test_too_few_links_give_nothing`: a page with four standalone links answers `""`.
   - `test_long_items_are_not_standalone`: a `li` with a link plus 200 characters of text is
     not collected.
@@ -142,7 +143,8 @@ shape.
   events into `LinkSection`s: a heading starts a section; a heading whose section has no links
   and no deeper heading with links before the next heading of its level or higher is dropped,
   and so is a heading whose text is a heading line of `existing` (`#` marks stripped) — its
-  links then join the section with `heading=None`. Render with `render_link_sections`: markdown
+  links then join the section with `heading=None` (revised in fix wave 2: such a heading keeps
+  its section, `test_a_heading_the_content_holds_keeps_its_section`). Render with `render_link_sections`: markdown
   `"#" * level + " " + heading`, a blank line, `- [text](url)` lines, sections separated by a
   blank line; text the same without `#` and URLs; html `<hN>…</hN><ul><li><a href>…</a></li></ul>`
   with `html.escape(…, quote=True)`.

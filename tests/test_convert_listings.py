@@ -1,6 +1,14 @@
+import re
 import time
 
-from text_extraction.convert.listings import LinkSection, listing_lists, render_link_sections
+import pytest
+
+from text_extraction.convert.listings import (
+    LinkSection,
+    OutputFormat,
+    listing_lists,
+    render_link_sections,
+)
 
 BASE = "https://example.org/optik"
 
@@ -59,7 +67,7 @@ def test_chrome_and_inline_links_are_left_out() -> None:
         assert left_out not in out
 
 
-def test_known_urls_and_headings_are_not_repeated() -> None:
+def test_known_urls_are_not_repeated_and_known_headings_keep_their_section() -> None:
     existing = (
         "[Sehvorgang](https://example.org/optik/lichtausbreitung/sehvorgang)\n\n### Lichtreflexion"
     )
@@ -67,19 +75,18 @@ def test_known_urls_and_headings_are_not_repeated() -> None:
     out = listing_lists(HUB, BASE, "markdown", existing=existing)
 
     assert "Sehvorgang" not in out
-    assert "### Lichtreflexion" not in out
-    assert "Spiegel" in out
+    assert "### Lichtreflexion\n\n- [Spiegel](" in out
     assert "Schatten" in out
 
 
-def test_texts_the_content_holds_as_lines_are_not_repeated() -> None:
+def test_link_texts_the_content_holds_as_lines_are_not_repeated() -> None:
     existing = "Optik\n\nLichtreflexion\n- Sehvorgang\n  Spiegel"
 
     out = listing_lists(HUB, BASE, "markdown", existing=existing)
 
     assert "Sehvorgang" not in out
     assert "Spiegel" not in out
-    assert "Lichtreflexion" not in out
+    assert "### Lichtreflexion\n\n- [Reflexionsgesetz](" in out
     assert "[Schatten](" in out
     assert "### Lichtausbreitung" in out
 
@@ -209,3 +216,200 @@ def test_markdown_link_text_and_url_are_escaped() -> None:
     out = listing_lists(page, BASE, "markdown", existing="")
 
     assert out.splitlines()[0] == r"- [A \[b\] 0](https://example.org/w/0_%28x%29%20y)"
+
+
+def test_a_card_heading_inside_its_link_stays_the_link_label() -> None:
+    cards = "".join(
+        f'<div class="col"><a class="card" href="/t/{n}"><h3>Thema {n}</h3>'
+        f"<p>Kurzer Teaser {n}.</p></a></div>"
+        for n in range(6)
+    )
+    page = f'<html><body><main><h1>Themen</h1><div class="grid">{cards}</div></main></body></html>'
+
+    out = listing_lists(page, BASE, "markdown", existing="# Themen")
+
+    assert "###" not in out
+    for n in range(6):
+        assert f"- [Thema {n} Kurzer Teaser {n}.](https://example.org/t/{n})" in out
+
+
+def test_a_parent_link_of_a_nested_list_is_listed_with_its_children() -> None:
+    def children(topic: str) -> str:
+        return "".join(f'<li><a href="/{topic}/{n}">{topic} {n}</a></li>' for n in range(3))
+
+    page = (
+        "<html><body><main><h1>Physik</h1><ul>"
+        f'<li><a href="/mechanik">Mechanik</a><ul>{children("mech")}</ul></li>'
+        f'<li><a href="/akustik">Akustik</a><ul>{children("aku")}</ul></li>'
+        "</ul></main></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="# Physik")
+
+    assert "- [Mechanik](https://example.org/mechanik)" in out
+    assert "- [Akustik](https://example.org/akustik)" in out
+    assert "- [mech 2](https://example.org/mech/2)" in out
+    assert "- [aku 0](https://example.org/aku/0)" in out
+    assert out.index("Mechanik") < out.index("mech 0") < out.index("Akustik")
+
+
+def test_a_heading_the_content_holds_keeps_its_section() -> None:
+    def links(prefix: str) -> str:
+        return "".join(f'<li><a href="/{prefix}/{n}">{prefix}{n}</a></li>' for n in range(3))
+
+    page = (
+        f"<html><body><h1>Optik</h1><h2>A</h2><ul>{links('A')}</ul>"
+        f"<h2>B</h2><ul>{links('B')}</ul></body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="# Optik\n\n## B\n\nIntro")
+
+    assert out == (
+        "## A\n\n- [A0](https://example.org/A/0)\n- [A1](https://example.org/A/1)\n"
+        "- [A2](https://example.org/A/2)\n\n"
+        "## B\n\n- [B0](https://example.org/B/0)\n- [B1](https://example.org/B/1)\n"
+        "- [B2](https://example.org/B/2)"
+    )
+
+
+def _structure(out: str, fmt: str) -> list[tuple[str, str]]:
+    """The headings and link labels of a rendered result, in order."""
+    if fmt == "html":
+        pattern = r"<h\d>([^<]+)</h\d>|<a href=\"[^\"]+\">([^<]+)</a>"
+    else:
+        pattern = r"^#+ (.+)$|^- \[(.+)\]\(.+\)$"
+    return [
+        ("heading", match[0]) if match[0] else ("link", match[1])
+        for match in re.findall(pattern, out, flags=re.MULTILINE)
+    ]
+
+
+def test_markdown_and_html_give_the_same_sections() -> None:
+    items = "".join(f'<li><a href="/b/{n}">Bio {n}</a></li>' for n in range(8))
+    page = f"<html><body><main><h1>Physik</h1><h2>Biology</h2><ul>{items}</ul></main></body></html>"
+    markdown = "# Physik\n\n## Biology\n\nBio 0\n\n[Bio & 1](https://example.org/b/1)\n\nIntro"
+    html = (
+        "<html><body><h1>Physik</h1>\n<h2>Biology</h2><p>Bio 0</p>"
+        '<p><a href="https://example.org/b/1">Bio &amp; 1</a></p><p>Intro</p></body></html>'
+    )
+
+    from_markdown = listing_lists(page, BASE, "markdown", existing=markdown)
+    from_html = listing_lists(page, BASE, "html", existing=html)
+
+    expected = [("heading", "Biology")] + [("link", f"Bio {n}") for n in range(2, 8)]
+    assert _structure(from_markdown, "markdown") == expected
+    assert _structure(from_html, "html") == expected
+
+
+def test_an_offcanvas_menu_after_the_h1_is_chrome() -> None:
+    menu = "".join(
+        f'<li class="nav-item"><a href="/m/{n}">Menu item {n}</a></li>' for n in range(6)
+    )
+    page = (
+        f"<html><body><main><h1>Hub</h1><ul>{_topics()}</ul></main>"
+        '<div class="offcanvas offcanvas-end" id="offcanvasNavbar">'
+        f'<div class="offcanvas-body"><ul class="navbar-nav">{menu}</ul></div></div>'
+        "</body></html>"
+    )
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert "Topic 0" in out
+    assert "Menu item" not in out
+
+
+@pytest.mark.parametrize("word", ["nav", "navbar", "navigation", "offcanvas"])
+def test_navigation_words_are_chrome(word: str) -> None:
+    page = (
+        f'<html><body><h1>Hub</h1><div class="site-{word}"><ul>{_topics()}</ul></div></body></html>'
+    )
+
+    assert listing_lists(page, BASE, "markdown", existing="") == ""
+
+
+@pytest.mark.parametrize(
+    ("page_url", "href"),
+    [
+        ("https://example.org/themen/", "/themen"),
+        ("https://example.org/themen", "/themen/"),
+        ("https://example.org/themen/#top", "https://example.org/themen#list"),
+    ],
+)
+def test_a_link_to_the_page_itself_is_left_out_whatever_its_trailing_slash(
+    page_url: str, href: str
+) -> None:
+    page = (
+        f'<html><body><h1>T</h1><ul><li><a href="{href}">Themen</a></li>'
+        '<li><a href="/themen/?page=2">Weiter</a></li>'
+        f"{_topics()}</ul></body></html>"
+    )
+
+    out = listing_lists(page, page_url, "markdown", existing="")
+
+    assert "[Themen]" not in out
+    assert "- [Weiter](https://example.org/themen/?page=2)" in out
+
+
+WIKI = "https://de.wikipedia.org/wiki/Licht_(Physik)"
+
+
+@pytest.mark.parametrize(
+    ("fmt", "existing", "listed"),
+    [
+        ("markdown", f"See [Licht (Physik)](<{WIKI}>) for more.", WIKI),
+        ("markdown", f"See [Licht (Physik)]({WIKI}) for more.", WIKI),
+        ("markdown", "See [Licht](https://de.wikipedia.org/wiki/Licht_%28Physik%29).", WIKI),
+        (
+            "markdown",
+            "See [Licht](<https://de.wikipedia.org/wiki/Licht (Physik)>).",
+            WIKI.replace("_", " "),
+        ),
+        (
+            "html",
+            f'<html><body><p>See <a href="{WIKI}">Licht (Physik)</a>.</p></body></html>',
+            WIKI,
+        ),
+        (
+            "html",
+            '<p><a href="https://de.wikipedia.org/wiki/Licht_%28Physik%29">Licht</a></p>',
+            WIKI,
+        ),
+        (
+            "html",
+            "<p><a href='https://de.wikipedia.org/wiki/Licht_(Physik'>Licht</a></p>",
+            "https://de.wikipedia.org/wiki/Licht_(Physik",
+        ),
+    ],
+)
+def test_a_url_with_parentheses_in_the_content_is_known(
+    fmt: OutputFormat, existing: str, listed: str
+) -> None:
+    items = f'{_topics()}<li><a href="{listed}">Wiki Licht</a></li>'
+    page = f"<html><body><h1>Hub</h1><ul>{items}</ul></body></html>"
+
+    out = listing_lists(page, BASE, fmt, existing=existing)
+
+    assert "Topic 0" in out
+    assert "Wiki Licht" not in out
+
+
+def test_a_tag_list_of_span_wrapped_links_is_listed() -> None:
+    spans = "".join(f'<span class="tag"><a href="/t/{n}">Tag {n}</a></span> ' for n in range(8))
+    page = f"<html><body><h1>Hub</h1><div class='tags'>{spans}</div></body></html>"
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert "- [Tag 0](https://example.org/t/0)" in out
+    assert "- [Tag 7](https://example.org/t/7)" in out
+
+
+def test_span_wrapped_links_inside_running_text_are_not_listed() -> None:
+    links = " und ".join(f'<span><a href="/s/{n}">Begriff {n}</a></span>' for n in range(6))
+    prose = f"<p>Die Optik erklaert viele Dinge, etwa {links}, und noch {'mehr ' * 30}.</p>"
+    page = f"<html><body><h1>Hub</h1>{prose}<ul>{_topics()}</ul></body></html>"
+
+    out = listing_lists(page, BASE, "markdown", existing="")
+
+    assert "Topic 0" in out
+    assert "Begriff" not in out
+
