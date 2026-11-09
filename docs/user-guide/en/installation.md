@@ -70,8 +70,10 @@ of `init`; the `--show-admin-key` command above prints it at any time. Your own 
 http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
 
 The file follows the newest `0.1.x` release on its own: its default image tag is `0.1`, and every
-`docker compose up` (a panel's redeploy too) pulls it again. `TEXT_EXTRACTION_VERSION` in `.env`
-or the shell pins one release, for example `0.1.10`; set it only when you want that. This file needs `0.1.8` or later: older images have no `init` service. The releases and their notes are on the
+`docker compose up` (a panel's redeploy too) pulls it again, so it needs ghcr.io; a container that
+Docker merely restarts keeps its image. `TEXT_EXTRACTION_VERSION` in `.env` or the shell pins one
+release, for example `0.1.10`; set it only when you want that. This file needs `0.1.8` or later:
+older images have no `init` service. The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).
 
 For HTTPS, the `api` service carries labels for a Traefik in front of it (Hostinger's VPS runs

@@ -209,7 +209,8 @@ legend {
   align-items: center;
   column-gap: 10px;
   row-gap: 2px;
-  min-height: 60px;
+  /* Room for a two-line intro beside the session line, so the login does not move the header. */
+  min-height: 64px;
   padding-block: 10px;
 }
 
@@ -231,7 +232,11 @@ legend {
   line-height: 1.3;
 }
 
+/* The intro gives way to the session line: it wraps inside its own column, so the session line
+   keeps the title's row down to tablet widths (below that both stack). */
 .masthead-intro {
+  flex: 1 1 16rem;
+  min-width: 0;
   margin: 0;
   font-size: 14px;
   color: var(--muted);
@@ -390,6 +395,8 @@ button.secondary:hover:not(:disabled) {
   gap: 0.25rem 0.75rem;
   align-items: center;
   justify-content: flex-end;
+  flex: none;
+  max-width: 100%;
   margin-left: auto;
   font-size: 14px;
   color: var(--muted);

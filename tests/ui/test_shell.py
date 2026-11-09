@@ -149,14 +149,14 @@ def test_login_page_under_api_key_mode(client: TestClient) -> None:
 def test_login_puts_the_session_line_into_the_masthead(client: TestClient) -> None:
     answer = login(client).text
 
-    session = re.findall(
-        r'<div id="session" class="who" hx-swap-oob="true">(.*?)</div>', answer, re.S
-    )
-    assert len(session) == 1
-    assert "alice" in session[0]
-    assert 'data-action="logout"' in session[0]
-    assert 'class="language-switch"' in session[0]
-    assert answer.count('data-action="logout"') == 1
+    tree = lxml.html.fragment_fromstring(answer, create_parent="div")
+    (session,) = tree.xpath('//div[@id="session"]')
+    assert session.get("class") == "who"
+    assert session.get("hx-swap-oob") == "true"
+    assert "alice" in session.text_content()
+    assert session.xpath('.//button[@data-action="logout"]')
+    assert session.xpath('.//*[contains(concat(" ", @class, " "), " language-switch ")]')
+    assert len(tree.xpath('//*[@data-action="logout"]')) == 1
 
 
 def test_login_ok_renders_app_with_principal(client: TestClient) -> None:

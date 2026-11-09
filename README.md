@@ -126,10 +126,13 @@ LLM, speech recognition), Kubernetes and the key settings.
 ## Updating
 
 Redeploy (on Hostinger: redeploy from the repository URL) or run `docker compose up -d --wait`:
-the root `docker-compose.yml` pulls the newest `0.1.x` release on every start (tag `0.1`,
-`pull_policy: always`). Set `TEXT_EXTRACTION_VERSION` in `.env` only to pin one release, for
-example `0.1.10`; remove an old pinned value to follow the newest again. Your `.env` is kept, and a value in it wins over a changed default: compare it with `.env.example` after an
-update. [CHANGELOG.md](CHANGELOG.md) lists every change and, under "Upgrade", what to do.
+the root `docker-compose.yml` pulls the newest `0.1.x` release on every `docker compose up` and
+every redeploy (tag `0.1`, `pull_policy: always`); a container the Docker daemon merely restarts
+keeps its image, and nothing updates running containers by itself. Each `up` therefore needs
+ghcr.io. Set `TEXT_EXTRACTION_VERSION` in `.env` only to pin one release, for example `0.1.10`;
+remove an old pinned value to follow the newest again. Your `.env` is kept, and a value in it wins
+over a changed default: compare it with `.env.example` after an update.
+[CHANGELOG.md](CHANGELOG.md) lists every change and, under "Upgrade", what to do.
 
 ## Use cases
 

@@ -138,10 +138,13 @@ personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die wichtigsten Ei
 
 Stellen Sie neu bereit (bei Hostinger: über die URL des Repositorys neu bereitstellen) oder
 führen Sie `docker compose up -d --wait` aus: Die `docker-compose.yml` im Hauptordner lädt bei
-jedem Start die neueste Version `0.1.x` (Tag `0.1`, `pull_policy: always`). Setzen Sie
+jedem `docker compose up` und jedem Neu-Bereitstellen die neueste Version `0.1.x` (Tag `0.1`,
+`pull_policy: always`); ein Container, den Docker nur neu startet, behält sein Image, und
+laufende Container aktualisiert nichts von selbst. Jedes `up` braucht deshalb ghcr.io. Setzen Sie
 `TEXT_EXTRACTION_VERSION` in `.env` nur, um eine Version festzuhalten, etwa `0.1.10`; entfernen
-Sie einen alten festen Wert, damit wieder die neueste geladen wird. Ihre `.env` bleibt erhalten, und ein Wert darin geht einem geänderten
-Standard vor: Vergleichen Sie sie nach einem Update mit `.env.example`.
+Sie einen alten festen Wert, damit wieder die neueste geladen wird. Ihre `.env` bleibt erhalten,
+und ein Wert darin geht einem geänderten Standard vor: Vergleichen Sie sie nach einem Update mit
+`.env.example`.
 [CHANGELOG.md](CHANGELOG.md) (Englisch) nennt jede Änderung und unter „Upgrade“, was zu tun ist.
 
 ## Anwendungsfälle
