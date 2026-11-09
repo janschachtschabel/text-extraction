@@ -1272,8 +1272,10 @@ CLOUDFLARE = {"cf-mitigated": "challenge", "server": "cloudflare"}
         (CHALLENGE_PAGE, {}, False),
         ("Forbidden", CLOUDFLARE, True),  # the header alone is enough, whatever the body
         ("", {"Cf-Mitigated": "challenge"}, True),
+        # A site that only uses Cloudflare as its CDN may run another challenge (Anubis).
+        (CHALLENGE_PAGE, {"server": "cloudflare"}, False),
     ],
-    ids=["body", "header", "header-only"],
+    ids=["body", "header", "header-only", "cdn-only"],
 )
 def test_fast_challenge_refusal_is_bot_protection(
     status: int, body: str, headers: dict[str, str], vendor: bool
@@ -1336,6 +1338,27 @@ def test_rendered_challenge_refusal_is_bot_protection() -> None:
     assert code_of(plain.run_once(mode="browser")) == ErrorCode.TARGET_HTTP_ERROR
 
 
+@pytest.mark.parametrize(
+    ("body", "headers"),
+    [("", {"cf-mitigated": "challenge"}), (CHALLENGE_PAGE, {})],
+    ids=["header-only", "body"],
+)
+def test_an_assessed_challenge_refusal_says_so_in_both_facts(
+    body: str, headers: dict[str, str]
+) -> None:
+    """In unblock ``auto`` the refusal is assessed: ``challenge_status`` agrees with the code."""
+    harness = RenderHarness(
+        {PAGE: fetched(body=body, status=403, headers=headers)}, browser_unblock_enabled=True
+    )
+
+    envelope = harness.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION
+    quality = data_of(envelope).quality
+    assert quality is not None
+    assert quality.challenge_status is True
+
+
 def test_unblock_auto_escalates_a_challenge_refusal() -> None:
     answers: dict[str, Answer] = {
         PAGE: fetched(body=CHALLENGE_PAGE, status=403, headers=CLOUDFLARE)
@@ -1359,7 +1382,8 @@ def test_unblock_auto_escalates_a_challenge_refusal() -> None:
 
 def test_refusal_body_over_the_convert_limit_is_assessed_as_an_empty_page() -> None:
     """A refused HTML body over ``CONVERT_MAX_BYTES`` is not decoded: it is assessed as an empty
-    page, so even a challenge body is no challenge then, and the refusal still escalates."""
+    page (no ``bot_challenge``); the head of its body still makes it a challenge refusal, and the
+    refusal still escalates."""
     big_challenge = CHALLENGE_PAGE.replace("</body>", "<!--" + "x" * 2_000 + "--></body>")
     assert len(big_challenge.encode()) > 1_024
     answers: dict[str, Answer] = {PAGE: fetched(body=big_challenge, status=403)}
@@ -1375,8 +1399,9 @@ def test_refusal_body_over_the_convert_limit_is_assessed_as_an_empty_page() -> N
     assert quality is not None
     assert (quality.visible_chars, quality.word_count) == (0, 0)
     assert quality.bot_challenge is False
-    assert quality.challenge_status is False
-    # The error code reads only the body's head, whatever the convert limit (package 20).
+    # The error code's rule reads only the body's head, whatever the convert limit, and
+    # ``challenge_status`` agrees with it (package 20).
+    assert quality.challenge_status is True
     assert code_of(envelope) == ErrorCode.BOT_PROTECTION
     assert needs_browser(envelope, unblock=True)
 

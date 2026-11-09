@@ -79,8 +79,8 @@ Dienstes.
 ### Websites hinter einem Bot-Schutz
 
 Viele Websites liegen hinter einem Bot-Schutz wie Cloudflare. Er kann den Dienst mit einer
-Bot-Prüfung ablehnen, obwohl dieselbe Seite in einem normalen Browser öffnet. Der Dienst antwortet
-dann `failed` mit `bot_protection`, `upstream_status` 403, 429 oder 503 und einer
+Bot-Prüfung ablehnen, obwohl sich dieselbe Seite in einem normalen Browser öffnen lässt. Der
+Dienst antwortet dann `failed` mit `bot_protection`, `upstream_status` 403, 429 oder 503 und einer
 `error.message` wie „The target answered HTTP 403 with a bot challenge (Cloudflare).“.
 
 - Der normale Browser sagt ehrlich, dass er ein automatischer Browser ohne Fenster ist
@@ -88,8 +88,8 @@ dann `failed` mit `bot_protection`, `upstream_status` 403, 429 oder 503 und eine
   Browser ablehnt, lehnt ihn aus jedem Netz ab, `mode: browser` hilft also nicht.
 - Eine IP-Adresse aus einem Rechenzentrum (ein VPS, ein Cloud-Server) wird öfter abgelehnt als ein
   Heimanschluss, auch im schnellen Modus.
-- Wege daran vorbei: Der Betreiber der Website schaltet den Dienst frei (seinen User-Agent
-  `text-extraction` oder die ausgehende IP-Adresse des Servers), oder, für eine Website, die die
+- Wege daran vorbei: Der Betreiber der Website schaltet den Dienst frei (den User-Agent
+  `text-extraction` des Dienstes oder die ausgehende IP-Adresse des Servers), oder, für eine Website, die die
   Extraktion vertraglich erlaubt hat, die maximale Extraktion mit `BROWSER_UNBLOCK_ENABLED=true`
   (siehe oben).
 
@@ -182,7 +182,10 @@ wird genutzt. Hat der Betreiber zusätzlich den Entsperrmodus eingeschaltet (`BR
 `compliance` zusätzlich in „Optionen (JSON)“ (unter „Erweitert“), lehnt das Formular es ab:
 `compliance` ist dann doppelt angegeben. Steht „Browser-Fallback“ auf „nie“, bleibt die maximale
 Extraktion bei HTTP. Das Ergebnis zeigt den Wert der Website-Regeln (`compliance`) und, wenn
-`data.unblocked` true ist, das Kennzeichen „maximale Extraktion (entsperrt)“.
+`data.unblocked` true ist, das Kennzeichen „maximale Extraktion (entsperrt)“. Ein Fehler
+`bot_protection` kommt mit einem Hinweis auf die Wege am Schutz vorbei (nicht nach einem
+entsperrten Abruf), und ein Admin, dessen Server den Browser ohne Entsperrmodus betreibt, liest
+bei „Prüfung aus“, dass `BROWSER_UNBLOCK_ENABLED` aus ist.
 
 Im Website-Baum sind URLs markiert, die die Regeln der Website sperren; siehe
 [Teil einer Website](part-of-a-site.md#in-der-spielwiese).

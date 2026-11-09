@@ -435,7 +435,10 @@ def test_a_bot_protection_result_says_what_helps() -> None:
             expected = [
                 " ".join(
                     translate(
-                        language, "result.bot_protection_hint", setting="BROWSER_UNBLOCK_ENABLED"
+                        language,
+                        "result.bot_protection_hint",
+                        choice=translate(language, "access.ignore"),
+                        setting="BROWSER_UNBLOCK_ENABLED",
                     ).split()
                 )
             ]

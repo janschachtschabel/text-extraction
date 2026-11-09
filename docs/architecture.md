@@ -296,7 +296,8 @@ the 64 KiB of `structured` and of `chunking` and the small fields, R18) and `DOC
 `POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
 also on failure, as far as the request got. `partial` keeps the content and names
 `content_too_short`; a failed quality verdict (`bot_protection`, `likely_error_page`,
-`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
+`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none
+(nor has a `bot_protection` refusal, B17).
 `data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
 result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
 Only `success` and `partial` results are cached and fingerprinted (per URL and output format; a
@@ -837,9 +838,10 @@ while `BROWSER_ENABLED` is false, are unchanged.
     `auto`. For (a) the pipeline sets `quality` on every refused answer in unblock `auto` mode
     with `BROWSER_ENABLED` (`Pipeline._assesses_refusal`, `_refusal_quality`): it assesses an HTML
     body up to `CONVERT_MAX_BYTES`, any other body as an empty page; `challenge_status` is true
-    only for a challenge body. `better()` keeps the better of the fast and the rendered result.
-    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` in the respect
-    mode (the leifiphysik case of package 10, since package 20 `bot_protection`, B17).
+    only for a challenge (its body, or the `cf-mitigated` header, B17). `better()` keeps the better of the fast and the rendered result.
+    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` and a challenge
+    403 (the leifiphysik case of package 10) is `bot_protection` since package 20 (B17); in the
+    respect mode neither renders.
   - The host's pause (P12-S2): a fast 429 or 503 still records its pause (`Retry-After`, else
     `OUTBOUND_BACKOFF_SECONDS`, at most `OUTBOUND_MAX_BACKOFF_SECONDS`). The render takes its turn
     after the pause: the browser worker gives the item back on `CircuitOpen`, as for any paused
@@ -850,10 +852,11 @@ while `BROWSER_ENABLED` is false, are unchanged.
   bot challenge fails `bot_protection` instead of `target_http_error`, in fast and in browser mode
   (`pipeline._refused`, `quality.is_challenge_answer`). It is a challenge when the answer has
   Cloudflare's `cf-mitigated: challenge` header, or when the first 64 KiB of its body hold
-  challenge markup (`cf-chl`, Anubis), a phrase only a challenge says, or a title that starts with
-  "Just a moment". `upstream_status` keeps the site's status and `retryable` the rule of
-  `target_http_error` (429, 503 and 5xx); the message names Cloudflare when the header or
-  `server: cloudflare` says so. Escalation counts it as a refusal (`escalation._is_refusal`), so
+  challenge markup (`cf-chl`, Anubis), a phrase only a challenge says, or Cloudflare's exact
+  title "Just a moment...". `upstream_status` keeps the site's status and `retryable` the rule of
+  `target_http_error` (429, 503 and 5xx); the message names Cloudflare when the
+  `cf-mitigated` header says so. In unblock `auto` the assessed refusal's
+  `quality.challenge_status` is true for such an answer too, so both facts agree. Escalation counts it as a refusal (`escalation._is_refusal`), so
   unblock `auto` still tries it in the browser and the respect mode never does. Found on
   leifiphysik.de (2026-11-09): Cloudflare answers the standard browser's `HeadlessChrome` user
   agent and curl with a managed challenge, from a home connection too, and let the fast mode's

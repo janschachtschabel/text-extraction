@@ -82,8 +82,8 @@ answered HTTP 403 with a bot challenge (Cloudflare).".
   headless browsers refuses it from any network, so `mode: browser` does not help.
 - A data-centre IP address (a VPS, a cloud server) gets refused more often than a home
   connection, even in the fast mode.
-- Ways past it: the site's operator allows the service (its user agent `text-extraction` or the
-  server's outgoing IP address), or, for a site that allowed extraction by contract, maximum
+- Ways past it: the site's operator allows the service (the service's user agent `text-extraction`
+  or the server's outgoing IP address), or, for a site that allowed extraction by contract, maximum
   extraction with `BROWSER_UNBLOCK_ENABLED=true` (see above).
 
 ## The pause after a 429 or 503
@@ -174,7 +174,9 @@ Where the operator also switched on unblock mode (`BROWSER_ENABLED` and
 `compliance` in "Options (JSON)" (under "Advanced"), the form refuses it: compliance is given
 twice. With "Browser fallback" set to "never", maximum extraction stays with HTTP. The result
 shows the compliance mode, and the badge "maximum extraction (unblocked)" when `data.unblocked` is
-true.
+true. A `bot_protection` error comes with a note on the ways past the protection (left out after
+an unblocked render), and an admin whose server runs the browser without unblock mode reads at
+"Checks off" that `BROWSER_UNBLOCK_ENABLED` is off.
 
 In the site tree, URLs that the site's rules block are marked; see
 [Part of a site](part-of-a-site.md#in-the-playground).

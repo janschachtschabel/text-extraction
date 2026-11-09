@@ -20,7 +20,7 @@ level lower. -#}
   {% if error %}
   <div class="error" role="alert"{% if error_for %} id="{{ error_for }}-error" data-error-for="{{ error_for }}"{% endif %}>
     <p><span class="error-code">{{ code(error["code"]) }}</span> <span class="error-text">{{ t(error_text) }}</span>{% if error["retryable"] %} <span class="retryable">{{ t("result.retryable") }}</span>{% endif %}</p>
-    {% if error["code"] == "bot_protection" and not unblocked %}<p class="error-hint">{{ t("result.bot_protection_hint", setting=code("BROWSER_UNBLOCK_ENABLED")) }}</p>{% endif %}
+    {% if error["code"] == "bot_protection" and not unblocked %}<p class="error-hint">{{ t("result.bot_protection_hint", choice=t("access.ignore"), setting=code("BROWSER_UNBLOCK_ENABLED")) }}</p>{% endif %}
     {% if retry_after %}<p class="retry-after">{{ t("result.retry_after", seconds=retry_after) }}</p>{% endif %}
     {% with detail=error["message"] if error["message"] is string else none, detail_lines=details %}{% include "api_detail.html" %}{% endwith %}
   </div>

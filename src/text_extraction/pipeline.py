@@ -564,12 +564,9 @@ def _refused(
     Both keep the site's status in ``upstream_status`` and the same ``retryable`` rule."""
     retryable = status in _RETRYABLE_STATUSES or status >= 500
     if status in REFUSAL_STATUSES and is_challenge_answer(headers, body):
-        names = {name.lower(): value.strip().lower() for name, value in headers.items()}
-        vendor = (
-            " (Cloudflare)"
-            if "cf-mitigated" in names or names.get("server") == "cloudflare"
-            else ""
-        )
+        # Only Cloudflare's own mitigation header names it: a site that merely uses Cloudflare
+        # as its CDN (``server: cloudflare``) may run another challenge, such as Anubis.
+        vendor = " (Cloudflare)" if any(name.lower() == "cf-mitigated" for name in headers) else ""
         return run.failed(
             ErrorCode.BOT_PROTECTION,
             f"The target answered HTTP {status} with a bot challenge{vendor}.",
@@ -1794,7 +1791,10 @@ class Pipeline:
             quality = await self._pool.run(assess, text, "")
         finally:
             run.convert_ms += _ms(started)
-        return quality.model_copy(update={"challenge_status": quality.bot_challenge})
+        # The error code's own rule counts too (package 20), so ``challenge_status`` and a
+        # ``bot_protection`` refusal never disagree.
+        challenge = quality.bot_challenge or is_challenge_answer(fetched.headers, fetched.content)
+        return quality.model_copy(update={"challenge_status": challenge})
 
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the

@@ -21,9 +21,10 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   and `error.message` names Cloudflare when the answer says so. Unblock mode still tries such a
   refusal in the browser; the respect mode still does not. Found on leifiphysik.de, whose
   Cloudflare protection answers the standard browser's `HeadlessChrome` user agent with a
-  challenge. The browser's user agent is unchanged. Counts by error code (the `outcome` label of
-  the metrics, the live harness's buckets) move such answers from `target_http_error` to
-  `bot_protection`; the success rate is unaffected. Other vendors' challenges (DataDome,
+  challenge. The browser's user agent is unchanged. Counts by error code move: the metrics'
+  `outcome` label moves such answers from `target_http_error` to `bot_protection`, the live
+  harness from the bucket `target_http_error` to `likely_error_page`; the success rate is
+  unaffected. Other vendors' challenges (DataDome,
   PerimeterX, Akamai) are not recognised yet.
 
 ### Added
@@ -597,7 +598,9 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.4...v0.1.5
