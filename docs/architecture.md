@@ -764,8 +764,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   CLAUDE.md rule 6).
 - **B9, switches.** `BROWSER_ENABLED` (default false) turns browser mode on; compose and Helm set
   it from the browser worker toggle. Off, the browser options answer 400 and `auto` never
-  escalates. `BROWSER_UNBLOCK_ENABLED` (default false): off, `compliance: ignore` renders in the
-  standard browser.
+  escalates. `BROWSER_UNBLOCK_ENABLED` (default false; docker compose and `.env.example` set it to true
+  since package 20, Helm keeps it off): off, `compliance: ignore` renders in the standard
+  browser.
 - **B10, browser results.** `mode_used: "browser"` and `timings.render_ms`. Cached while fresh
   but never revalidated (no validators are stored; `raw_sha256` is the hash of the rendered HTML).
   `unblocked` is true when unblock mode rendered the result.

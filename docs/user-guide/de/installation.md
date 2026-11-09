@@ -172,7 +172,9 @@ Die Spielwiese zeigt eine solche Auswahl deaktiviert, mit einem Hinweis. Admin-S
 jede Funktion nutzen, die der Dienst hat.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
-`BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).
+`BROWSER_UNBLOCK_ENABLED=true`. Das setzen docker compose und `.env.example` seit 0.1.9 (ein Admin
+muss weiterhin `compliance: ignore` wählen); `false` in `.env` schaltet es aus. Siehe
+[Website-Regeln](site-rules.md#maximale-extraktion).
 
 ## Kubernetes mit Helm
 

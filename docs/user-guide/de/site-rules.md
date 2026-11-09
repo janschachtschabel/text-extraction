@@ -44,7 +44,8 @@ Die maximale Extraktion braucht drei Dinge:
   `forbidden`);
 - `"compliance": "ignore"` in der Anfrage (oder keines, wo der Betreiber
   `COMPLIANCE_DEFAULT=ignore` gesetzt hat);
-- `BROWSER_UNBLOCK_ENABLED=true` (mit `BROWSER_ENABLED=true`), vom Betreiber eingeschaltet.
+- `BROWSER_UNBLOCK_ENABLED=true` (mit `BROWSER_ENABLED=true`), die Zustimmung des Betreibers: in
+  docker compose seit 0.1.9 standardmäßig an, in Helm und im Code standardmäßig aus.
 
 Mit `compliance: ignore`, aber ausgeschaltetem Entsperrmodus entfallen die Prüfungen, und der
 normale Browser wird genutzt: Das ist keine maximale Extraktion. Unter `AUTH_MODE=none` ist jeder

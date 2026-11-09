@@ -27,6 +27,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   unaffected. Other vendors' challenges (DataDome,
   PerimeterX, Akamai) are not recognised yet.
 
+- docker compose and `.env.example` switch unblock mode on (`BROWSER_UNBLOCK_ENABLED=true`, Jan's
+  decision of 2026-11-09). It still applies only to an admin's requests with
+  `compliance: ignore`, for sites that allowed extraction by contract; `false` in `.env` switches
+  it off. The code's default and Helm's `workers.browser.unblock` stay off.
+
 ### Added
 
 - The playground explains a `bot_protection` error: the site's operator can allow the service, or

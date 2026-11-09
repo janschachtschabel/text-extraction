@@ -29,6 +29,9 @@ INTENTIONAL_DIFFERENCES: dict[str, str] = {
     "ASR_ENABLED": ".env.example: compose runs the ASR worker",
     "PII_ENABLED": ".env.example: compose runs the NLP worker",
     "LLM_ENABLED": ".env.example: compose runs the LLM worker",
+    # Unblock mode is on in docker compose (Jan, 2026-11-09, package 20); it still applies only to
+    # an admin's `compliance: ignore`. Helm keeps `workers.browser.unblock` off.
+    "BROWSER_UNBLOCK_ENABLED": ".env.example: compose allows unblock mode for admins",
     # Deployment-specific values with no useful code default.
     "API_KEYS": "secret: a placeholder key list in .env.example",
     "ASR_EXTERNAL_BASE_URL": "operator's endpoint, unset in the code",

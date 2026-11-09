@@ -41,7 +41,8 @@ Maximum extraction needs three things:
 - an admin key (a user key that sends `compliance: ignore` gets 403 `forbidden`);
 - `"compliance": "ignore"` in the request (or none, where the operator set
   `COMPLIANCE_DEFAULT=ignore`);
-- `BROWSER_UNBLOCK_ENABLED=true` (with `BROWSER_ENABLED=true`), switched on by the operator.
+- `BROWSER_UNBLOCK_ENABLED=true` (with `BROWSER_ENABLED=true`), the operator's consent: on by
+  default in docker compose since 0.1.9, off by default in Helm and in the code.
 
 With `compliance: ignore` but unblock mode off, the checks are skipped and the normal browser is
 used: that is not maximum extraction. Under `AUTH_MODE=none` every caller is an admin. Use

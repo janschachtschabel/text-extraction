@@ -328,7 +328,7 @@ jobs:
           API_KEYS: '[{"name":"ci","role":"admin","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]'
 
       # The browser worker service: its image target, hardening and grace period, and browser mode
-      # on for every app service, with unblock mode off unless the environment switches it on.
+      # on for every app service, with unblock mode on unless the environment switches it off.
       - name: docker compose config (browser worker)
         env:
           VALKEY_PASSWORD: ci-dummy-password
@@ -339,10 +339,10 @@ jobs:
               and .shm_size == "1073741824" and .stop_grace_period == "1m30s"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
           jq -e '[.services.api, .services.worker, .services["browser-worker"]]
-            | all(.environment.BROWSER_ENABLED == "true" and .environment.BROWSER_UNBLOCK_ENABLED == "false")' compose.json
+            | all(.environment.BROWSER_ENABLED == "true" and .environment.BROWSER_UNBLOCK_ENABLED == "true")' compose.json
           jq -e '.services.api.build.target == null' compose.json
-          BROWSER_UNBLOCK_ENABLED=true docker compose config --format json \
-            | jq -e '[.services.api, .services.worker, .services["browser-worker"]] | all(.environment.BROWSER_UNBLOCK_ENABLED == "true")'
+          BROWSER_UNBLOCK_ENABLED=false docker compose config --format json \
+            | jq -e '[.services.api, .services.worker, .services["browser-worker"]] | all(.environment.BROWSER_UNBLOCK_ENABLED == "false")'
           rm compose.json
 
       # The Docling services (no profile, on by default): the one-shot models service writes the

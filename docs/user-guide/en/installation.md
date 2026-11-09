@@ -163,7 +163,9 @@ a scan gets no OCR (`ocr_unavailable`), and the strategy `auto` asks no LLM for 
 keys may always use every feature the service has.
 
 Maximum extraction (for sites that allowed extraction by contract) needs
-`BROWSER_UNBLOCK_ENABLED=true` in `.env`; see [Site rules](site-rules.md#maximum-extraction).
+`BROWSER_UNBLOCK_ENABLED=true`, which docker compose and `.env.example` set since 0.1.9 (an
+admin still has to choose `compliance: ignore`); `false` in `.env` switches it off. See
+[Site rules](site-rules.md#maximum-extraction).
 
 ## Kubernetes with Helm
 
