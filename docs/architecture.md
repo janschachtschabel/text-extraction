@@ -3070,7 +3070,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   mode, metadata, "Metadata, structured" (the `metadata` strategy with `UI_METADATA_SCHEMA`, a
   schema of schema.org and LRMI names) and "Describe images". A result shows its content as source
   and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
-  their alt text), a download, its metadata, structured values, images with alt texts and
+  their alt text; since package 21 tables, strikethrough and `$$LaTeX$$` as MathML from
+  latex2mathml on the server, without link, source or handler attributes, or as its escaped
+  source in `<code>` when it does not convert), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
   catalogues). The order and the look of this view (source first, then rendered) are superseded

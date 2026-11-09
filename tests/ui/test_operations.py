@@ -573,6 +573,73 @@ def test_render_markdown_renders_tables() -> None:
     assert "<a" not in html
 
 
+def test_double_dollar_latex_becomes_mathml() -> None:
+    html = str(render_markdown("Es gilt $$\\frac{a}{b}$$ hier."))
+
+    assert "<math" in html
+    assert "<mfrac>" in html
+    assert "$$" not in html
+    assert "\\frac" not in html
+    assert 'display="inline"' in html
+
+
+def test_an_equation_alone_in_its_paragraph_is_a_block() -> None:
+    html = str(render_markdown("$$x^2$$"))
+
+    assert 'display="block"' in html
+    assert "<msup>" in html
+
+
+def test_latex_inside_math_is_not_markdown() -> None:
+    html = str(render_markdown("$$a_1 * b_2 * c$$"))
+
+    assert "<math" in html
+    assert "<em>" not in html
+
+
+def test_broken_latex_stays_readable() -> None:
+    html = str(render_markdown("Vorher $$x^$$ <b>nachher</b>"))
+
+    assert "<math" not in html
+    assert "<code>x^</code>" in html
+    assert "&lt;b&gt;nachher&lt;/b&gt;" in html
+
+
+def test_broken_latex_is_escaped() -> None:
+    html = str(render_markdown("$$<script>alert(1)</script> {$$"))
+
+    assert "<math" not in html
+    assert tree(html).xpath("//script") == []
+    assert "<code>&lt;script&gt;alert(1)&lt;/script&gt; {</code>" in html
+
+
+def test_text_inside_math_is_escaped() -> None:
+    html = str(render_markdown("$$\\text{<b>fett</b> & <img src=x onerror=alert(1)>}$$"))
+
+    root = tree(html)
+    assert root.xpath("//math")
+    assert root.xpath("//b | //img") == []
+    assert "&lt;b&gt;fett&lt;/b&gt;\xa0&amp;\xa0&lt;img" in html  # \text keeps its spaces
+
+
+def test_mathml_carries_no_links_or_handlers() -> None:
+    html = str(render_markdown("$$\\href{javascript:alert(1)}{x}$$"))
+
+    root = tree(html)
+    attributes = [name.lower() for element in root.iter() for name in element.attrib]
+    assert "href" not in html
+    assert not [name for name in attributes if name.startswith("on") or "href" in name]
+    assert "javascript" not in html
+
+
+def test_single_dollars_stay_text() -> None:
+    assert str(render_markdown("5 $ und 10 $")) == "<p>5 $ und 10 $</p>\n"
+
+
+def test_strikethrough_renders() -> None:
+    assert "<s>alt</s>" in str(render_markdown("~~alt~~ neu"))
+
+
 def test_markdown_shown_rendered_and_as_source(client: TestClient) -> None:
     html = run(client, "extract", **fields()).text
     root = tree(html)
