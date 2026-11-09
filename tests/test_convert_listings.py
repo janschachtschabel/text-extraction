@@ -70,6 +70,18 @@ def test_known_urls_and_headings_are_not_repeated() -> None:
     assert "Schatten" in out
 
 
+def test_texts_the_content_holds_as_lines_are_not_repeated() -> None:
+    existing = "Optik\n\nLichtreflexion\n- Sehvorgang\n  Spiegel"
+
+    out = listing_lists(HUB, BASE, "markdown", existing=existing)
+
+    assert "Sehvorgang" not in out
+    assert "Spiegel" not in out
+    assert "Lichtreflexion" not in out
+    assert "[Schatten](" in out
+    assert "### Lichtausbreitung" in out
+
+
 def test_too_few_links_give_nothing() -> None:
     page = "<h1>T</h1>" + "".join(f'<p><a href="/a{i}">Link {i}</a></p>' for i in range(4))
 

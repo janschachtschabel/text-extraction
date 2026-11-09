@@ -719,11 +719,39 @@ def test_a_listing_page_keeps_its_link_lists() -> None:
     assert "## Biology" in data.content
     assert "## Physics" in data.content
     assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
-    assert "- [Physics topic 12](https://example.org/physics/12.html)" in data.content
+    assert "- [Physics topic 20](https://example.org/physics/20.html)" in data.content
     assert data.quality is not None
     before = convert_html(HUB_PAGE, PAGE, "markdown").content
+    assert "Biology topic" not in before  # the converter drops the lists
+    for topic in ("[Biology topic 1]", "[Physics topic 20]"):
+        assert data.content.count(topic) == 1
+    assert data.content.count("## Biology") == 1
     assert data.quality.word_count == assess(HUB_PAGE, data.content).word_count
     assert data.quality.word_count > assess(HUB_PAGE, before).word_count
+
+
+def test_a_listing_lists_failure_does_not_fail_the_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lists are an extra: a bug in them keeps the content as it was and logs
+    ``listing_lists_failed`` with the host and the error type only."""
+
+    def broken(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("lists broke on secret-token")
+
+    monkeypatch.setattr("text_extraction.pipeline.listing_lists", broken)
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    with capture_logs() as logs:
+        envelope = harness.run_once(format="markdown")
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.content == convert_html(HUB_PAGE, PAGE, "markdown").content
+    (line,) = [entry for entry in logs if entry["event"] == "listing_lists_failed"]
+    assert line["host"] == "example.org"
+    assert line["error_type"] == "RuntimeError"
+    assert "secret-token" not in repr(line)
 
 
 def test_a_content_page_with_related_links_is_unchanged() -> None:

@@ -37,7 +37,7 @@ _CHROME_WORDS: Final = frozenset(
     }
 )
 _TOKEN_SPLIT = re.compile(r"[\s_-]+")
-_MARKDOWN_HEADING = re.compile(r"^#{1,6} +(.*?)\s*$", re.MULTILINE)
+_LINE_MARKERS = re.compile(r"^[#\-*+\s]+")
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,13 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
+def _known_lines(existing: str) -> frozenset[str]:
+    """The lines of ``existing`` without heading and list markers, whitespace collapsed."""
+    return frozenset(
+        line for raw in existing.splitlines() if (line := _norm(_LINE_MARKERS.sub("", raw)))
+    )
+
+
 def _is_chrome(tag: Tag) -> bool:
     """The element or an ancestor is a landmark outside the content or named like furniture."""
     for node in (tag, *tag.parents):
@@ -97,8 +104,9 @@ def _link_text(link: Tag) -> str | None:
     return text
 
 
-def _events(html: str, url: str, existing: str) -> list[_Event]:
-    """Headings and links in document order."""
+def _events(html: str, url: str, existing: str, known: frozenset[str]) -> list[_Event]:
+    """Headings and links in document order, without a link whose URL is in ``existing`` or
+    whose text is in ``known``."""
     soup = prepare_html(html)
     strip_non_content(soup)
     first_h1 = soup.find("h1")
@@ -124,7 +132,7 @@ def _events(html: str, url: str, existing: str) -> list[_Event]:
             if href in seen or href in existing:
                 continue
             label = _link_text(element)
-            if label is not None and not _is_chrome(element):
+            if label is not None and label not in known and not _is_chrome(element):
                 seen.add(href)
                 events.append(_Event(0, label, href))
     return events
@@ -145,10 +153,10 @@ def listing_lists(html: str, url: str, fmt: OutputFormat, *, existing: str) -> s
     """The standalone-link lists of the page as headed sections in ``fmt``; ``""`` when the page
     has fewer than ``LISTING_MIN_LINKS`` of them. Links whose URL occurs in ``existing`` and
     headings that are heading lines of ``existing`` are not repeated."""
-    events = _events(html, url, existing)
+    known = _known_lines(existing)
+    events = _events(html, url, existing, known)
     if sum(1 for event in events if event.url is not None) < LISTING_MIN_LINKS:
         return ""
-    known = {_norm(match.group(1)) for match in _MARKDOWN_HEADING.finditer(existing)}
     drafts: list[_Draft] = []
     for index, event in enumerate(events):
         if event.url is not None:

@@ -231,7 +231,7 @@ def test_rendered_listing_keeps_its_link_lists() -> None:
     assert data.page_type.type == "listing"
     assert data.content is not None
     assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
-    assert "- [Physics topic 12](https://example.org/physics/12.html)" in data.content
+    assert "- [Physics topic 20](https://example.org/physics/20.html)" in data.content
 
 
 def test_robots_block_of_start_url_never_renders() -> None:
