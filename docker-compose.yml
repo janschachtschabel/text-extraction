@@ -10,7 +10,7 @@
 # `docker compose run --rm -T init text-extraction-init --show-admin-key` prints it. Own keys go
 # into API_KEYS in .env as before (merged with the generated one).
 #
-# TEXT_EXTRACTION_VERSION in .env or the shell picks the release (default 0.1.9; `0.1` follows the
+# TEXT_EXTRACTION_VERSION in .env or the shell picks the release (default 0.1.10; `0.1` follows the
 # newest 0.1.x after `docker compose pull`: pull_policy missing does not pull an image already
 # present).
 #
@@ -40,7 +40,7 @@ services:
   # Creates the secrets on the first start (Valkey password, admin API key, the files derived from
   # them) and keeps them on every later start; refuses a DOMAIN that is not a bare host name.
   init:
-    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-init"]
     restart: "no"
@@ -86,7 +86,7 @@ services:
   # The public API, /mcp and the playground /ui on port 8080; the internal port 9090 is not
   # published.
   api:
-    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     restart: unless-stopped
     networks:
@@ -144,7 +144,7 @@ services:
 
   # Extract worker: the items of batches. Only the internal port 9090.
   worker:
-    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-worker"]
     restart: unless-stopped
@@ -190,7 +190,7 @@ services:
   # Browser worker: Chromium, and Chrome under Xvfb in unblock mode. Chrome needs a large /dev/shm
   # and a writable /tmp.
   browser-worker:
-    image: ghcr.io/janschachtschabel/text-extraction-browser:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-browser:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-browser-worker"]
     restart: unless-stopped
@@ -236,7 +236,7 @@ services:
 
   # Downloads the Docling and Tesseract models into the volume once (SHA-256 checked), then exits.
   docling-models:
-    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-docling-worker", "--download-models"]
     restart: "no"
@@ -271,7 +271,7 @@ services:
 
   # Docling worker: OCR of scans, images and OpenDocument files. The models volume is read-only.
   docling-worker:
-    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-docling-worker"]
     restart: unless-stopped
@@ -319,7 +319,7 @@ services:
 
   # Downloads the Whisper model ASR_MODEL into the volume once (nothing with ASR_BACKEND=openai).
   asr-models:
-    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-asr-worker", "--download-models"]
     restart: "no"
@@ -357,7 +357,7 @@ services:
   # ASR worker: transcription with faster-whisper on the CPU (or the external endpoint). Downloaded
   # media go to the volume asr-scratch, not to the tmpfs /tmp, which is memory.
   asr-worker:
-    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-asr-worker"]
     restart: unless-stopped
@@ -408,7 +408,7 @@ services:
 
   # Downloads the German and English spaCy models of PII_MODEL_SIZE into the volume once.
   nlp-models:
-    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-nlp-worker", "--download-models"]
     restart: "no"
@@ -445,7 +445,7 @@ services:
 
   # NLP worker: PII handling with Presidio and spaCy. The models volume is read-only.
   nlp-worker:
-    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-nlp-worker"]
     restart: unless-stopped
@@ -495,7 +495,7 @@ services:
   # LLM worker: structured output with an LLM, semantic chunking and image descriptions against
   # LLM_BASE_URL (LLM_MODEL, and LLM_API_KEY in .env or the caller's X-LLM-Api-Key).
   llm-worker:
-    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.9}
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.10}
     pull_policy: missing
     command: ["text-extraction-llm-worker"]
     restart: unless-stopped

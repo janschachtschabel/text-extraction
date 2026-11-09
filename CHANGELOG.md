@@ -9,6 +9,35 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-09
+
+### Added
+
+- A page of type `listing` keeps the link lists of its content area: `content` ends with their
+  headings and standalone links (navigation, footer, breadcrumbs, cookie and feedback elements
+  and everything before the `<h1>` stay out; fewer than five links add nothing; a text or URL
+  that the content already holds, the page's own URL and a repeated URL are skipped), in
+  Markdown, text and HTML. Found on https://www.leifiphysik.de/optik, which kept only its
+  introduction. No new field, setting or warning; other page types are unchanged.
+- The playground renders tables, strikethrough and formulas in a Markdown result: `$$LaTeX$$` as
+  MathML, converted on the server with latex2mathml 3.81.1 (MIT; the page's content security
+  policy stays `script-src 'self'`). LaTeX that does not convert and notations such as AsciiMath
+  in backticks stay code.
+
+### Fixed
+
+- A KMap lesson ends with its attachment links again, each with its own URL (every link used to
+  point to the last link's URL, and Trafilatura dropped the lists), under headings in the page
+  language: Erklärungen, Ideen, Anwendungen, Anhänge for `lang="de"`, else Explanations, Ideas,
+  Applications, Attachments.
+- A Markdown table with a spanning header row (`<th colspan>`) stays one table: all rows are
+  padded to the widest row instead of being cut to the header's one column.
+
+### Upgrade
+
+- A `TEXT_EXTRACTION_VERSION` pinned in `.env` must be raised to `0.1.10` or removed. No setting
+  changed.
+
 ## [0.1.9] - 2026-11-09
 
 ### Changed
@@ -611,7 +640,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...v0.1.7

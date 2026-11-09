@@ -106,7 +106,8 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    key.
 5. **Convert:** the body's bytes decide what it is (`documents/sniff.py`, F1). HTML →
    Trafilatura (keep link-only lists of linked files, domain boilerplate rules, MathML →
-   LaTeX); `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
+   LaTeX); a page of type `listing` keeps the link lists of its content area (package 21, below);
+   a Markdown table gets all its rows padded to the widest one; `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
    to each output format as a document's Markdown is (issue #15). PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
@@ -2778,6 +2779,22 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
   (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
   failed. In results `error` therefore comes from soft 404s (`soft_404`).
+- **Link lists of a listing page (package 21).** Trafilatura drops a page that is mostly lists of
+  links, so a page whose `page_type.type` is `listing` gets the link lists of its content area
+  appended to `content` (`convert/listings.py`, `listing_lists`; the pipeline calls it for no other
+  type, and uploads, documents and media never get it). The collector walks the page in document
+  order and gathers headings and standalone links (a link that is most of its item, at most
+  `MAX_ITEM_CHARS` = 150 characters, `LINK_SHARE_OF_ITEM` = 0.8; an inline link inside a paragraph
+  is never one). Chrome is left out: `header`, `nav`, `footer`, `aside`, forms and any element
+  whose class or id holds `footer`, `breadcrumb(s)`, `cookie`, `consent`, `sidebar`, `social`,
+  `share`, `skip`, `pagination`, `pager`, `menu` or `feedback`, and everything before the `<h1>`.
+  Fewer than `LISTING_MIN_LINKS` = 5 links add nothing. A URL or a link text that the content
+  already holds, the page's own URL (with a fragment) and a repeated URL are listed at most once.
+  The lists are rendered in the requested format (Markdown headings and lists, plain text, HTML
+  `<h2>`/`<ul>`) and appended before the PII stage. No new field, setting or warning code.
+  A KMap lesson (`kmap.eu`) ends with its attachment links as such link lists, each link with its
+  own URL, under headings in the page language (`<html lang>` `de`: Erklärungen, Ideen, Anwendungen,
+  Anhänge; else Explanations, Ideas, Applications, Attachments).
 - **`link_category(url, text, kind)`** gives every entry of `links` (`/v1/extract`) and
   `site.links` a `category`: `download` for `kind: file`; for an external link `social` when its
   host is, or is below, a social network or video platform (`facebook.com`, `instagram.com`,
@@ -3071,8 +3088,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   schema of schema.org and LRMI names) and "Describe images". A result shows its content as source
   and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
   their alt text; since package 21 tables, strikethrough and `$$LaTeX$$` as MathML from
-  latex2mathml on the server, without link, source or handler attributes, or as its escaped
-  source in `<code>` when it does not convert), a download, its metadata, structured values, images with alt texts and
+  latex2mathml on the server, with only MathML elements and presentation attributes (an
+  allowlist; colours only as a name or `#hex`), or as its escaped source in `<code>` when it
+  does not convert), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
   catalogues). The order and the look of this view (source first, then rendered) are superseded

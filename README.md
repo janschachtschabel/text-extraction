@@ -72,13 +72,14 @@ Every answer is the same result envelope (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototype `v0.1.9`: packages 0-20 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.10`: packages 0-21 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,
 robots marks in the site tree with a per-run site rules switch, playground fixes after the v0.1.4
 test, site tree with types, columns and a fast sitemap reading, optional features on by default,
-bot-challenge refusals reported as `bot_protection`).
+bot-challenge refusals reported as `bot_protection`, link lists of listing pages, KMap
+attachments, tables and formulas).
 See [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract
