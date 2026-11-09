@@ -413,3 +413,10 @@ def test_span_wrapped_links_inside_running_text_are_not_listed() -> None:
     assert "Topic 0" in out
     assert "Begriff" not in out
 
+
+def test_render_link_sections_in_text_with_urls() -> None:
+    sections = [LinkSection("Ideen", 2, (("Blatt", "https://x.org/b.pdf"),))]
+
+    assert render_link_sections(sections, "text", text_urls=True) == (
+        "Ideen\n\n- Blatt: https://x.org/b.pdf"
+    )

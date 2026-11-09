@@ -414,8 +414,9 @@ def _extract(html: str, url: str, fmt: OutputFormat, *, recall: bool) -> str | N
 
 
 def _with_attachments(text: str, embedded: Embedded | None, fmt: OutputFormat) -> str:
-    """``text`` followed by the link lists of the page's embedded attachments."""
-    rendered = render_link_sections(embedded.sections, fmt) if embedded else ""
+    """``text`` followed by the link lists of the page's embedded attachments; in plain text
+    each item with its URL."""
+    rendered = render_link_sections(embedded.sections, fmt, text_urls=True) if embedded else ""
     if not rendered:
         return text
     return append_to_body(text, rendered) if fmt == "html" else f"{text}\n\n{rendered}"

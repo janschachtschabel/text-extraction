@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
-from text_extraction.convert.links import absolute_url, base_url_of
+from text_extraction.convert.links import absolute_url, base_url_of, url_key
 from text_extraction.convert.listings import LinkSection
 from text_extraction.convert.markup import attr, parse_html
 
@@ -42,15 +42,16 @@ def _attachment_sections(
     node: dict[str, Any], fragment: BeautifulSoup, soup: BeautifulSoup, url: str
 ) -> tuple[LinkSection, ...]:
     """The historic payload names its files as inline:<file>; point those at the real URL
-    and list whatever the body did not already use, each under its own target."""
+    and list whatever the body did not already use or link to, each under its own target.
+    Only http(s) targets count."""
     base = base_url_of(soup, url)
     attachments = [a for a in node.get("attachments", []) if isinstance(a, dict)]
     entries: list[tuple[dict[str, Any], str]] = []
     files: dict[str, str] = {}
     for attachment in attachments:
         href = attachment.get("href")
-        target = absolute_url(base, href) if isinstance(href, str) else None
-        if not target:
+        target = absolute_url(base, href.strip()) if isinstance(href, str) else None
+        if not target or urlsplit(target).scheme.lower() not in {"http", "https"}:
             continue
         entries.append((attachment, target))
         file = attachment.get("file")
@@ -63,13 +64,18 @@ def _attachment_sections(
             if original.startswith("inline:") and original[7:] in files:
                 tag[name] = files[original[7:]]
                 used.add(original[7:])
+    linked = {
+        url_key(target)
+        for tag in fragment.select("a[href]")
+        if (target := absolute_url(base, attr(tag, "href").strip()))
+    }
     language = (
         "de" if str(soup.html.get("lang", "") if soup.html else "").lower()[:2] == "de" else "en"
     )
     grouped: dict[str, list[tuple[str, str]]] = {}
     for item, target in entries:
         label = item.get("name") or item.get("file")
-        if not label or item.get("file") in used:
+        if not label or item.get("file") in used or url_key(target) in linked:
             continue
         key = str(item.get("tag"))
         key = key if key in _ATTACHMENT_HEADINGS else "attachments"

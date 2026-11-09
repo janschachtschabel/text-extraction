@@ -280,8 +280,11 @@ def listing_lists(html: str, url: str, fmt: OutputFormat, *, existing: str) -> s
     return render_link_sections(sections, fmt)
 
 
-def render_link_sections(sections: Sequence[LinkSection], fmt: OutputFormat) -> str:
-    """The sections as Markdown, plain text (no URLs) or HTML lists; ``""`` for no sections."""
+def render_link_sections(
+    sections: Sequence[LinkSection], fmt: OutputFormat, *, text_urls: bool = False
+) -> str:
+    """The sections as Markdown, plain text or HTML lists; ``""`` for no sections. A plain
+    text item is its label, or ``label: url`` with ``text_urls``."""
     parts: list[str] = []
     for section in sections:
         if fmt == "html":
@@ -302,6 +305,8 @@ def render_link_sections(sections: Sequence[LinkSection], fmt: OutputFormat) -> 
             lines += [mark + section.heading] + ([""] if section.links else [])
         if fmt == "markdown":
             lines += [f"- {markdown_link(text, link)}" for text, link in section.links]
+        elif text_urls:
+            lines += [f"- {text}: {link}" for text, link in section.links]
         else:
             lines += [f"- {text}" for text, _ in section.links]
         parts.append("\n".join(lines))

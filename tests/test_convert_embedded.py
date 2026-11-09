@@ -1,9 +1,11 @@
 import json
 
+import pytest
 from bs4 import BeautifulSoup
 
 from text_extraction.convert import convert_html
 from text_extraction.convert.embedded import embedded_content
+from text_extraction.convert.html import OutputFormat
 from text_extraction.convert.listings import LinkSection
 from text_extraction.pii.html import HtmlText
 
@@ -222,3 +224,64 @@ def test_convert_html_uses_the_embedded_content() -> None:
     assert result.content.startswith("# Data lesson")
     assert "carried as data" in result.content
     assert result.title == "Data lesson"
+
+
+def lesson_page(description: str, *attachments: dict[str, str]) -> str:
+    payload = {"topic": "Lesson", "description": description, "attachments": list(attachments)}
+    script = f'<script id="embedded-topic" type="json">{json.dumps(payload)}</script>'
+    return f'<html lang="de"><body>{script}</body></html>'
+
+
+KMAP_URL = "https://kmap.eu/app/browser/Physik"
+UNSAFE = ("javascript:alert(1)", "data:text/html,<b>x</b>", "mailto:someone@example.org")
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "html", "text"])
+def test_only_http_attachment_targets_are_listed(fmt: OutputFormat) -> None:
+    unsafe = [
+        {"tag": "explanation", "name": f"Bad {n}", "type": "link", "href": href}
+        for n, href in enumerate(UNSAFE)
+    ]
+    good = {"tag": "explanation", "name": "Good", "type": "link", "href": "https://a.example/1"}
+    page = lesson_page(BODY, *unsafe, good)
+
+    content = convert_html(page, KMAP_URL, fmt).content
+
+    assert "https://a.example/1" in content
+    for scheme in ("javascript", "data:", "mailto"):
+        assert scheme not in content
+    assert "Bad" not in content
+
+
+def test_text_format_lists_attachments_with_their_urls() -> None:
+    page = lesson_page(
+        BODY,
+        {"file": "b.pdf", "name": "Extra worksheet", "href": "files/b.pdf", "tag": "idea"},
+        {"name": "Site", "type": "link", "href": "https://other.org/x", "tag": "explanation"},
+    )
+
+    content = convert_html(page, KMAP_URL, "text").content
+
+    assert content.endswith(
+        "Ideen\n\n- Extra worksheet: https://kmap.eu/app/browser/files/b.pdf\n\n"
+        "Erklärungen\n\n- Site: https://other.org/x"
+    )
+    assert content.count("https://kmap.eu/app/browser/files/b.pdf") == 1
+
+
+def test_an_attachment_the_lesson_text_links_to_is_not_listed_again() -> None:
+    description = (
+        '<p>See <a href="https://a.example/1#part">the first site</a> and '
+        '<a href="files/s.pdf">the sheet</a>.</p>'
+    )
+    page = lesson_page(
+        description,
+        {"tag": "explanation", "name": "One", "type": "link", "href": "https://a.example/1"},
+        {"tag": "explanation", "name": "Two", "type": "link", "href": "https://b.example/2"},
+        {"type": "file", "name": "Sheet", "file": "s.pdf", "href": "files/s.pdf"},
+    )
+
+    embedded = embedded_content(soup(page), URL)
+
+    assert embedded is not None
+    assert embedded.sections == (LinkSection("Erklärungen", 2, (("Two", "https://b.example/2"),)),)
