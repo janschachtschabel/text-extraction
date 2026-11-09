@@ -380,7 +380,8 @@ Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demsel
 jeder Client. Das Ergebnis beginnt mit einer Statuszeile (dem Status, „maximale Extraktion (entsperrt)“ für eine
 Seite, die im Entsperrmodus geöffnet wurde, und dem HTTP-Status), darunter folgen eine Werkzeugleiste, eine
 Karte mit Kennzahlen (URL, Sprache, Wörter, verwendeter Modus, Seitentyp, Zeit) und der Inhalt in
-einer weißen Lesekarte. Bis ein Ergebnis eintrifft, zeigt der Ergebnisbereich eine leere Karte.
+einer weißen Lesekarte. Ein Markdown-Ergebnis zeigt seine Tabellen, durchgestrichenen Text und
+`$$…$$`-Formeln gerendert. Bis ein Ergebnis eintrifft, zeigt der Ergebnisbereich eine leere Karte.
 Die Einstellungen sind eine eigene Karte. Der Tab „Screenshot“ zeigt sein Bild als Karte oben;
 unter „Extrahieren“ ist der Screenshot (wenn einer aufgenommen wurde) ein zugeklappter Abschnitt.
 Metadaten, Links, Bilder, entfernte Fehlermeldungen des Servers und „Ablauf“ sind zugeklappte

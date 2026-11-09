@@ -15,12 +15,16 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 - A page of type `listing` keeps the link lists of its content area when it is dense with links
   (`link_density`) or its content has fewer than `QUALITY_MIN_WORDS` words: `content` ends with
-  their headings and standalone links (navigation, footer, breadcrumbs, cookie and feedback
-  elements and everything before the `<h1>` stay out; fewer than five links add nothing; a text or
-  URL that the content already holds, the page's own URL and a repeated URL are skipped), in
-  Markdown, text and HTML (inside `<body>`). An article that is a `listing` by its pagination
-  alone is unchanged. Found on https://www.leifiphysik.de/optik, which kept only its
-  introduction. No new field, setting or warning; other page types are unchanged.
+  their headings and standalone links (navigation, menu, offcanvas, footer, breadcrumbs, cookie
+  and feedback elements and everything before the `<h1>` stay out; fewer than five links add
+  nothing; a link whose URL the content already holds or whose text is a whole line of the
+  content, the page's own URL and a repeated URL are skipped), in Markdown, text and HTML
+  (inside `<body>`). An article that is a `listing` by its pagination alone is unchanged. Found
+  on https://www.leifiphysik.de/optik, which kept only its introduction. No new field, setting
+  or warning; other page types are unchanged.
+- The added link lists count towards `QUALITY_MIN_WORDS`: a listing page whose own text is
+  shorter can now be `success` instead of `partial` (`content_too_short`), and auto mode then
+  does not escalate it to the browser as a thin page.
 - The playground renders tables, strikethrough and formulas in a Markdown result: `$$LaTeX$$` as
   MathML, converted on the server with latex2mathml 3.81.1 (MIT; the page's content security
   policy stays `script-src 'self'`). LaTeX that does not convert and notations such as AsciiMath
@@ -31,7 +35,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 - A KMap lesson ends with its attachment links again, each with its own URL (every link used to
   point to the last link's URL, and Trafilatura dropped the lists), under headings in the page
   language: Erklärungen, Ideen, Anwendungen, Anhänge for `lang="de"`, else Explanations, Ideas,
-  Applications, Attachments.
+  Applications, Attachments. Only http(s) links are listed, a link the lesson text already holds
+  is not repeated, and text output keeps each attachment's URL (`label: url`).
 - A Markdown table with a spanning header row (`<th colspan>`) stays one table: all rows are
   padded to the widest row instead of being cut to the header's one column.
 

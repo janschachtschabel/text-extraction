@@ -2789,20 +2789,32 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   order and gathers headings and standalone links (a link that is most of its item, at most
   `MAX_ITEM_CHARS` = 150 characters, `LINK_SHARE_OF_ITEM` = 0.8; the item is the closest `li`,
   `div`, `p`, `dd`, `dt`, `td` or `th`, past inline wrappers such as `span`, so an inline link
-  inside a paragraph is never one). Chrome is left out: the landmarks of `is_outside_content`
-  (`nav`, the page's `header` and `footer`, a sidebar `aside`, their ARIA roles, hidden elements)
-  and any element whose class or id holds `footer`, `breadcrumb(s)`, `cookie`,
-  `consent`, `sidebar`, `social`, `share`, `skip`, `pagination`, `pager`, `menu` or `feedback`,
-  except an element that holds the first `<h1>` (a layout wrapper such as `has-sidebar`), and
-  everything before the `<h1>`. Fewer than `LISTING_MIN_LINKS` = 5 links add nothing. A URL
-  (matched whole, HTML entities read) or a link text that the content already holds, the page's
-  own URL (with a fragment) and a repeated URL are listed at most once. The lists are rendered in
+  inside a paragraph is never one; the item's text leaves out its nested `ul` and `ol`, so the
+  parent link of a nested list counts). A link wrapped in a `span` is standalone too when the
+  links of its item make up `LINK_SHARE_OF_ITEM` of the item's text, as in a tag list of
+  span-wrapped links; inside running text it is not. A heading inside a link (a card's title)
+  is part of the link's label, not a section heading. Chrome is left out: the landmarks of
+  `is_outside_content` (`nav`, the page's `header` and `footer`, a sidebar `aside`, their ARIA
+  roles, hidden elements) and any element whose class or id holds `footer`, `breadcrumb(s)`,
+  `cookie`, `consent`, `sidebar`, `social`, `share`, `skip`, `pagination`, `pager`, `menu`,
+  `feedback`, `nav`, `navbar`, `navigation` or `offcanvas`, except an element that holds the
+  first `<h1>` (a layout wrapper such as `has-sidebar`), and everything before the `<h1>`. Fewer
+  than `LISTING_MIN_LINKS` = 5 links add nothing. A link whose URL the content already holds
+  (matched whole: HTML entities read, `href` values and Markdown `<…>` targets taken whole,
+  balanced parentheses kept, and `%28`, `%29`, `%20` equal to `(`, `)` and a space) or whose text
+  is a whole line of the content (of an HTML result, a line of its text) is skipped; the page's
+  own URL (with a fragment or a trailing slash) is left out, and a repeated URL is listed once. A
+  heading the content already holds keeps its section in the lists. The added lists count
+  towards `QUALITY_MIN_WORDS`: a thin listing they bring over the minimum is `success` and is
+  not escalated as `content_too_short`. The lists are rendered in
   the requested format (Markdown headings and lists with `[`, `]` escaped and space and
   parentheses of the URL percent-encoded, plain text, HTML `<h2>`/`<ul>` inside `<body>`) and
   appended before the PII stage. No new field, setting or warning code.
-  A KMap lesson (`kmap.eu`) ends with its attachment links as such link lists, each link with its
-  own URL, under headings in the page language (`<html lang>` `de`: Erklärungen, Ideen, Anwendungen,
-  Anhänge; else Explanations, Ideas, Applications, Attachments).
+  A page with a lesson payload in `script#embedded-topic` (KMap) ends with its attachment links
+  as such link lists, each link with its own URL, under headings in the page language
+  (`<html lang>` `de`: Erklärungen, Ideen, Anwendungen, Anhänge; else Explanations, Ideas,
+  Applications, Attachments). Only http(s) targets are listed, an attachment the lesson text
+  already links to is not, and in plain text each item is `label: url`.
 - **`link_category(url, text, kind)`** gives every entry of `links` (`/v1/extract`) and
   `site.links` a `category`: `download` for `kind: file`; for an external link `social` when its
   host is, or is below, a social network or video platform (`facebook.com`, `instagram.com`,
