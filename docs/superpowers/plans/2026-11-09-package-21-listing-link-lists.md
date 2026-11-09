@@ -37,6 +37,13 @@ to the widest row, and the playground's Markdown renderer turns tables on.
    renders no table at all (markdown-it `commonmark` preset without the `table` rule), so every
    table shows as a paragraph of pipes.
 
+3. 13:44: "eventuell must du auch formeln und und andere anzeige elemente für die ui prüfen um
+   zumindest markdown kompatibel zu sein und auch formeln wie brüche und so weiter sauber
+   anzuzeigen zu können." The conversion writes every equation (MathML, MathJax sources, `data-tex`)
+   as LaTeX between `$$` and `$$`; the playground shows that source as text. Its CSP is
+   `script-src 'self'`, so the rendering happens on the server: LaTeX to MathML, which browsers
+   draw natively.
+
 Neither page's HTML is committed (third-party content); tests use synthetic pages of the same
 shape.
 
@@ -55,6 +62,8 @@ shape.
 - KMap attachment headings: English `Explanations`, `Ideas`, `Applications`, `Attachments`
   (unchanged); on a page whose `<html lang>` starts with `de`: `Erklärungen`, `Ideen`,
   `Anwendungen`, `Anhänge`.
+- New runtime dependency for Task 6: `latex2mathml==3.81.1` (MIT, released 2026-09-07, pure
+  Python; at least 14 days old). No other new dependency.
 - Version 0.1.10 (every file that names 0.1.9 today outside CHANGELOG and plans:
   `pyproject.toml`, `uv.lock`, `deploy/helm/text-extraction/Chart.yaml`,
   `deploy/helm/text-extraction/values-production.example.yaml`, `docker-compose.yml`, both
@@ -226,6 +235,39 @@ shape.
 - [ ] **Step 4: Run** `uv run pytest -q`: PASS.
 - [ ] **Step 5: Commit** `fix: tables with a spanning header row stay one table, and the playground renders tables`.
 
+### Task 6: Formulas and Markdown in the playground
+
+**Files:**
+- Modify: `pyproject.toml`, `uv.lock` (`latex2mathml==3.81.1`), `src/text_extraction/ui/markdown.py`,
+  the playground's stylesheet if MathML needs a rule (`src/text_extraction/ui/static/`)
+- Test: the module that tests `render_markdown` (Task 4 added its table test there)
+
+**Interfaces:**
+- Consumes: Task 4's parser with tables on.
+- Produces: `render_markdown(text) -> Markup` that also renders `$$…$$` as MathML and
+  `~~text~~` as `<s>`.
+
+- [ ] **Step 1: Write the failing tests:** `test_double_dollar_latex_becomes_mathml`
+  (`render_markdown("Es gilt $$\\frac{a}{b}$$ hier.")` contains `<math` and `<mfrac>`, not the
+  `$$` source); `test_an_equation_alone_in_its_paragraph_is_a_block`
+  (`"$$x^2$$"` alone gives `display="block"`); `test_latex_inside_math_is_not_markdown`
+  (`$$a_1 * b_2 * c$$` gives no `<em>`); `test_broken_latex_stays_readable` (an input
+  latex2mathml raises on renders as escaped `<code>` with the source, never an exception);
+  `test_mathml_carries_no_links_or_handlers` (`$$\\href{javascript:alert(1)}{x}$$` output has no
+  `href` and no attribute starting with `on`); `test_single_dollars_stay_text` (`"5 $ und 10 $"`
+  unchanged text); `test_strikethrough_renders` (`~~alt~~` gives `<s>alt</s>`).
+- [ ] **Step 2: Run** the module's tests: FAIL.
+- [ ] **Step 3: Implement:** add the dependency with `uv add latex2mathml==3.81.1` (lock
+  updated); in `_parser`, enable `strikethrough` and add an inline rule before `escape` that
+  takes `$$…$$` (non-empty, no `$$` inside) raw as a `math` token; its renderer calls
+  `latex2mathml.converter.convert(source, display=…)` (`block` when the token is the only child of
+  its paragraph, else `inline`), removes `href`, `xlink:href`, `src` and `on*` attributes from the
+  result, and on any exception renders `<code>` with the escaped source. Raw HTML stays off.
+  Run `uv run python scripts/check_licenses.py` (or the repo's licence check) for the new
+  dependency.
+- [ ] **Step 4: Run** `uv run pytest tests/ui -q` and the licence check: PASS.
+- [ ] **Step 5: Commit** `feat(ui): render formulas as MathML and strikethrough in results`.
+
 ### Task 5: Docs and version 0.1.10
 
 **Files:** `docs/architecture.md` (step 5 "Convert", "Page types and link categories"),
@@ -235,7 +277,8 @@ contents row 21), `CHANGELOG.md`, the version files of the Global Constraints.
 - [ ] **Step 1:** Document: a `listing` page's `content` ends with the link lists of its content
   area (headings and standalone links, chrome left out, at least five links), in each format;
   a KMap lesson ends with its attachment links under headings in the page's language; table
-  rows are padded to the widest row; the playground renders tables.
+  rows are padded to the widest row; the playground renders tables, strikethrough and formulas
+  (`$$…$$` LaTeX as MathML; other notations such as AsciiMath in backticks stay code).
 - [ ] **Step 2:** Bump to 0.1.10; run `uv run pytest -q`, `uv run ruff check .`,
   `uv run ruff format --check .`, `uv run mypy`,
   `uv run python scripts/check_translation_pairs.py --base origin/main`.
