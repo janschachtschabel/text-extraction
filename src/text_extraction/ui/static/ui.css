@@ -875,6 +875,36 @@ ul.server-errors {
   font-size: 1.1em;
 }
 
+/* A formula stays inside the card: a wide or tall one (a huge \rule or space) scrolls on its
+   own. */
+.reading .markdown math {
+  display: inline-block;
+  max-width: 100%;
+  max-height: 20em;
+  overflow: auto;
+  vertical-align: middle;
+}
+
+.reading .markdown math[display="block"] {
+  display: block;
+}
+
+/* A Markdown table cell's alignment: a class, as the CSP blocks style attributes. */
+.markdown th.align-left,
+.markdown td.align-left {
+  text-align: left;
+}
+
+.markdown th.align-center,
+.markdown td.align-center {
+  text-align: center;
+}
+
+.markdown th.align-right,
+.markdown td.align-right {
+  text-align: right;
+}
+
 .reading details.source {
   margin: 24px 0 0;
 }

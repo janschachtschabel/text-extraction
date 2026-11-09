@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes import (
     ARTICLE,
+    HUB_PAGE,
     ORIGIN,
     PAGE,
     PARAGRAPH,
@@ -39,14 +40,18 @@ from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.page_types import PageTypeInfo
+from text_extraction.pii.html import HtmlText
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline import (
     CHARSET_MISMATCH_WARNING,
     Pipeline,
     _cache_options,
+    _wants_listing_lists,
     create_outbound,
     create_pipeline,
 )
+from text_extraction.quality import assess
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -704,6 +709,141 @@ def test_a_fast_html_page_has_a_page_type() -> None:
     article_type = data_of(article).page_type
     assert article_type is not None
     assert (article_type.type, article_type.signals) == ("content", ["word_count"])
+
+
+def test_a_listing_page_keeps_its_link_lists() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert data.page_type.type == "listing"
+    assert data.content is not None
+    assert "## Biology" in data.content
+    assert "## Physics" in data.content
+    assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
+    assert "- [Physics topic 20](https://example.org/physics/20.html)" in data.content
+    assert data.quality is not None
+    before = convert_html(HUB_PAGE, PAGE, "markdown").content
+    assert "Biology topic" not in before  # the converter drops the lists
+    for topic in ("[Biology topic 1]", "[Physics topic 20]"):
+        assert data.content.count(topic) == 1
+    assert data.content.count("## Biology") == 1
+    assert data.quality.word_count == assess(HUB_PAGE, data.content).word_count
+    assert data.quality.word_count > assess(HUB_PAGE, before).word_count
+
+
+def test_a_listing_lists_failure_does_not_fail_the_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lists are an extra: a bug in them keeps the content as it was and logs
+    ``listing_lists_failed`` with the host and the error type only."""
+
+    def broken(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("lists broke on secret-token")
+
+    monkeypatch.setattr("text_extraction.pipeline.listing_lists", broken)
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    with capture_logs() as logs:
+        envelope = harness.run_once(format="markdown")
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.content == convert_html(HUB_PAGE, PAGE, "markdown").content
+    (line,) = [entry for entry in logs if entry["event"] == "listing_lists_failed"]
+    assert line["host"] == "example.org"
+    assert line["error_type"] == "RuntimeError"
+    assert "secret-token" not in repr(line)
+
+
+def test_a_content_page_with_related_links_is_unchanged() -> None:
+    related = "".join(
+        f'<li><a href="/related/{n}.html">Related item {n}</a></li>' for n in range(6)
+    )
+    page = ARTICLE.replace("</article>", f"<ul>{related}</ul></article>", 1)
+    assert "Related item 3" in page
+    harness = Harness({PAGE: fetched(PAGE, page)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert data.page_type.type == "content"
+    assert data.content == convert_html(page, PAGE, "markdown").content
+    assert data.content is not None
+    assert "- [Related item" not in data.content
+
+
+def test_listing_lists_stay_inside_the_html_body() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+
+    data = data_of(harness.run_once(format="html"))
+
+    assert data.content is not None
+    body_end = data.content.rindex("</body>")
+    assert data.content.index("<h3>Biology</h3>") < body_end
+    assert data.content.index("https://example.org/physics/20.html") < body_end
+    assert data.content.rstrip().endswith("</html>")
+    analysed = HtmlText.parse(data.content)  # what the PII stage reads
+    assert not analysed.has_unread
+    assert "Biology topic 1" in analysed.text
+    assert "Physics topic 20" in analysed.render([], drop_unread=True)
+
+
+def test_an_article_typed_listing_by_pagination_gets_no_link_lists() -> None:
+    prose = "Die Photosynthese wandelt Licht in chemische Energie um und ist wichtig. " * 30
+    tags = "".join(f"<li><a href='/tag/t{n}'>Schlagwort {n}</a></li>" for n in range(6))
+    related = "".join(f"<li><a href='/2026/10/p{n}/'>Beitrag {n}</a></li>" for n in range(4))
+    page = (
+        "<html lang='de'><head><title>Photosynthese erklaert</title></head><body><main>"
+        f"<article><h1>Photosynthese erklaert</h1><p>{prose}</p>"
+        f"<ul class='post-tags'>{tags}</ul><h3>Weitere Beitraege</h3><ul>{related}</ul>"
+        "</article><div class='post-links'><a rel='prev' href='/2026/10/x/'>Vorheriger "
+        "Beitrag</a></div></main></body></html>"
+    )
+    harness = Harness({PAGE: fetched(PAGE, page)})
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.page_type is not None
+    assert (data.page_type.type, data.page_type.signals) == ("listing", ["pagination"])
+    assert data.word_count is not None
+    assert data.word_count >= 300
+    assert data.content == convert_html(page, PAGE, "markdown").content
+    assert "Schlagwort" not in data.content
+
+
+@pytest.mark.parametrize(
+    ("page_type", "signals", "words", "wanted"),
+    [
+        ("listing", ["link_density"], 400, True),
+        ("listing", ["pagination", "link_density"], 400, True),
+        ("listing", ["pagination"], 49, True),
+        ("listing", ["pagination"], 50, False),
+        ("listing", ["url"], 400, False),
+        ("content", ["word_count"], 10, False),
+    ],
+)
+def test_listing_lists_need_link_density_or_thin_content(
+    page_type: str, signals: list[str], words: int, wanted: bool
+) -> None:
+    found = PageTypeInfo.model_validate({"type": page_type, "signals": signals})
+    quality = assess(None, "").model_copy(update={"word_count": words})
+
+    assert _wants_listing_lists(found, quality, 50) is wanted
+    assert _wants_listing_lists(None, quality, 50) is False
+
+
+def test_listing_lists_pass_the_boilerplate_rules() -> None:
+    harness = Harness({PAGE: fetched(PAGE, HUB_PAGE)})
+    line = "- [Biology topic 2](https://example.org/biology/2.html)"
+    harness.pipeline._rules = {"example.org": frozenset({line})}
+
+    data = data_of(harness.run_once(format="markdown"))
+
+    assert data.content is not None
+    assert "- [Biology topic 1](" in data.content
+    assert line not in data.content
 
 
 def test_a_page_type_failure_does_not_fail_the_extraction(

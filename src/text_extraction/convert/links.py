@@ -3,7 +3,9 @@
 Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 """
 
+import re
 from dataclasses import dataclass
+from html import unescape
 from typing import Annotated, Literal
 from urllib.parse import urldefrag, urljoin, urlsplit
 
@@ -65,6 +67,50 @@ class Link:
     category: Annotated[
         TolerantLinkCategory | None, Field(description=LINK_CATEGORY_DESCRIPTION)
     ] = None
+
+
+_URL_CHAR = r"[^\s<>\"'()\[\]]"
+# A bare URL, with balanced parentheses inside it (``wiki/Licht_(Physik)``) but not the one that
+# closes a Markdown link or a remark around it. The two alternatives start with different
+# characters, so the match stays linear.
+_URL = re.compile(rf"https?://(?:{_URL_CHAR}|\({_URL_CHAR}*\))+")
+# A Markdown target in angle brackets, which may hold any parentheses and spaces.
+_ANGLE_TARGET = re.compile(r"\]\(<(https?://[^<>\n]+)>")
+# An HTML href value, read before the entities are unescaped.
+_HREF = re.compile(r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
+
+
+def urls_in(text: str, *, unescape_entities: bool) -> set[str]:
+    """The URLs the text holds, whole: a link to ``a.pdf.zip`` is no link to ``a.pdf``.
+    ``unescape_entities`` reads HTML, whose ``&`` in a URL is ``&amp;``, and takes the http(s)
+    ``href`` values whole too."""
+    found = set(_ANGLE_TARGET.findall(text))
+    if unescape_entities:
+        for double, single in _HREF.findall(text):
+            value = unescape(double or single).strip()
+            if value.lower().startswith(("http://", "https://")):
+                found.add(value)
+        text = unescape(text)
+    return found | {url.rstrip(".,;:") for url in _URL.findall(text)}
+
+
+def url_key(url: str) -> str:
+    """``url`` without its fragment and with ``%20``, ``%28`` and ``%29`` read as a space and
+    parentheses, so that the forms a URL takes in Markdown and in HTML compare equal."""
+    return urldefrag(url).url.replace("%20", " ").replace("%28", "(").replace("%29", ")")
+
+
+def markdown_target(url: str) -> str:
+    """``url`` with its space and parentheses percent-encoded, so that it does not end a
+    Markdown link early."""
+    return url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+
+
+def markdown_link(text: str, url: str) -> str:
+    """``[text](url)`` with the brackets of the text escaped and the URL as
+    ``markdown_target`` writes it."""
+    label = text.replace("[", r"\[").replace("]", r"\]")
+    return f"[{label}]({markdown_target(url)})"
 
 
 def absolute_url(base: str, href: str) -> str | None:

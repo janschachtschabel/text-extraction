@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes import (
     ARTICLE,
+    HUB_PAGE,
     ORIGIN,
     PAGE,
     PARAGRAPH,
@@ -218,6 +219,90 @@ def test_browser_mode_renders_after_compliance_and_turn() -> None:
     assert call.options.unblock is False
     assert call.options.blocked_resources == frozenset({"image", "media", "font"})
     assert call.options.screenshot is False
+
+
+def test_rendered_listing_keeps_its_link_lists() -> None:
+    harness = RenderHarness(renderer=FakeRenderer(rendered(HUB_PAGE)))
+
+    data = data_of(harness.run_once(mode="browser", format="markdown"))
+
+    assert data.mode_used == "browser"
+    assert data.page_type is not None
+    assert data.page_type.type == "listing"
+    assert data.content is not None
+    assert "- [Biology topic 1](https://example.org/biology/1.html)" in data.content
+    assert "- [Physics topic 20](https://example.org/physics/20.html)" in data.content
+
+
+LISTING_URL = f"{ORIGIN}/category/physics/"
+
+
+def _topic_rows(topic: str) -> str:
+    return "".join(
+        f'<div class="views-row"><a href="/{topic}/{n}.html">{topic.title()} topic {n} for the '
+        "classroom</a></div>"
+        for n in range(1, 7)
+    )
+
+
+# A listing by its URL alone, with a script: its prose is under QUALITY_MIN_WORDS (50) words, its
+# link lists bring it over the minimum, and it shows enough text not to be JavaScript-heavy.
+THIN_LISTING = (
+    '<!doctype html><html lang="en"><head><title>Physics</title><script src="/app.js"></script>'
+    '</head><body><div class="branch_header"><h1>Physics</h1><p>This hub collects the physics '
+    "topics of our learning portal. Every topic leads to a page with explanations, exercises and "
+    'worksheets for the classroom. Pick one below.</p></div><div class="branch_issues">'
+    f"<h3>Mechanics</h3>{_topic_rows('mechanics')}<h3>Optics</h3>{_topic_rows('optics')}"
+    "</div></body></html>"
+)
+
+
+def test_a_listing_its_lists_bring_over_the_word_minimum_is_not_escalated() -> None:
+    """The added lists count towards QUALITY_MIN_WORDS: the page is ``success``, not
+    ``partial content_too_short``, so auto mode does not escalate it as thin."""
+    renderer = FakeRenderer(rendered(THIN_LISTING, url=LISTING_URL))
+    harness = RenderHarness({LISTING_URL: fetched(LISTING_URL, THIN_LISTING)}, renderer=renderer)
+
+    envelope = harness.run_once(url=LISTING_URL, mode="auto", format="markdown")
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.page_type is not None
+    assert (data.page_type.type, data.page_type.signals) == ("listing", ["url"])
+    assert data.quality is not None
+    assert data.quality.word_count >= harness.settings.quality_min_words
+    assert data.quality.script_count == 1
+    assert not data.quality.js_heavy
+    assert "- [Optics topic 6 for the classroom](https://example.org/optics/6.html)" in (
+        data.content or ""
+    )
+    assert not needs_browser(envelope, unblock=False)
+    assert data.mode_used == "fast"
+    assert renderer.calls == []
+
+
+def test_the_same_thin_listing_without_its_lists_is_too_short_and_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the page was before the lists: ``partial content_too_short`` with a script, which
+    auto mode tries again in the browser."""
+    monkeypatch.setattr("text_extraction.pipeline.listing_lists", lambda *a, **k: "")
+    fast = RenderHarness({LISTING_URL: fetched(LISTING_URL, THIN_LISTING)}, renderer=None)
+
+    envelope = fast.run_once(url=LISTING_URL, mode="fast", format="markdown")
+
+    assert envelope.status == "partial"
+    assert code_of(envelope) == ErrorCode.CONTENT_TOO_SHORT
+    quality = data_of(envelope).quality
+    assert quality is not None
+    assert quality.word_count < fast.settings.quality_min_words
+    assert needs_browser(envelope, unblock=False)
+    renderer = FakeRenderer(rendered(THIN_LISTING, url=LISTING_URL))
+    auto = RenderHarness({LISTING_URL: fetched(LISTING_URL, THIN_LISTING)}, renderer=renderer)
+
+    auto.run_once(url=LISTING_URL, mode="auto", format="markdown")
+
+    assert len(renderer.calls) == 1
 
 
 def test_robots_block_of_start_url_never_renders() -> None:

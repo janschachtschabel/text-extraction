@@ -29,10 +29,18 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString, PageElement, Tag
 from trafilatura import extract
 
-from text_extraction.convert.embedded import embedded_html
-from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
+from text_extraction.convert.embedded import Embedded, embedded_content
+from text_extraction.convert.links import (
+    absolute_url,
+    base_url_of,
+    has_file_extension,
+    markdown_link,
+    urls_in,
+)
+from text_extraction.convert.listings import render_link_sections
 from text_extraction.convert.markup import (
     BLOCK_TAGS,
+    append_to_body,
     attr,
     enhance_table_structure,
     has_hidden_class,
@@ -87,7 +95,6 @@ _BLOCKS = [
     "ul",
 ]
 _CELLS = ["td", "th"]
-_URL = re.compile(r"https?://[^\s<>\"'()\[\]]+")
 _TRAFILATURA_FORMAT = {"markdown": "markdown", "text": "txt", "html": "html"}
 # Markup and Markdown link targets, matched in linear time: neither part can run past the start
 # of the next candidate, so text full of "<" or "](" cannot make the match quadratic.
@@ -177,26 +184,15 @@ def _document_links(soup: BeautifulSoup) -> list[tuple[str, str]]:
     return [(label, url) for url, label in found.items()]
 
 
-def _urls_in(text: str, *, unescape_entities: bool) -> set[str]:
-    """The URLs the text holds, whole: a link to ``a.pdf.zip`` is no link to ``a.pdf``."""
-    if unescape_entities:
-        text = unescape(text)
-    return {url.rstrip(".,;:") for url in _URL.findall(text)}
-
-
 def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputFormat) -> str:
     # Trafilatura drops a list that holds nothing but links, as navigation. On a worksheet page
     # that list is the material, so the files the content links to and the text lacks follow it.
-    present = _urls_in(text, unescape_entities=fmt == "html")
+    present = urls_in(text, unescape_entities=fmt == "html")
     missing = [(label, url) for label, url in documents if url not in present]
     if not missing:
         return text
     if fmt == "markdown":
-        items = []
-        for label, url in missing:
-            label = label.replace("[", r"\[").replace("]", r"\]")
-            target = url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
-            items.append(f"- [{label}]({target})")
+        items = [f"- {markdown_link(label, url)}" for label, url in missing]
         return text + "\n\n---\n\n" + "\n".join(items)
     if fmt == "text":
         return text + "\n\n" + "\n".join(f"{label}: {url}" for label, url in missing)
@@ -204,10 +200,7 @@ def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputForm
         f'<li><a href="{escape(url, quote=True)}">{escape(label)}</a></li>'
         for label, url in missing
     ]
-    block = f"<hr/><ul>{''.join(items)}</ul>"
-    if "</body>" in text:
-        return text.replace("</body>", block + "</body>", 1)
-    return text + block
+    return append_to_body(text, f"<hr/><ul>{''.join(items)}</ul>")
 
 
 def _make_absolute(soup: BeautifulSoup, url: str) -> None:
@@ -420,6 +413,15 @@ def _extract(html: str, url: str, fmt: OutputFormat, *, recall: bool) -> str | N
     )
 
 
+def _with_attachments(text: str, embedded: Embedded | None, fmt: OutputFormat) -> str:
+    """``text`` followed by the link lists of the page's embedded attachments; in plain text
+    each item with its URL."""
+    rendered = render_link_sections(embedded.sections, fmt, text_urls=True) if embedded else ""
+    if not rendered:
+        return text
+    return append_to_body(text, rendered) if fmt == "html" else f"{text}\n\n{rendered}"
+
+
 def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     """The page's main content in ``fmt``.
 
@@ -429,9 +431,9 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     that the content links to are in the output.
     """
     soup = prepare_html(html)
-    embedded = embedded_html(soup, url)
+    embedded = embedded_content(soup, url)
     if embedded:
-        soup = prepare_html(embedded)
+        soup = prepare_html(embedded.html)
     strip_non_content(soup)
     server_errors = strip_server_errors(soup)
     notes = [SERVER_ERRORS_REMOVED_WARNING] if server_errors else []
@@ -460,7 +462,8 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
         text = None
     if text and text.strip():
         text = restore_equations(text.strip(), equations, markup=markup)
-        text = _with_documents(_with_heading(text, heading, fmt), documents, fmt)
+        text = _with_attachments(_with_heading(text, heading, fmt), embedded, fmt)
+        text = _with_documents(text, documents, fmt)
         if fmt == "markdown":
             text = enhance_table_structure(text)
         return Conversion(text, "trafilatura", title, warnings, server_errors)
@@ -472,5 +475,6 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
             "", "bs4", title, [*warnings, "No converter produced text"], server_errors
         )
     content = restore_equations(_as_format(fallback, fmt), equations, markup=markup)
-    content = _with_documents(_with_heading(content, heading, fmt), documents, fmt)
+    content = _with_attachments(_with_heading(content, heading, fmt), embedded, fmt)
+    content = _with_documents(content, documents, fmt)
     return Conversion(content, "bs4", title, warnings, server_errors)

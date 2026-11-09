@@ -6,17 +6,24 @@ Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 import json
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from html import escape
 from typing import Any
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
-from text_extraction.convert.links import absolute_url, base_url_of
+from text_extraction.convert.links import absolute_url, base_url_of, url_key
+from text_extraction.convert.listings import LinkSection
 from text_extraction.convert.markup import attr, parse_html
 
 _YOUTUBE_PLAYER = re.compile(r"\bytInitialPlayerResponse\s*=\s*")
-_ATTACHMENT_HEADINGS = {"explanation": "Explanations", "idea": "Ideas", "usage": "Applications"}
+_ATTACHMENT_HEADINGS = {
+    "explanation": {"en": "Explanations", "de": "Erklärungen"},
+    "idea": {"en": "Ideas", "de": "Ideen"},
+    "usage": {"en": "Applications", "de": "Anwendungen"},
+    "attachments": {"en": "Attachments", "de": "Anhänge"},
+}
 # A page whose visible article is at least this long needs no help from its JSON-LD body.
 _VISIBLE_ARTICLE_CHARS = 200
 
@@ -33,36 +40,49 @@ def _nodes(value: Any) -> Iterator[dict[str, Any]]:
 
 def _attachment_sections(
     node: dict[str, Any], fragment: BeautifulSoup, soup: BeautifulSoup, url: str
-) -> str:
+) -> tuple[LinkSection, ...]:
     """The historic payload names its files as inline:<file>; point those at the real URL
-    and list whatever the body did not already use."""
+    and list whatever the body did not already use or link to, each under its own target.
+    Only http(s) targets count."""
     base = base_url_of(soup, url)
     attachments = [a for a in node.get("attachments", []) if isinstance(a, dict)]
-    targets: dict[Any, str] = {}
+    entries: list[tuple[dict[str, Any], str]] = []
+    files: dict[str, str] = {}
     for attachment in attachments:
         href = attachment.get("href")
-        target = absolute_url(base, href) if isinstance(href, str) else None
-        if target:
-            targets[attachment.get("file")] = target
-    used: set[Any] = set()
+        target = absolute_url(base, href.strip()) if isinstance(href, str) else None
+        if not target or urlsplit(target).scheme.lower() not in {"http", "https"}:
+            continue
+        entries.append((attachment, target))
+        file = attachment.get("file")
+        if isinstance(file, str) and file:
+            files[file] = target
+    used: set[str] = set()
     for tag in fragment.select("[href], [src]"):
         for name in ("href", "src"):
             original = attr(tag, name)
-            if original.startswith("inline:") and original[7:] in targets:
-                tag[name] = targets[original[7:]]
+            if original.startswith("inline:") and original[7:] in files:
+                tag[name] = files[original[7:]]
                 used.add(original[7:])
-    sections: dict[str, list[str]] = {}
-    for item in attachments:
+    linked = {
+        url_key(target)
+        for tag in fragment.select("a[href]")
+        if (target := absolute_url(base, attr(tag, "href").strip()))
+    }
+    language = (
+        "de" if str(soup.html.get("lang", "") if soup.html else "").lower()[:2] == "de" else "en"
+    )
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for item, target in entries:
         label = item.get("name") or item.get("file")
-        target = targets.get(item.get("file"))
-        if not label or not target or item.get("file") in used:
+        if not label or item.get("file") in used or url_key(target) in linked:
             continue
-        heading = _ATTACHMENT_HEADINGS.get(str(item.get("tag")), "Attachments")
-        sections.setdefault(heading, []).append(
-            f'<li><a href="{escape(target, quote=True)}">{escape(str(label))}</a></li>'
-        )
-    return "".join(
-        f"<h2>{heading}</h2><ul>{''.join(items)}</ul>" for heading, items in sections.items()
+        key = str(item.get("tag"))
+        key = key if key in _ATTACHMENT_HEADINGS else "attachments"
+        grouped.setdefault(key, []).append((str(label), target))
+    return tuple(
+        LinkSection(_ATTACHMENT_HEADINGS[key][language], 2, tuple(links))
+        for key, links in grouped.items()
     )
 
 
@@ -108,8 +128,17 @@ def _json_payload(script: Tag) -> tuple[Any, bool] | None:
         return None  # Scripts need not contain a supported JSON payload.
 
 
-def embedded_html(soup: BeautifulSoup, url: str) -> str | None:
-    """HTML for the page's real content when it sits in data, else None.
+@dataclass(frozen=True)
+class Embedded:
+    """The page's real content: ``html`` for the converter, and the attachment link lists
+    that Trafilatura would drop from it."""
+
+    html: str
+    sections: tuple[LinkSection, ...] = ()
+
+
+def embedded_content(soup: BeautifulSoup, url: str) -> Embedded | None:
+    """The page's real content when it sits in data, else None.
 
     A YouTube watch page yields its video details, a KMap page its lesson and any other page
     the ``articleBody`` of its JSON-LD - never a generic SEO description as a full document,
@@ -118,7 +147,7 @@ def embedded_html(soup: BeautifulSoup, url: str) -> str | None:
     if host == "youtube.com" or host.endswith(".youtube.com"):
         video = youtube_video(soup)
         if video:
-            return video
+            return Embedded(video)
     scripts = soup.select(
         'script[type="json"], script[type="application/json"], script[type="application/ld+json"]'
     )
@@ -140,9 +169,9 @@ def embedded_html(soup: BeautifulSoup, url: str) -> str | None:
                 visible = soup.select_one('article, main, [role="main"]')
                 if visible and len(visible.get_text(" ", strip=True)) >= _VISIBLE_ARTICLE_CHARS:
                     return None
-                return prefix + str(fragment)
+                return Embedded(prefix + str(fragment))
             # Resolve first: the call rewrites the inline: references inside fragment,
             # and the operands of a return expression are evaluated left to right.
             sections = _attachment_sections(node, fragment, soup, url)
-            return prefix + str(fragment) + sections
+            return Embedded(prefix + str(fragment), sections)
     return None

@@ -30,6 +30,8 @@ _XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>")
 _ROW = re.compile(r"(?<!\\)\|")
 _SEPARATOR_CELL = re.compile(r"\s*:?-{3,}:?\s*")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
+_BODY_END = re.compile(r"</body\s*>", re.IGNORECASE)
+_HTML_END = re.compile(r"</html\s*>", re.IGNORECASE)
 # Elements that start a block of their own. Every other element, a custom element too, flows
 # inline with the text around it, as a browser shows it.
 BLOCK_TAGS: Final = frozenset(
@@ -185,6 +187,16 @@ def strip_non_content(soup: BeautifulSoup) -> None:
             tag.decompose()
 
 
+def append_to_body(document: str, block: str) -> str:
+    """``block`` at the end of the HTML ``document``'s body: before ``</body>``, else before
+    ``</html>``, else after the document."""
+    for end in (_BODY_END, _HTML_END):
+        if found := list(end.finditer(document)):
+            index = found[-1].start()
+            return document[:index] + block + document[index:]
+    return document + block
+
+
 def _cells(line: str) -> list[str]:
     return _ROW.split(line)[1:-1]
 
@@ -193,8 +205,51 @@ def _is_row(line: str) -> bool:
     return line.startswith("|") and line.endswith("|")
 
 
+def _is_separator(line: str) -> bool:
+    """A delimiter row: at least one cell, and every cell dashes with optional colons."""
+    cells = _cells(line.strip())
+    return bool(cells) and all(_SEPARATOR_CELL.fullmatch(cell) for cell in cells)
+
+
+def _pad_tables(text: str) -> str:
+    """Pad every row of a table block to the block's widest row, so a spanning header row does
+    not cut the table to one column. Trailing whitespace after the last pipe is kept."""
+    lines = text.split("\n")
+    fence: str | None = None
+    block: list[int] = []
+
+    def flush() -> None:
+        widths = [len(_cells(lines[i].strip())) for i in block]
+        widest = max(widths, default=0)
+        if not any(_is_separator(lines[i]) for i in block):
+            block.clear()  # not a table Markdown recognises: leave it alone
+            return
+        for i, width in zip(block, widths, strict=True):
+            if width < widest:
+                body = lines[i].rstrip()
+                tail = lines[i][len(body) :]
+                lines[i] = (
+                    body + ("---|" if _is_separator(body) else "  |") * (widest - width) + tail
+                )
+        block.clear()
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if _FENCE.match(stripped):
+            flush()
+            marker = stripped[0]
+            fence = None if fence == marker else (fence or marker)
+        elif not fence and _is_row(stripped):
+            block.append(index)
+            continue
+        flush()
+    flush()
+    return "\n".join(lines)
+
+
 def enhance_table_structure(text: str) -> str:
-    """Add the ``| --- |`` separator row to a table that has none, so Markdown renders it."""
+    """Add the ``| --- |`` separator row to a table that has none, so Markdown renders it, and
+    pad the rows of a table to its widest row."""
     lines = text.split("\n")
     result: list[str] = []
     fence: str | None = None
@@ -210,8 +265,7 @@ def enhance_table_structure(text: str) -> str:
         if row and not in_table and _is_row(next_line):
             cells = _cells(stripped)
             next_cells = _cells(next_line)
-            separator = all(_SEPARATOR_CELL.fullmatch(cell) for cell in next_cells)
-            if len(cells) == len(next_cells) and not separator:
+            if cells and len(cells) == len(next_cells) and not _is_separator(next_line):
                 result.append("|" + "|".join(" --- " for _ in cells) + "|")
         in_table = row
-    return "\n".join(result)
+    return _pad_tables("\n".join(result))

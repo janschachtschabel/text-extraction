@@ -31,6 +31,31 @@ PARAGRAPH = (
     "sunlight to synthesize foods from carbon dioxide and water. It generally involves the "
     "green pigment chlorophyll and generates oxygen as a byproduct of the reaction. "
 )
+
+
+def _hub_rows(topic: str, count: int) -> str:
+    return "".join(
+        f'<div class="views-row"><a href="/{topic}/{number}.html">'
+        f"{topic.title()} topic {number}</a></div>"
+        for number in range(1, count + 1)
+    )
+
+
+# A hub page as Trafilatura sees it: the introduction is prose and stays, the sections are
+# link-only blocks and are dropped. 40 links give the classifier its listing (link density).
+HUB_PAGE = (
+    '<!doctype html><html lang="en"><head><title>Learning topics</title></head><body>'
+    '<div class="branch_header"><h1>Learning topics</h1>'
+    "<p>This hub collects the topics of our learning portal. Every topic leads to a page with "
+    "explanations, exercises and worksheets for the classroom. Pick a topic below to start "
+    "learning about it today. The pages are written by teachers, checked by editors and "
+    "updated whenever the curriculum changes, so that you can rely on them.</p></div>"
+    '<div class="branch_issues">'
+    f"<h3>Biology</h3>{_hub_rows('biology', 20)}"
+    f"<h3>Physics</h3>{_hub_rows('physics', 20)}"
+    "</div></body></html>"
+)
+
 ARTICLE = f"""<!doctype html>
 <html lang="en">
 <head>

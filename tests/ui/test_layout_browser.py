@@ -24,6 +24,7 @@ from tests.ui.test_playground_browser import (
 )
 from tests.ui.test_playground_browser import ui as ui
 from text_extraction.ui.i18n import LANGUAGES, Language
+from text_extraction.ui.markdown import render_markdown
 from text_extraction.ui.routes import TABS
 
 pytestmark = pytest.mark.browser
@@ -354,6 +355,53 @@ def test_tables_and_text_scroll_inside_their_card(ui: tuple[str, str]) -> None:
                 "block",
                 "auto",
             ]
+
+
+def test_formulas_stay_inside_the_reading_card(ui: tuple[str, str]) -> None:
+    """A huge rule or space scrolls inside its formula; the page does not widen, and a tall
+    formula is cut to 20em. A table cell's alignment class aligns it."""
+    url, origin = ui
+    formulas = str(
+        render_markdown(
+            "Inline $$\\rule{100em}{1em}$$ and $$a\\hspace{-500em}b$$ text.\n\n$$\\hspace{100em}x$$"
+            "\n\nTall $$\\rule{1pt}{50em}$$ rule.\n\n| a | b |\n|:-:|--:|\n| 1 | 2 |"
+        )
+    )
+    with browsing(url) as (page, _):
+        page.set_viewport_size(PHONE)
+        _extract(page, origin)
+        page.evaluate(
+            "html => document.querySelector('#result .reading .markdown')"
+            ".insertAdjacentHTML('beforeend', html)",
+            formulas,
+        )
+        assert page.locator("#result .reading .markdown math").count() == 4
+        assert page.evaluate(OVERFLOW) <= PHONE["width"]
+        card, inline, block = boxes(
+            page,
+            "#result .reading .markdown",
+            "#result .reading .markdown math:not([display=block])",
+            "#result .reading .markdown math[display=block]",
+        )
+        assert inline["right"] <= card["right"] + 1
+        assert block["right"] <= card["right"] + 1
+        selector = "#result .reading .markdown math"
+        assert computed(page, selector, "display", "overflowX", "overflowY") == [
+            "inline-block",
+            "auto",
+            "auto",
+        ]
+        assert computed(page, f"{selector}[display=block]", "display", "overflowX") == [
+            "block",
+            "auto",
+        ]
+        tall = "#result .reading .markdown p:nth-last-of-type(1) math"
+        (font_size,) = computed(page, tall, "fontSize")
+        (tall_box,) = boxes(page, tall)
+        assert tall_box["height"] <= 20 * float(font_size.removesuffix("px")) + 1
+        cells = "#result .reading .markdown td"
+        assert computed(page, f"{cells}.align-center", "textAlign") == ["center"]
+        assert computed(page, f"{cells}.align-right", "textAlign") == ["right"]
 
 
 def test_items_url_column_and_images_header_on_a_phone(ui: tuple[str, str]) -> None:

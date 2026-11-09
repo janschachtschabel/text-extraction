@@ -179,6 +179,8 @@ from text_extraction.convert import (
     decode_html_checked,
     page_links,
 )
+from text_extraction.convert.listings import listing_lists
+from text_extraction.convert.markup import append_to_body
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
@@ -2845,6 +2847,20 @@ class Pipeline:
                     )
                 except Exception as error:  # an extra: a bug in its rules leaves it null
                     _log.warning("page_type_failed", host=host, error_type=type(error).__name__)
+            if _wants_listing_lists(found_type, quality, self._settings.quality_min_words):
+                try:  # the link lists Trafilatura drops; a bug here keeps the content as it was
+                    lists = listing_lists(text, final_url, req.format, existing=conversion.content)
+                except Exception as error:
+                    lists = ""
+                    _log.warning("listing_lists_failed", host=host, error_type=type(error).__name__)
+                if lists:
+                    joined = (
+                        append_to_body(conversion.content, lists)
+                        if req.format == "html"
+                        else f"{conversion.content}\n\n{lists}"
+                    )
+                    content = strip_boilerplate(host, joined, self._rules)
+                    quality = assess(text, content)
         else:
             if fetched.content_type in _MARKDOWN_TYPES:
                 conversion = Conversion(
@@ -3091,6 +3107,15 @@ def _metadata_only(result: ExtractResult) -> bool:
         and result.media.transcript_source == "metadata_only"
         and not transcription_final(result)
     )
+
+
+def _wants_listing_lists(found_type: PageTypeInfo | None, quality: Quality, min_words: int) -> bool:
+    """A page of type ``listing`` gets its link lists when it is dense with links or its
+    content is thin: an article that is a ``listing`` by its pagination alone keeps its text
+    as it is."""
+    if found_type is None or found_type.type != "listing":
+        return False
+    return "link_density" in found_type.signals or quality.word_count < min_words
 
 
 def _html_lang(html: str) -> str | None:

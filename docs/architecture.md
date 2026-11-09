@@ -106,7 +106,9 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    key.
 5. **Convert:** the body's bytes decide what it is (`documents/sniff.py`, F1). HTML →
    Trafilatura (keep link-only lists of linked files, domain boilerplate rules, MathML →
-   LaTeX); `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
+   LaTeX); a page of type `listing` keeps the link lists of its content area (see "Link lists of
+   a listing page"). A Markdown table gets all its rows padded to the widest one.
+   `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
    to each output format as a document's Markdown is (issue #15). PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
@@ -2778,6 +2780,42 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
   (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
   failed. In results `error` therefore comes from soft 404s (`soft_404`).
+- **Link lists of a listing page (package 21).** Trafilatura drops a page that is mostly lists of
+  links, so a page whose `page_type.type` is `listing` gets the link lists of its content area
+  appended to `content` (`convert/listings.py`, `listing_lists`) when `link_density` is among its
+  signals or its content has fewer than `QUALITY_MIN_WORDS` words: an article that is a `listing`
+  by its pagination alone keeps its text as it is. The pipeline calls it for no other type, and
+  uploads, documents and media never get it. The collector walks the page in document
+  order and gathers headings and standalone links (a link that is most of its item, at most
+  `MAX_ITEM_CHARS` = 150 characters, `LINK_SHARE_OF_ITEM` = 0.8; the item is the closest `li`,
+  `div`, `p`, `dd`, `dt`, `td` or `th`, past inline wrappers such as `span`, so an inline link
+  inside a paragraph is never one; the item's text leaves out its nested `ul` and `ol`, so the
+  parent link of a nested list counts). A link wrapped in a `span` is standalone too when the
+  links of its item make up `LINK_SHARE_OF_ITEM` of the item's text, as in a tag list of
+  span-wrapped links; inside running text it is not. A heading inside a link (a card's title)
+  is part of the link's label, not a section heading. Chrome is left out: the landmarks of
+  `is_outside_content` (`nav`, the page's `header` and `footer`, a sidebar `aside`, their ARIA
+  roles, hidden elements) and any element whose class or id holds `footer`, `breadcrumb(s)`,
+  `cookie`, `consent`, `sidebar`, `social`, `share`, `skip`, `pagination`, `pager`, `menu`,
+  `feedback`, `nav`, `navbar`, `navigation` or `offcanvas`, except an element that holds the
+  first `<h1>` (a layout wrapper such as `has-sidebar`), and everything before the `<h1>`. Fewer
+  than `LISTING_MIN_LINKS` = 5 links add nothing. A link whose URL the content already holds
+  (matched whole: HTML entities read, `href` values and Markdown `<…>` targets taken whole,
+  balanced parentheses kept, and `%28`, `%29`, `%20` equal to `(`, `)` and a space) or whose text
+  is a whole line of the content (of an HTML result, a line of its text) is skipped; the page's
+  own URL (with a fragment or a trailing slash) is left out, and a repeated URL is listed once,
+  however it is spelled. A heading the content already holds is repeated only above links of
+  its own; as the parent of subsections it is left out. The added lists count
+  towards `QUALITY_MIN_WORDS`: a thin listing they bring over the minimum is `success` and is
+  not escalated as `content_too_short`. The lists are rendered in
+  the requested format (Markdown headings and lists with `[`, `]` escaped and space and
+  parentheses of the URL percent-encoded, plain text, HTML `<h2>`/`<ul>` inside `<body>`) and
+  appended before the PII stage. No new field, setting or warning code.
+  A page with a lesson payload in `script#embedded-topic` (KMap) ends with its attachment links
+  as such link lists, each link with its own URL, under headings in the page language
+  (`<html lang>` `de`: Erklärungen, Ideen, Anwendungen, Anhänge; else Explanations, Ideas,
+  Applications, Attachments). Only http(s) targets are listed, an attachment the lesson text
+  already links to is not, and in plain text each item is `label: url`.
 - **`link_category(url, text, kind)`** gives every entry of `links` (`/v1/extract`) and
   `site.links` a `category`: `download` for `kind: file`; for an external link `social` when its
   host is, or is below, a social network or video platform (`facebook.com`, `instagram.com`,
@@ -3070,7 +3108,10 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   mode, metadata, "Metadata, structured" (the `metadata` strategy with `UI_METADATA_SCHEMA`, a
   schema of schema.org and LRMI names) and "Describe images". A result shows its content as source
   and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
-  their alt text), a download, its metadata, structured values, images with alt texts and
+  their alt text; since package 21 tables, strikethrough and `$$LaTeX$$` as MathML from
+  latex2mathml on the server, with only MathML elements and presentation attributes (an
+  allowlist; colours only as a name or `#hex`), or as its escaped source in `<code>` when it
+  does not convert), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
   catalogues). The order and the look of this view (source first, then rendered) are superseded

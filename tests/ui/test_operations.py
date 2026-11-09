@@ -5,7 +5,9 @@ escaping, the shown REST answers and the curl line."""
 import base64
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
+from xml.etree.ElementTree import Element, SubElement
 
 import lxml.html
 import pytest
@@ -20,7 +22,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import ItemRun, JobItem
 from text_extraction.structured.types import StructuredOptions
-from text_extraction.ui import results
+from text_extraction.ui import markdown, results
 from text_extraction.ui.answers import screenshot_failure
 from text_extraction.ui.forms import (
     OPERATIONS,
@@ -562,6 +564,273 @@ def test_rendered_markdown_is_safe() -> None:
         ("https://auto.example/", "noopener noreferrer", "https://auto.example/"),
     ]
     assert "javascript:" not in "".join(a.get("href") for a in root.xpath("//a"))
+
+
+def test_render_markdown_renders_tables() -> None:
+    html = str(render_markdown("| Größe | Link |\n|---|---|\n| Länge | [x](javascript:alert(1)) |"))
+
+    assert "<table>" in html
+    assert "<th>Größe</th>" in html
+    assert "<td>Länge</td>" in html
+    assert "<a" not in html
+
+
+UI_CSS: Final = Path(markdown.__file__).parent / "static" / "ui.css"
+
+
+def test_table_alignment_is_a_class_not_a_style() -> None:
+    """The UI's CSP (``style-src 'self'``) blocks a ``style`` attribute: alignment is a class
+    that ui.css styles."""
+    html = str(render_markdown("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |"))
+
+    root = tree(html)
+    assert "style" not in html
+    classes = ["align-left", "align-center", "align-right", None]
+    assert [cell.get("class") for cell in root.xpath("//th")] == classes
+    assert [cell.get("class") for cell in root.xpath("//td")] == classes
+    css = UI_CSS.read_text(encoding="utf-8")
+    for side in ("left", "center", "right"):
+        assert f".align-{side}" in css
+        assert f"text-align: {side}" in css
+
+
+def test_double_dollar_latex_becomes_mathml() -> None:
+    html = str(render_markdown("Es gilt $$\\frac{a}{b}$$ hier."))
+
+    assert "<math" in html
+    assert "<mfrac>" in html
+    assert "$$" not in html
+    assert "\\frac" not in html
+    assert 'display="inline"' in html
+
+
+def test_an_equation_alone_in_its_paragraph_is_a_block() -> None:
+    html = str(render_markdown("$$x^2$$"))
+
+    assert 'display="block"' in html
+    assert "<msup>" in html
+
+
+def test_latex_inside_math_is_not_markdown() -> None:
+    html = str(render_markdown("$$a_1 * b_2 * c$$"))
+
+    assert "<math" in html
+    assert "<em>" not in html
+
+
+def test_broken_latex_stays_readable() -> None:
+    html = str(render_markdown("Vorher $$x^$$ <b>nachher</b>"))
+
+    assert "<math" not in html
+    assert "<code>x^</code>" in html
+    assert "&lt;b&gt;nachher&lt;/b&gt;" in html
+
+
+def test_broken_latex_is_escaped() -> None:
+    html = str(render_markdown("$$<script>alert(1)</script> {$$"))
+
+    assert "<math" not in html
+    assert tree(html).xpath("//script") == []
+    assert "<code>&lt;script&gt;alert(1)&lt;/script&gt; {</code>" in html
+
+
+def test_text_inside_math_is_escaped() -> None:
+    html = str(render_markdown("$$\\text{<b>fett</b> & <img src=x onerror=alert(1)>}$$"))
+
+    root = tree(html)
+    assert root.xpath("//math")
+    assert root.xpath("//b | //img") == []
+    assert "&lt;b&gt;fett&lt;/b&gt;\xa0&amp;\xa0&lt;img" in html  # \text keeps its spaces
+
+
+def test_mathml_carries_no_links_or_handlers() -> None:
+    html = str(render_markdown("$$\\href{javascript:alert(1)}{x}$$"))
+
+    root = tree(html)
+    attributes = [name.lower() for element in root.iter() for name in element.attrib]
+    assert "href" not in html
+    assert not [name for name in attributes if name.startswith("on") or "href" in name]
+    assert "javascript" not in html
+
+
+# The MathML presentation attributes latex2mathml 3.81.1 emits; nothing else may reach the page.
+MATHML_ATTRIBUTES: Final = frozenset(
+    {
+        "accent", "accentunder", "columnalign", "columnlines", "columnspacing", "depth", "display",
+        "displaystyle", "fence", "form", "height", "largeop", "linebreak", "linethickness",
+        "lspace", "mathbackground", "mathcolor", "mathsize", "mathvariant", "maxsize", "minsize",
+        "movablelimits", "notation", "rowalign", "rowlines", "rowspacing", "rspace",
+        "scriptlevel", "separator", "stretchy", "symmetric", "voffset", "width", "xmlns",
+    }
+)  # fmt: skip
+FORMULAS: Final = (
+    r"\frac{a}{b}",
+    r"\sqrt[3]{x}",
+    r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+    r"f(x)=\begin{cases}1&x>0\\0&\text{sonst}\end{cases}",
+    r"\begin{align}a&=b\\c&=d\end{align}",
+    r"\binom{n}{k}",
+    r"\overbrace{a+b}^{n}",
+    r"\mathbb{R}",
+    r"\cancel{x}",
+    r"\boxed{x}",
+    r"\xrightarrow{f}",
+    r"\begin{array}{|c|l|}\hline a&b\end{array}",
+    r"\fcolorbox{red}{blue}{x}",
+    r"\colorbox{#ff0}{x}",
+    r"\color{red}{x}",
+    r"\hspace{2em}\rule{1em}{2pt}\raisebox{1pt}{x}",
+    r"\sum_{i=1}^n \int_0^1 \lim_{x\to0} \left(x\right) \Big(",
+    r"\class{x}{y}",
+    r"\style{color:red}{y}",
+    r"\href{https://example.org/}{y}",
+)
+
+
+def attributes_of(html: str) -> list[tuple[str, str]]:
+    return [(name, value) for element in tree(html).iter() for name, value in element.items()]
+
+
+def test_mathml_has_no_class_or_style() -> None:
+    for latex in (r"\class{x}{y}", r"\style{color:red}{y}", r"\style{background:url(http://e)}{x}"):
+        html = str(render_markdown(f"$${latex}$$"))
+
+        assert "<math" in html, latex
+        assert not [name for name, _ in attributes_of(html) if name in {"class", "style"}], latex
+        assert "url(" not in html
+
+
+@pytest.mark.parametrize("latex", FORMULAS)
+def test_mathml_attributes_are_presentation_only(latex: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert "<math" in html
+    assert {name for name, _ in attributes_of(html)} <= MATHML_ATTRIBUTES
+
+
+@pytest.mark.parametrize(
+    ("latex", "kept"),
+    [
+        (r"\color{red}{x}", ("mathcolor", "red")),
+        (r"\color{#FF0000}{x}", ("mathcolor", "#FF0000")),
+        (r"\colorbox{#ff0}{x}", ("mathbackground", "#ff0")),
+        (r"\color{url(http://e)}{x}", None),
+        (r"\colorbox{red;x:y}{x}", None),
+        (r"\color{#12}{x}", None),
+    ],
+)
+def test_mathml_colours_are_plain(latex: str, kept: tuple[str, str] | None) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    colours = [(n, v) for n, v in attributes_of(html) if n in {"mathcolor", "mathbackground"}]
+    assert colours == ([kept] if kept else [])
+
+
+def test_namespaced_mathml_attributes_are_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    def converted(latex: str, display: str = "inline") -> Element:
+        math = Element("math", {"display": display, "xlink:href": "javascript:alert(1)"})
+        xlink = "{http://www.w3.org/1999/xlink}href"
+        mi = SubElement(math, "mi", {xlink: "javascript:alert(1)", "{urn:x}mathvariant": "x"})
+        mi.text = latex
+        return math
+
+    monkeypatch.setattr(markdown, "convert_to_element", converted)
+    html = str(render_markdown("$$y$$"))
+
+    assert attributes_of(html) == [("display", "block")]
+    assert "javascript" not in html
+    assert "<mi>y</mi>" in html
+
+
+def test_entities_written_in_latex_stay_text() -> None:
+    html = str(render_markdown(r"$$\text{&lt;b&gt;}\alpha$$"))
+
+    assert tree(html).xpath("//mtext")[0].text == "&lt;b&gt;"
+    assert "\u03b1" in html  # latex2mathml's character reference becomes the character
+
+
+@pytest.mark.parametrize(
+    "latex", [r"\hspace{-500em}x", r"\kern-500em x", r"\mspace{-200mu}x", r"\hspace{ -5em}x"]
+)
+def test_negative_mathml_spaces_are_dropped(latex: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert "<mspace" in html
+    spaces = [(n, v) for n, v in attributes_of(html) if n in {"width", "lspace", "rspace"}]
+    assert spaces == []
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [
+        r"\rule{1pt}{100000em}",
+        r"\rule{1pt}{51ex}",
+        r"\rule{1pt}{801px}",
+        r"\rule{1pt}{900pt}",
+        r"\rule{1pt}{100000}",
+        r"\rule{1pt}{-100000em}",
+    ],
+)
+def test_huge_mathml_heights_are_dropped(latex: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert "<mspace" in html
+    assert [(n, v) for n, v in attributes_of(html) if n in {"height", "depth"}] == []
+
+
+@pytest.mark.parametrize(
+    ("latex", "kept"), [(r"\rule{1pt}{50em}", "50em"), (r"\rule{1pt}{800pt}", "800pt")]
+)
+def test_sane_mathml_heights_stay(latex: str, kept: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert ("height", kept) in attributes_of(html)
+
+
+def test_a_formula_is_bounded_in_height_by_the_css() -> None:
+    css = UI_CSS.read_text(encoding="utf-8")
+    rule = css[css.index(".reading .markdown math {") :]
+    rule = rule[: rule.index("}")]
+
+    assert "max-height: 20em;" in rule
+    assert "overflow: auto;" in rule
+
+
+def test_positive_mathml_spaces_stay() -> None:
+    html = str(render_markdown(r"$$a\hspace{1em}b$$"))
+
+    assert ("width", "1em") in attributes_of(html)
+
+
+@pytest.mark.parametrize(
+    ("reference", "text"),
+    [
+        ("&#1;", "&#1;"),
+        ("&#x1F;", "&#x1F;"),
+        ("&#127;", "&#127;"),
+        ("&#x85;", "&#x85;"),
+        ("&#159;", "&#159;"),
+        ("&#9;", "\t"),
+        ("&#10;", "\n"),
+        ("&#13;", "\r"),
+        ("&#160;", "\u00a0"),
+    ],
+)
+def test_control_character_references_stay_text(reference: str, text: str) -> None:
+    element = Element("math")
+    SubElement(element, "mtext").text = reference
+
+    markdown._clean(element)
+
+    assert element[0].text == text
+
+
+def test_single_dollars_stay_text() -> None:
+    assert str(render_markdown("5 $ und 10 $")) == "<p>5 $ und 10 $</p>\n"
+
+
+def test_strikethrough_renders() -> None:
+    assert "<s>alt</s>" in str(render_markdown("~~alt~~ neu"))
 
 
 def test_markdown_shown_rendered_and_as_source(client: TestClient) -> None:
