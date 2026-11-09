@@ -5,8 +5,11 @@ their alt text, so a page's content can neither run a script nor load anything.
 Equations, which the extraction writes as ``$$LaTeX$$``, become MathML on the server (the UI's
 CSP runs no inline script): latex2mathml builds the element tree, which keeps only MathML
 elements and MathML presentation attributes (colours only as a name or ``#hex``, no negative
-space), and is serialised here so that every text and attribute value is escaped. LaTeX it
-cannot convert is shown as its escaped source in ``<code>``."""
+space, no huge height or depth), and is serialised here so that every text and attribute value
+is escaped. LaTeX it cannot convert is shown as its escaped source in ``<code>``.
+
+The CSP (``style-src 'self'``) blocks ``style`` attributes, so a table cell's alignment is a
+class (``align-left|center|right``) that ui.css styles."""
 
 import re
 from collections.abc import Sequence
@@ -50,6 +53,14 @@ _MATH_ATTRIBUTES: Final = frozenset(
 _COLOUR_ATTRIBUTES: Final = frozenset({"mathcolor", "mathbackground"})
 # The attributes of a space; a negative value is dropped.
 _SPACE_ATTRIBUTES: Final = frozenset({"width", "lspace", "rspace"})
+# The vertical extents of an element; a value larger than its unit's limit (about 50 em; any
+# unit not listed and a bare number count as em) or that is no length is dropped.
+_EXTENT_ATTRIBUTES: Final = frozenset({"height", "depth"})
+_EXTENT_LIMITS: Final = {"px": 800.0, "pt": 800.0, "pc": 67.0, "in": 9.0, "cm": 22.0, "mm": 220.0}
+_EXTENT_LIMIT: Final = 50.0
+_LENGTH: Final = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-z%]*)\s*", re.I)
+# A table cell's alignment as markdown-it writes it.
+_CELL_ALIGNMENT: Final = re.compile(r"text-align:(left|center|right)")
 # The control characters a reference may stand for: tab, line feed and carriage return.
 _KEPT_CONTROLS: Final = frozenset({0x09, 0x0A, 0x0D})
 # A CSS colour name or a #hex colour (3, 4, 6 or 8 digits).
@@ -113,11 +124,33 @@ def _math_display(state: StateCore) -> None:
             children[0].meta["display"] = "block"
 
 
+def _cell_open(
+    self: RendererHTML, tokens: Sequence[Token], idx: int, options: OptionsDict, env: EnvType
+) -> str:
+    """A table cell with its alignment as a class instead of a ``style``."""
+    token = tokens[idx]
+    style = token.attrs.pop("style", None)
+    if isinstance(style, str) and (match := _CELL_ALIGNMENT.fullmatch(style)):
+        token.attrJoin("class", f"align-{match[1]}")
+    return self.renderToken(tokens, idx, options, env)
+
+
+def _sane_extent(value: str) -> bool:
+    """Whether a height or depth is a length within its unit's limit."""
+    match = _LENGTH.fullmatch(value)
+    if match is None:
+        return False
+    number, unit = match.groups()
+    return abs(float(number)) <= _EXTENT_LIMITS.get(unit.lower(), _EXTENT_LIMIT)
+
+
 def _keeps(name: str, value: str) -> bool:
     if name in _COLOUR_ATTRIBUTES:
         return _COLOUR.fullmatch(value) is not None
     if name in _SPACE_ATTRIBUTES and value.strip().startswith("-"):
         return False  # a negative space pulls the formula over the text around it
+    if name in _EXTENT_ATTRIBUTES and not _sane_extent(value):
+        return False  # a huge rule stretches the reading card
     return name in _MATH_ATTRIBUTES
 
 
@@ -175,6 +208,8 @@ def _parser() -> MarkdownIt:
     renderer.rules["link_open"] = _link_open.__get__(renderer)
     renderer.rules["image"] = _image.__get__(renderer)
     renderer.rules["math"] = _math.__get__(renderer)
+    renderer.rules["th_open"] = _cell_open.__get__(renderer)
+    renderer.rules["td_open"] = _cell_open.__get__(renderer)
     return parser
 
 

@@ -5,6 +5,7 @@ escaping, the shown REST answers and the curl line."""
 import base64
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 from xml.etree.ElementTree import Element, SubElement
 
@@ -574,6 +575,25 @@ def test_render_markdown_renders_tables() -> None:
     assert "<a" not in html
 
 
+UI_CSS: Final = Path(markdown.__file__).parent / "static" / "ui.css"
+
+
+def test_table_alignment_is_a_class_not_a_style() -> None:
+    """The UI's CSP (``style-src 'self'``) blocks a ``style`` attribute: alignment is a class
+    that ui.css styles."""
+    html = str(render_markdown("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |"))
+
+    root = tree(html)
+    assert "style" not in html
+    classes = ["align-left", "align-center", "align-right", None]
+    assert [cell.get("class") for cell in root.xpath("//th")] == classes
+    assert [cell.get("class") for cell in root.xpath("//td")] == classes
+    css = UI_CSS.read_text(encoding="utf-8")
+    for side in ("left", "center", "right"):
+        assert f".align-{side}" in css
+        assert f"text-align: {side}" in css
+
+
 def test_double_dollar_latex_becomes_mathml() -> None:
     html = str(render_markdown("Es gilt $$\\frac{a}{b}$$ hier."))
 
@@ -738,6 +758,42 @@ def test_negative_mathml_spaces_are_dropped(latex: str) -> None:
     assert "<mspace" in html
     spaces = [(n, v) for n, v in attributes_of(html) if n in {"width", "lspace", "rspace"}]
     assert spaces == []
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [
+        r"\rule{1pt}{100000em}",
+        r"\rule{1pt}{51ex}",
+        r"\rule{1pt}{801px}",
+        r"\rule{1pt}{900pt}",
+        r"\rule{1pt}{100000}",
+        r"\rule{1pt}{-100000em}",
+    ],
+)
+def test_huge_mathml_heights_are_dropped(latex: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert "<mspace" in html
+    assert [(n, v) for n, v in attributes_of(html) if n in {"height", "depth"}] == []
+
+
+@pytest.mark.parametrize(
+    ("latex", "kept"), [(r"\rule{1pt}{50em}", "50em"), (r"\rule{1pt}{800pt}", "800pt")]
+)
+def test_sane_mathml_heights_stay(latex: str, kept: str) -> None:
+    html = str(render_markdown(f"$${latex}$$"))
+
+    assert ("height", kept) in attributes_of(html)
+
+
+def test_a_formula_is_bounded_in_height_by_the_css() -> None:
+    css = UI_CSS.read_text(encoding="utf-8")
+    rule = css[css.index(".reading .markdown math {") :]
+    rule = rule[: rule.index("}")]
+
+    assert "max-height: 20em;" in rule
+    assert "overflow: auto;" in rule
 
 
 def test_positive_mathml_spaces_stay() -> None:
