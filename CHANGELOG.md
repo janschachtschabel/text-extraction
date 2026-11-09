@@ -39,6 +39,14 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   (`BROWSER_UNBLOCK_ENABLED`). An admin whose server runs the browser without unblock mode is told
   so at the "Checks off" choice.
 - User guide (English and German), "Site rules": a section on sites behind a bot protection.
+- README (English and German): a compact list of the features, the endpoints and how to update.
+
+### Upgrade
+
+- A `.env` made from an earlier `.env.example` keeps `BROWSER_UNBLOCK_ENABLED=false`, and that
+  value wins over the new default: set it to `true` (or delete the line) to use unblock mode. A
+  `TEXT_EXTRACTION_VERSION` pinned in `.env` must be raised to `0.1.9` or removed. No other
+  setting changed.
 
 ## [0.1.8] - 2026-11-09
 

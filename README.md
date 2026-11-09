@@ -8,6 +8,68 @@ it. It also converts documents, transcribes audio and video, handles personal da
 structured fields, splits text into chunks and maps whole sites. It has a REST API, an MCP server
 and a playground in English and German.
 
+## Features
+
+- **Fast mode and browser mode.** A page is read over HTTP first (`fast`) and rendered in
+  Chromium when it needs it (`auto`: a JavaScript shell, a bot challenge, a soft 404 or too little
+  text), or always (`browser`). Cookie banners are declined automatically; page actions (`click`,
+  `type`, `scroll`, `accept_cookies`, ...), cookies and headers work in the browser.
+- **Clean text.** Markdown, plain text or HTML without navigation, footers and other boilerplate;
+  MathML becomes LaTeX; PHP error output that a site prints into its pages is removed and listed.
+- **Metadata.** Title, description, authors, dates, language, images, canonical URL, keywords,
+  schema.org and LRMI fields, the licence (Creative Commons and others, with its source and
+  confidence), the page type (such as `content`, `listing` or `imprint`) and the links with their
+  category.
+- **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, HTML, plain text and Markdown, by URL or
+  as an upload (up to 20 MB, PDFs up to 100 pages). With the OCR worker (Docling) also scans,
+  images (PNG, JPEG, TIFF, WebP, BMP) and OpenDocument files (ODT, ODS, ODP). The bytes decide the
+  type, not the declared `Content-Type`.
+- **Audio and video.** Subtitles and details of YouTube, Vimeo and the Mediatheken of ARD, ZDF,
+  arte and 3sat; YouTube's transcript view in the browser when the subtitles are blocked;
+  `<track>` texts of a page's players. With the ASR worker (faster-whisper, or an
+  OpenAI-compatible endpoint) a transcription of MP3, MP4, M4A, MOV, WebM, MKV, Ogg, WAV, FLAC and
+  AAC, by URL or as an upload (up to 25 MB).
+- **Screenshots.** PNG, JPEG or WebP of the whole page or the first screen, in any window size
+  from 320×240 to 3840×2160, scaled down on request.
+- **Personal data.** Persons, e-mail addresses, phone numbers, IBANs, credit cards and IP addresses
+  (and on request places, organisations and URLs) in German and English are masked, redacted,
+  hashed or annotated (Presidio and spaCy).
+- **Structured data and chunks.** The fields of a JSON schema from the metadata, CSS selectors
+  (XPath for admins), regular expressions or an LLM (any OpenAI-compatible endpoint); the page's tables;
+  chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`); image descriptions by the LLM.
+- **Many pages and whole sites.** Batches of up to 1,000 URLs as jobs (the playground also reads
+  a CSV or JSON file); the map of a site from its sitemaps and its link graph, with page types,
+  shown in the playground as a tree that marks the pages robots.txt forbids.
+- **Site rules.** robots.txt and the EU TDM opt-out (`enforce`, `report` or `ignore` per request),
+  a few requests per host at a time, an honest user agent. For sites that allowed extraction by
+  contract an admin can switch the checks off and use the unblock browser (see below).
+- **Interfaces.** A REST API with OpenAPI at `/docs`, jobs for long work, an MCP server with 11
+  tools and a playground at `/ui` in English and German.
+- **Operations.** Docker Compose and a Helm chart; stateless pods with the state in Valkey;
+  API keys with the roles `user` and `admin` and a rate limit per key; a result cache; an SSRF
+  guard and byte and time limits on every fetch; JSON logs, Prometheus metrics and health checks
+  on an internal port; trace headers passed through.
+
+## Endpoints
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /v1/extract` | One page, document or video by its URL. |
+| `POST /v1/extract/file` | An uploaded file (document, image, audio, video). |
+| `POST /v1/screenshot` | An image of a page. |
+| `POST /v1/structured` | The fields of a JSON schema from a page. |
+| `POST /v1/chunk` | A page or a text split into chunks. |
+| `POST /v1/batch` | Many URLs as one job. |
+| `POST /v1/site-structure` | The map of a site, as a job. |
+| `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | A job's state and results; cancel it. |
+| `GET /v1/jobs/{id}/artifacts/{name}` | A file of a job, such as a screenshot. |
+| `GET /v1/info` | The service's version and the key's role. |
+
+Every answer is the same result envelope (`status`, `error.code`, `error.retryable`,
+`upstream_status`, `mode_used`, timings): when the target fails, the API still answers 200 with
+`status: failed`. See [Usage](docs/user-guide/en/usage.md) and
+[Parameters](docs/user-guide/en/parameters.md).
+
 ## Status
 
 Prototype `v0.1.9`: packages 0-20 are merged (foundation, service skeleton, fast extraction, jobs
@@ -24,8 +86,8 @@ See [docs/packages.md](docs/packages.md#status) for the implementation packages 
 - **Respect the site's rules** (the default): robots.txt and the EU TDM opt-out are checked, every
   host gets only a few requests at a time, and the service sends its own honest user agent.
 - **Maximum extraction**, for sites that allowed extraction by contract: an admin sends
-  `"compliance": "ignore"`, and where the operator switched on `BROWSER_UNBLOCK_ENABLED`, a
-  stealth browser gets past bot protection, also after a plain 403, 429 or 503. It solves no
+  `"compliance": "ignore"`, and where the operator switched on `BROWSER_UNBLOCK_ENABLED` (on in
+  docker compose), a stealth browser gets past bot protection, also after a plain 403, 429 or 503. It solves no
   image captchas, uses no paid service and rotates no IP address; the per-host limits still
   apply. The checks can be switched per run (`compliance`: `enforce`, `report` or `ignore`); the
   playground offers "Respect the site's rules", "Check and report only" and "Checks off
@@ -60,6 +122,14 @@ see [Hostinger VPS](docs/user-guide/en/installation.md#hostinger-vps).
 `docker-compose.build.yml`, the local setup with uv, the optional workers (OCR, personal data,
 LLM, speech recognition), Kubernetes and the key settings.
 
+## Updating
+
+Deploy the `docker-compose.yml` of the new release (on Hostinger: redeploy from the repository
+URL), then `docker compose pull` and `docker compose up -d --wait`: the file names the release's
+images. A `TEXT_EXTRACTION_VERSION` in `.env` wins over that, so raise or remove it. Your `.env`
+is kept, and a value in it wins over a changed default: compare it with `.env.example` after an
+update. [CHANGELOG.md](CHANGELOG.md) lists every change and, under "Upgrade", what to do.
+
 ## Use cases
 
 - One page as text or Markdown, with its metadata: [One URL](docs/user-guide/en/single-url.md).
@@ -91,7 +161,7 @@ extracts the pages you pick: see [Part of a site](docs/user-guide/en/part-of-a-s
 
 ## MCP
 
-With `MCP_ENABLED=true` the service is an MCP server at `https://<host>/mcp` with 11 tools, for
+With `MCP_ENABLED=true` (on in docker compose) the service is an MCP server at `https://<host>/mcp` with 11 tools, for
 Claude Code, Claude Desktop and other clients, authenticated with an API key of the service: see
 [MCP](docs/user-guide/en/mcp.md).
 
