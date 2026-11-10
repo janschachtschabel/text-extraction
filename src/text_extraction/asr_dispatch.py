@@ -50,6 +50,9 @@ rerun moves it once more (the input and the draft are replaced). While the memor
 or the input budget is full, nothing is stored: the item keeps its draft with
 ``asr_unavailable`` (without a draft it fails ``rate_limited``, retryable), counted as
 ``memory_guard`` or ``input_budget``. The batch's caller key, if any, is the job's already.
+The browser worker moves a render's one page media the same way (M22, only ``page`` inputs,
+ruling R7); for a sync request's job (not a batch's) the move counts the job against
+``ASR_MAX_OPEN_PER_CLIENT`` first, as ``AsrDispatcher`` does (``open_limit``).
 
 **The ``asr`` pool's items (the contract of the ASR worker, M10).**
 
@@ -293,11 +296,15 @@ class AsrDispatcher(PoolDispatcher):
 
     def limit_message(self) -> str:
         """The error of media without a draft whose caller is at its open limit."""
-        limit = self._settings.asr_max_open_per_client
-        return (
-            f"At most {limit} transcriptions of a key may wait at a time. Retry when one has "
-            "finished."
-        )
+        return _limit_message(self._settings)
+
+
+def _limit_message(settings: Settings) -> str:
+    """The error of media without a draft whose caller is at ``ASR_MAX_OPEN_PER_CLIENT``."""
+    limit = settings.asr_max_open_per_client
+    return (
+        f"At most {limit} transcriptions of a key may wait at a time. Retry when one has finished."
+    )
 
 
 class AsrHandoff:
@@ -421,7 +428,11 @@ class AsrMove:
     ``guard`` is high or the input budget is full, keeps its draft with ``asr_unavailable``.
     ``body`` is the bytes of an uploaded file's item (empty for a URL). ``moved`` is True once
     the item is queued there; its runner then answers None. ``outcomes``
-    (``text_extraction_asr_dispatch_total``) counts those refusals."""
+    (``text_extraction_asr_dispatch_total``) counts those refusals. With ``open_limit`` (the
+    browser worker's move of a sync request's render, M22) the job counts as one of its owner's
+    ASR jobs first, as ``AsrDispatcher.submit`` counts it: over ``ASR_MAX_OPEN_PER_CLIENT``
+    nothing is stored and the item keeps its draft with ``asr_unavailable`` (``open_limit``).
+    A batch's items are bounded by the batch and are not counted."""
 
     def __init__(
         self,
@@ -435,6 +446,7 @@ class AsrMove:
         *,
         body: bytes = b"",
         outcomes: Counter | None = None,
+        open_limit: bool = False,
     ) -> None:
         self._store = store
         self._queue = queue
@@ -445,6 +457,7 @@ class AsrMove:
         self._url = url
         self._body = body
         self._outcomes = outcomes
+        self._open_limit = open_limit
         self.moved = False
 
     async def __call__(
@@ -454,12 +467,18 @@ class AsrMove:
             self._count("memory_guard")
             return asr_fallback(needed, without, ErrorCode.RATE_LIMITED, ASR_BUSY_MESSAGE)
         job_id, index = self._job.id, self._item.index
+        if self._open_limit and not await self._counted():
+            self._count("open_limit")
+            message = _limit_message(self._settings)
+            return asr_fallback(needed, without, ErrorCode.RATE_LIMITED, message)
         # Input, then draft, then the queue: the ASR worker may claim the item at once.
         try:
             await self._store.put_input(
                 job_id, index, self._body, needed.input, self._settings.asr_input_ttl_seconds
             )
         except InputBudgetExceeded:
+            if self._open_limit:
+                await self._store.drop_asr_job(self._job.owner, job_id)
             self._count("input_budget")
             return asr_fallback(needed, without, ErrorCode.RATE_LIMITED, ASR_BUSY_MESSAGE)
         if needed.draft is not None:
@@ -476,6 +495,18 @@ class AsrMove:
         await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
         self.moved = True
         return without  # not stored: the item is completed without a result
+
+    async def _counted(self) -> bool:
+        """Count the job as one of its owner's ASR jobs; False (and not counted) over the
+        limit. The finished ones are counted out first; a rerun of the item counts the same
+        job once."""
+        owner, job_id = self._job.owner, self._job.id
+        limit = self._settings.asr_max_open_per_client
+        await self._store.open_asr_jobs(owner)
+        if await self._store.add_asr_job(owner, job_id) > limit:
+            await self._store.drop_asr_job(owner, job_id)
+            return False
+        return True
 
     def _count(self, outcome: str) -> None:
         if self._outcomes is not None:

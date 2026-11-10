@@ -1353,45 +1353,59 @@ OpenAI-compatible endpoint): always a job, answered 202.
   its own; only `<track>` text is added inline. Package 22 adds one exception, for a thin page
   whose one media is the material (M22).
 - **M22, the one media of a thin page** (package 22: `Pipeline._with_page_media`, step 8b;
-  `pipeline_media.single_embed`, `page_transcribed`). With `transcribe: true`, a fetched or
-  rendered page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words whose players and
-  declared media are exactly one embed (no track of it read; not a bot challenge, soft 404 or login wall;
-  not a site crawl's page, a file a render ended on or a request with caller secrets) gets that
-  media's transcript after its text, as if the caller had sent the media's URL. The step runs
-  after the tracks (M8), on the page's final answer: in `auto` mode on the better of the fast
-  result and the render. The media runs in a sub-run of its own until 1 s before the deadline:
-  a file's head is fetched as a media URL is (its origin's compliance checks under the request's
-  mode, its host's turn, the SSRF guard on every hop, `MEDIA_HEAD_BYTES`) and must sniff as audio
-  or video; a platform player (a YouTube iframe) is probed as its canonical URL would be (step 2b:
-  its compliance checks and turn, the media children, the same tiers). Subtitles follow the
-  page's text at once, under the video's title; `media.transcript_source` is theirs. Media
-  without subtitles goes to the ASR hand-off as any media URL does (M9): an `AsrNeeded` whose
-  input says `page: true` and whose draft is the page's answer; the stand-in is that answer with
-  `asr_unavailable` and without its fingerprint. The ASR worker downloads the media as for any
-  media URL (`MEDIA_MAX_BYTES`; `MEDIA_UPLOAD_MAX_BYTES` is for uploads, whose bytes travel
-  through Valkey, and does not apply), and `transcribed_result` keeps the page: its title,
-  metadata, final URL, status code, compliance report and `mode_used`, with the transcript after
-  its text as `## Transcript` (as a track's), words, quality verdict and fingerprint of the
-  joined content, `transcript_source: asr` in its `media`; it is stored under the page's key.
-  No speech (`no_speech`) or a failure of the media's own (`asr_unavailable`, final) answers and
-  stores the page's own answer, so a later `transcribe` request is a hit; any other failure
-  answers it unstored. A stored page whose one media still owes a transcript is no cache hit for
-  a `transcribe` request. Without the service's ASR, for a user key while `ASR_ALLOW_USERS` is
-  false, when the media is blocked, fails or is no audio or video, or when it needs speech
-  recognition and the run has no hand-off, the page answers as without `transcribe`. A page with
-  more than one embed, or with `TRANSCRIBE_EMBED_BELOW_WORDS` words or more, keeps D4. The
-  threshold is its own (ruling R6), not `ATTACHMENTS_BELOW_WORDS`: the material of a video page
-  is the video and the caller asked for `transcribe`, so a page of a few short paragraphs around
-  it qualifies, while 300 keeps longer articles that merely contain a video out. The browser
-  worker moves such a render to the `asr` pool (`AsrMove`, its draft kept), and a sync request
-  with `transcribe` waits up to 60 s more for the render's job, so the route answers 202 with it
-  instead of abandoning it. An edu-sharing node's audio or video file on the render URL's host
-  (step 4b, R3) is handed on the same way whatever the node's words and `ATTACHMENTS_MAX`: the
-  request asked for the transcription itself, and `ASR_ENABLED`, `ASR_ALLOW_USERS` and
-  `transcribe` decide it; the node lists the file in `media.embeds`. Known limits: the
-  `X-ASR-Api-Key` of a sync request that renders first is not kept with its browser job (the
-  external backend then needs `ASR_EXTERNAL_API_KEY`); a page whose one media fails for good
-  (no media, blocked) is fetched again by each `transcribe` request.
+  `pipeline_media.single_embed`, `page_transcribed`). With `transcribe: true`, a fetched or rendered
+  page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words whose players and declared media
+  are one media (no track of it read; not a bot challenge, soft 404 or login wall; not a site
+  crawl's page, a file a render ended on or a request with caller secrets) gets that media's
+  transcript after its text, as if the caller had sent the media's URL. One media is one embed, or
+  files that differ in their extension only: the `<source>` formats of one `<video>` (`a.mp4`,
+  `a.webm`), which `media.embeds` still lists one by one, since a result does not keep which element
+  a URL came from; the first of them that sniffs as audio or video is the media. The step runs after
+  the tracks (M8), on the page's final answer: in `auto` mode on the better of the fast result and
+  the render. The media runs in a sub-run of its own until 1 s before the deadline: a file's head is
+  fetched as a media URL is (its origin's compliance checks under the request's mode, its host's
+  turn, the SSRF guard on every hop, `MEDIA_HEAD_BYTES`) and must sniff as audio or video; a
+  platform player (a YouTube iframe) is probed as its canonical URL would be (step 2b: its
+  compliance checks and turn, the media children, the same tiers). Subtitles follow the page's text
+  at once, under the video's title as a `##` (the transcript's headings one level down, so the
+  page's title stays the only top heading); `media.transcript_source` is theirs. Media without
+  subtitles goes to the ASR hand-off as any media URL does (M9): an `AsrNeeded` whose input says
+  `page: true` and whose draft is the page's answer; the stand-in is that answer with
+  `asr_unavailable` and without its fingerprint. The ASR worker downloads the media as for any media
+  URL (`MEDIA_MAX_BYTES`; `MEDIA_UPLOAD_MAX_BYTES` is for uploads, whose bytes travel through
+  Valkey, and does not apply), and `transcribed_result` keeps the page: its title, metadata, final
+  URL, status code, compliance report and `mode_used`, with the transcript after its text as `##
+  Transcript` (as a track's), words, quality verdict and fingerprint of the joined content,
+  `transcript_source: asr` in its `media`. It is stored under the page's cache key, as a platform
+  video's transcription is under its URL's: later requests without `transcribe`, and user keys while
+  `ASR_ALLOW_USERS` is false, are served the page with its transcript. A `page` input whose draft is
+  gone (dropped when its queue write failed) answers the transcript as media of its own, without a
+  fingerprint, and is never stored. No speech (`no_speech`) or a failure of the media's own
+  (`asr_unavailable`, final) answers and stores the page's own answer, so a later `transcribe`
+  request is a hit; any other failure answers it unstored. A stored page whose one media still owes
+  a transcript is no cache hit for a `transcribe` request. Without the service's ASR, for a user key
+  while `ASR_ALLOW_USERS` is false, when the media is blocked, fails or is no audio or video, or
+  when it needs speech recognition and the run has no hand-off, the page answers as without
+  `transcribe`. A page with more than one media, or with `TRANSCRIBE_EMBED_BELOW_WORDS` words or
+  more, keeps D4. The threshold is its own (ruling R6), not `ATTACHMENTS_BELOW_WORDS`: the material
+  of a video page is the video and the caller asked for `transcribe`, so a page of a few short
+  paragraphs around it qualifies, while 300 keeps longer articles that merely contain a video out.
+  The browser worker moves such a render to the `asr` pool (`AsrMove`, its draft kept), and only
+  such a page's media (ruling R7): an `auto` item whose own URL is a platform video or media file
+  answers as before (`asr_unavailable`, or `no_transcript_available` without a draft). A sync
+  request's move counts its job against `ASR_MAX_OPEN_PER_CLIENT` as `AsrDispatcher` does (at the
+  limit the page answers with `asr_unavailable`, counted `open_limit`); a batch's items are bounded
+  by the batch. A finished browser item drops the job's browser secrets but keeps the caller's ASR
+  key when the item moved or the job is a batch, for the ASR worker and the batch's other items. A
+  sync request with `transcribe` waits up to `MAX_WAIT_SECONDS` (60 s) more for the render's job, so
+  the route answers 202 with it instead of abandoning it. An edu-sharing node's audio or video file
+  on the render URL's host (step 4b, R3) is handed on the same way whatever the node's words and
+  `ATTACHMENTS_MAX`: the request asked for the transcription itself, and `ASR_ENABLED`,
+  `ASR_ALLOW_USERS` and `transcribe` decide it; the node lists the file in `media.embeds`. A node's
+  file on another host is listed only, and its stored result is a hit for a `transcribe` request.
+  Known limits: the `X-ASR-Api-Key` of a sync request that renders first is not kept with its
+  browser job (the external backend then needs `ASR_EXTERNAL_API_KEY`); a page whose one media fails
+  for good (no media, blocked) is fetched again by each `transcribe` request.
 - **D5, PyAV and FFmpeg: an LGPL build (a).** The PyPI wheel of PyAV bundles GPL `libx264` and
   `libx265`, which its metadata does not show. The ASR image builds PyAV from its sdist against
   a pinned BtbN `lgpl-shared` FFmpeg (9.0, `--enable-version3`, no `--enable-gpl` or

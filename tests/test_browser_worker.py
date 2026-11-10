@@ -676,6 +676,122 @@ async def test_without_transcribe_the_rendered_page_is_the_result() -> None:
     assert (await harness.asr_queue.counts()).pending == 0
 
 
+def thin_video_harness(**overrides: Any) -> Harness:
+    from tests.test_pipeline_media import MP4, ONE_VIDEO, VIDEO, FakeMediaFetcher, probe, thin_page
+
+    overrides.setdefault("asr_enabled", True)
+    return Harness(
+        FakeRenderer(rendered(thin_page(ONE_VIDEO))),
+        answers={VIDEO: fetched(VIDEO, MP4, content_type="video/mp4")},
+        media=FakeMediaFetcher(probe()),
+        **overrides,
+    )
+
+
+TRANSCRIBE = JobOptions(mode="browser", compliance="enforce", transcribe=True)
+
+
+@scenario
+@pytest.mark.parametrize("kind", ["extract", "batch"])
+async def test_a_moved_item_keeps_the_jobs_asr_key(kind: JobKind) -> None:
+    """The ASR worker needs the caller's ``X-ASR-Api-Key`` (a batch's serves its other items
+    too): a move drops the browser's secrets only."""
+    harness = thin_video_harness()
+    job_id = await harness.submit(TRANSCRIBE, kind=kind)
+    await harness.store.put_asr_key(job_id, "asr-key-1", whole_job=kind == "batch")
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 1
+    assert await harness.store.asr_key(job_id) == "asr-key-1"
+
+
+@scenario
+async def test_a_batch_item_rendered_without_a_move_keeps_the_batchs_asr_key() -> None:
+    """Its other items may still need it; it goes with the batch's last result."""
+    harness = Harness(FakeRenderer(rendered(ARTICLE)))
+    job_id = await harness.submit(BROWSER, kind="batch", urls=[PAGE, f"{PAGE}?part=2"])
+    await harness.store.put_asr_key(job_id, "asr-key-1", whole_job=True)
+
+    await harness.process_next()
+
+    assert (await harness.result(job_id)).status == "success"
+    assert await harness.store.asr_key(job_id) == "asr-key-1"
+
+
+@scenario
+async def test_a_sync_jobs_move_counts_as_one_of_the_callers_asr_jobs() -> None:
+    harness = thin_video_harness()
+    job_id = await harness.submit(TRANSCRIBE)
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 1
+    assert await harness.store.open_asr_jobs(USER.name) == 1
+    assert job_id
+
+
+@scenario
+async def test_at_the_open_limit_the_page_answers_without_its_transcript() -> None:
+    """``ASR_MAX_OPEN_PER_CLIENT`` bounds the moves of a sync request's render as it bounds
+    ``AsrDispatcher``: at the limit nothing moves, and the page answers with ``asr_unavailable``
+    and without its fingerprint."""
+    harness = thin_video_harness(asr_max_open_per_client=1)
+    waiting = await harness.store.create("extract", USER, TRANSCRIBE, [PAGE])
+    await harness.store.add_asr_job(USER.name, waiting)
+    job_id = await harness.submit(TRANSCRIBE)
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 0
+    result = await harness.result(job_id)
+    assert result.status != "failed"
+    assert result.data is not None
+    assert result.data.title == "Film lesson"
+    assert "asr_unavailable" in result.data.warnings
+    assert result.data.fingerprint is None
+    assert await harness.store.open_asr_jobs(USER.name) == 1
+    assert (
+        harness.registry.get_sample_value(
+            "text_extraction_asr_dispatch_total", {"outcome": "open_limit"}
+        )
+        == 1
+    )
+
+
+@scenario
+async def test_a_batchs_moves_are_not_counted_against_the_open_limit() -> None:
+    harness = thin_video_harness(asr_max_open_per_client=1)
+    waiting = await harness.store.create("extract", USER, TRANSCRIBE, [PAGE])
+    await harness.store.add_asr_job(USER.name, waiting)
+    await harness.submit(TRANSCRIBE, kind="batch")
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 1
+
+
+@scenario
+async def test_a_youtube_url_in_the_browser_pool_is_not_moved() -> None:
+    """R7: the browser pool moves only the one media of a page (``meta.page``); a platform
+    video's own URL (read by an ``auto`` item's fast step here) keeps today's answer, its
+    metadata with ``asr_unavailable``."""
+    from tests.test_pipeline_media import YT, FakeMediaFetcher, probe
+
+    harness = Harness(media=FakeMediaFetcher(probe(track=None)), asr_enabled=True)
+    options = JobOptions(mode="auto", compliance="enforce", transcribe=True)
+    job_id = await harness.submit(options, urls=[YT])
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 0
+    result = await harness.result(job_id)
+    assert result.data is not None
+    assert result.data.title == "Photosynthesis for kids"
+    assert "asr_unavailable" in result.data.warnings
+    assert await harness.store.get_input(job_id, 0, MediaInputMeta) is None
+
+
 # --- the process ------------------------------------------------------------------------------
 
 

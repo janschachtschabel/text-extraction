@@ -15,7 +15,12 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from tests.fakes import PAGE
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import DISPATCH_OUTCOMES, BrowserDispatcher, Handover
-from text_extraction.browser_options import ArtifactRef, BrowserCookie, ClickAction
+from text_extraction.browser_options import (
+    MAX_WAIT_SECONDS,
+    ArtifactRef,
+    BrowserCookie,
+    ClickAction,
+)
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobOptions
@@ -306,7 +311,8 @@ async def test_wait_gives_up_after_render_timeout(unblock: bool) -> None:
 @scenario
 async def test_a_transcribe_wait_outlasts_the_routes_longest_wait() -> None:
     """With ``asr`` the render may move on to the ``asr`` pool (M22): the wait lasts until the
-    route answers 202 with the job (its longest wait is 60 s), never abandoning it before."""
+    route answers 202 with the job (its longest wait is ``MAX_WAIT_SECONDS``), never abandoning
+    it before."""
     time = FakeTime()
     parts = Parts(time=time)
     job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
@@ -317,7 +323,8 @@ async def test_a_transcribe_wait_outlasts_the_routes_longest_wait() -> None:
 
     assert got is None
     waited = time.now - 101.0
-    assert SETTINGS.browser_timeout_seconds + 5 + 60 <= waited
+    assert MAX_WAIT_SECONDS == 60
+    assert SETTINGS.browser_timeout_seconds + 5 + MAX_WAIT_SECONDS <= waited
 
 
 @scenario

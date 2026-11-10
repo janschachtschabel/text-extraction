@@ -45,6 +45,7 @@ from typing import Literal
 from prometheus_client import CollectorRegistry
 
 from text_extraction.auth import Principal
+from text_extraction.browser_options import MAX_WAIT_SECONDS
 from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
@@ -65,9 +66,9 @@ __all__ = [
 # Seconds on top of the render deadline that a request waits for the result after the claim.
 _RESULT_MARGIN_SECONDS = 5
 # With ``transcribe``, seconds more: the longest wait of a sync request (``wait_seconds`` and its
-# defaults are at most 60 s), so a render that moved on to the ``asr`` pool (M22) is answered
-# 202 by the route before this wait gives the job up.
-_ASR_WAIT_SECONDS = 60.0
+# defaults are at most ``MAX_WAIT_SECONDS``), so a render that moved on to the ``asr`` pool (M22)
+# is answered 202 by the route before this wait gives the job up.
+_ASR_WAIT_SECONDS = float(MAX_WAIT_SECONDS)
 
 type BrowserJobKind = Literal["extract", "screenshot"]
 

@@ -435,22 +435,44 @@ def without_asr(
 # --- the one media of a thin page (M22) ------------------------------------------------------
 
 
-def single_embed(result: ExtractResult, below_words: int | None) -> MediaEmbed | None:
-    """The one media of ``result``'s page that a ``transcribe`` request transcribes (M22): the
-    page's players and declared media are exactly one embed, no track of it was read, and the
-    page has fewer than ``below_words`` words (``TRANSCRIBE_EMBED_BELOW_WORDS``; None: any
+def single_embed(result: ExtractResult, below_words: int | None) -> list[MediaEmbed] | None:
+    """The one media of ``result``'s page that a ``transcribe`` request transcribes (M22), as
+    its sources in the listed order: the page's players and declared media are one media (one
+    embed, or the alternative sources of one file, ``_one_media``), no track of it was read, and
+    the page has fewer than ``below_words`` words (``TRANSCRIBE_EMBED_BELOW_WORDS``; None: any
     number, for an edu-sharing node's file). None for any other result, a bot challenge, a
     soft 404 or a login wall among them."""
     media, quality = result.media, result.quality
     if media is None or media.platform != "html5" or media.transcript_source is not None:
         return None
-    if len(media.embeds) != 1 or quality is None or result.content is None:
+    if quality is None or result.content is None:
         return None
     if below_words is not None and quality.word_count >= below_words:
         return None
     if quality.bot_challenge or quality.soft_404 or quality.login_wall or quality.challenge_status:
         return None
-    return media.embeds[0]
+    return _one_media(media.embeds)
+
+
+def _one_media(embeds: list[MediaEmbed]) -> list[MediaEmbed] | None:
+    """``embeds`` when they are one media: a single embed, or files that differ in their
+    extension only (the ``<source>`` formats of one ``<video>``, such as ``a.mp4`` and
+    ``a.webm``: ``page_media`` lists each source, and a result does not keep which element
+    it came from). None otherwise."""
+    if len(embeds) == 1:
+        return embeds
+    if not embeds or any(embed.kind != "file" for embed in embeds):
+        return None
+    if len({_without_extension(embed.url) for embed in embeds}) != 1:
+        return None
+    return embeds
+
+
+def _without_extension(url: str) -> tuple[str, str, str, str]:
+    parts = urlsplit(url)
+    head, slash, name = parts.path.rpartition("/")
+    stem = name.rpartition(".")[0] or name
+    return parts.scheme, parts.netloc.lower(), f"{head}{slash}{stem}", parts.query
 
 
 def page_media_handoff(
@@ -499,8 +521,9 @@ def page_with_subtitles(
     page: ExtractResult, transcript: ExtractResult, settings: Settings
 ) -> ExtractResult:
     """``page`` with the subtitle transcript of its one platform video (M22) after its text: the
-    transcript as the platform path wrote it (under the video's title), its source and language
-    in the page's ``media``. CPU-bound: runs on the conversion pool."""
+    transcript as the platform path wrote it, its headings one level down (the video's title
+    is a ``##``: the page's title stays the only top heading), its source and language in the
+    page's ``media``. CPU-bound: runs on the conversion pool."""
     found = transcript.media
     base = page.media or MediaInfo(platform="html5", transcript_source=None)
     media = base.model_copy(
@@ -509,7 +532,7 @@ def page_with_subtitles(
             "transcript_language": found.transcript_language if found is not None else None,
         }
     )
-    section = _as_section(transcript.content or "", page.format)
+    section = _demoted(_as_section(transcript.content or "", page.format), page.format)
     return page_with_transcript(page, section, media, settings)
 
 
@@ -545,6 +568,19 @@ def page_without_transcript(page: ExtractResult, warning: str, *, kept: bool) ->
             "fingerprint": page.fingerprint if kept else None,
         }
     )
+
+
+_MARKDOWN_HEADING: Final = re.compile(r"^(#{1,5}) ", re.MULTILINE)
+_HTML_HEADING: Final = re.compile(r"<(/?)h([1-5])\b", re.IGNORECASE)
+
+
+def _demoted(section: str, fmt: OutputFormat) -> str:
+    """``section`` (our own Markdown or HTML) with each heading one level down, to ``h6``."""
+    if fmt == "markdown":
+        return _MARKDOWN_HEADING.sub(r"#\1 ", section)
+    if fmt == "html":
+        return _HTML_HEADING.sub(lambda found: f"<{found[1]}h{int(found[2]) + 1}", section)
+    return section
 
 
 def _as_section(content: str, fmt: OutputFormat) -> str:

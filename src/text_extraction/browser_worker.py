@@ -28,9 +28,13 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    write fails, nothing is stored and the item fails ``internal_error``, retryable (B7).
    With ``transcribe: true`` and the service's ASR, the one media of a rendered thin page
    (M22) moves the item to the ``asr`` pool (``asr_dispatch.AsrMove``: the media's input and
-   the page's answer as the item's draft); the item is then completed here without a result;
+   the page's answer as the item's draft); the item is then completed here without a result.
+   Only a page's one media moves (R7): an ``auto`` item's request URL that is itself media
+   answers as before, and a sync request's job counts against ``ASR_MAX_OPEN_PER_CLIENT``;
 4. deletes the secrets and the item's draft once the item has its outcome, also when the run
-   failed (but not the draft of an item that moved to the ``asr`` pool). An item that is given
+   failed (but not the draft of an item that moved to the ``asr`` pool). The caller's ASR key
+   stays for an item that moved and for a batch, whose other items need it (``JobStore.
+   drop_browser_secrets``). An item that is given
    back to run again (a gate refusal it is deferred for, a Valkey error, a cancelled shutdown)
    keeps them for that run; the secrets expire on their own after their short TTL, a draft
    with the job.
@@ -212,6 +216,7 @@ class BrowserRunner:
                 artifacts=JobArtifacts(self._store, job.id, self._guard),
                 draft=draft,
                 asr_handoff=transcription,
+                asr_pages_only=True,  # a request URL's own media is not moved (R7)
             )
             finished = True
             if transcription is not None and transcription.moved:
@@ -228,7 +233,9 @@ class BrowserRunner:
             raise
         finally:
             if finished:
-                await self._drop_secrets(job.id)
+                # The ASR key stays for an item that moved (the ASR worker reads it) and for a
+                # batch (its other items need it; it goes with the batch's last result).
+                await self._drop_secrets(job.id, keep_asr_key=moved or job.kind == "batch")
                 if not moved:
                     await self._drop_draft(job.id, item.index)
 
@@ -244,12 +251,17 @@ class BrowserRunner:
             item,
             url,
             outcomes=self._asr_outcomes,
+            open_limit=job.kind != "batch",  # a sync request's render, as AsrDispatcher counts
         )
 
-    async def _drop_secrets(self, job_id: str) -> None:
-        """Delete the secrets; a failure leaves them to their TTL rather than the result."""
+    async def _drop_secrets(self, job_id: str, *, keep_asr_key: bool) -> None:
+        """Delete the secrets (with ``keep_asr_key`` the browser's only); a failure leaves them
+        to their TTL rather than the result."""
         try:
-            await self._store.drop_secrets(job_id)
+            if keep_asr_key:
+                await self._store.drop_browser_secrets(job_id)
+            else:
+                await self._store.drop_secrets(job_id)
         except (RedisError, OSError) as error:
             _log.warning("job_secrets_not_dropped", error_type=type(error).__name__)
 
