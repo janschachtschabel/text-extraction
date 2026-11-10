@@ -62,6 +62,12 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, stric
         "`ignore` also allows unblock mode where the operator enabled it: a browser that gets "
         "past bot protection, for sites that allowed extraction by contract.",
     )
+    unblock: bool = Field(
+        default=True,
+        description="With `compliance: ignore` (admins) and `BROWSER_UNBLOCK_ENABLED`: `false` "
+        "renders with the standard browser instead of the unblock browser, and a refusal or bot "
+        "wall is answered as without unblock mode. Ignored otherwise.",
+    )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
@@ -198,6 +204,7 @@ _URL_ONLY_OPTIONS = (
     "mode",
     "links",
     "compliance",
+    "unblock",
     "cache",
     "actions",
     "cookies",
@@ -229,9 +236,10 @@ class ChunkRequest(ExtractRequest):
         description="The text to chunk, at most `DOCUMENT_MAX_BYTES` as UTF-8 (413 over it). It "
         "is handled as an upload of `text/markdown` or `text/plain` (`text_type`), as by "
         "`POST /v1/extract/file`: `mode_used: upload`, no fetch, no cache. With `text` the "
-        "options that belong to a page (`mode`, `links`, `compliance`, `cache`, `actions`, "
-        "`cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, "
-        "`transcribe`, `languages`, `describe_images`) are 422. Exactly one of `url` and `text`.",
+        "options that belong to a page (`mode`, `links`, `compliance`, `unblock`, `cache`, "
+        "`actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, "
+        "`ocr`, `transcribe`, `languages`, `describe_images`) are 422. Exactly one of `url` and "
+        "`text`.",
     )
     text_type: Literal["markdown", "plain"] = Field(
         default="markdown",

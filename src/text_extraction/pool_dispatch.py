@@ -127,6 +127,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         metadata=req.metadata,
         links=req.links,
         compliance=compliance,
+        unblock=req.unblock,
         cache=req.cache,
         screenshot=req.screenshot,
         full_page=req.full_page,

@@ -331,6 +331,22 @@ def test_axe_finds_no_violations_with_maximum_extraction_on(
         expect(page.locator("#extract-access-ignore")).to_be_enabled()
         expect(page.locator("#extract-mode-fast-hint")).to_be_visible()
         found = _axe(page, "extract tab, maximum extraction on")
+        # The "Unblock browser" box (package 22) shows under "ignore" only, ticked, and the
+        # keyboard reaches and toggles it.
+        box = page.locator("#extract-unblock")
+        expect(box).to_be_hidden()
+        page.locator("#extract-access-ignore").check()
+        expect(box).to_be_visible()
+        expect(box).to_be_checked()
+        expect(page.locator("label[for=extract-unblock]")).to_have_text(
+            translate(language, "access.unblock_box")
+        )
+        box.focus()
+        page.keyboard.press("Space")
+        expect(box).not_to_be_checked()
+        found += _axe(page, "extract tab, unblock box shown")
+        page.locator("#extract-access-report").check()
+        expect(box).to_be_hidden()
 
     assert found == [], "\n".join(found)
     assert console == []

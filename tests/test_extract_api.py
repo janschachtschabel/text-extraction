@@ -1759,6 +1759,72 @@ def test_bot_wall_escalates_only_for_admin_ignore_with_unblock(
             assert case.keys("job*") == []
 
 
+def test_an_admins_unblock_false_keeps_the_bot_wall_out_of_the_browser() -> None:
+    """Package 22: ``unblock: false`` switches unblock mode off for one request, so a bot wall
+    is answered as without it."""
+    case = BrowserCase(
+        {PAGE: fetched(body=CHALLENGE_PAGE, status=403)}, browser_unblock_enabled=True
+    )
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "compliance": "ignore", "unblock": False},
+            headers=ADMIN_AUTH,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == "bot_protection"
+        assert response.json()["data"]["mode_used"] == "fast"
+        assert worker.seen == []
+
+
+@pytest.mark.parametrize(
+    ("auth", "compliance", "unblock"),
+    [
+        (AUTH, None, False),
+        (AUTH, "report", False),
+        (AUTH, "report", True),
+        (ADMIN_AUTH, "report", False),
+    ],
+)
+def test_unblock_outside_unblock_mode_is_accepted_and_changes_nothing(
+    auth: dict[str, str], compliance: str | None, unblock: bool
+) -> None:
+    """Review Focus 5: a user's ``unblock`` (either value), or one with ``compliance: report``,
+    is accepted and answers as the same request without it."""
+    answers = {PAGE: fetched(body=CHALLENGE_PAGE, status=403)}
+    body: dict[str, Any] = {"url": PAGE}
+    if compliance is not None:
+        body["compliance"] = compliance
+    case = BrowserCase(answers, browser_unblock_enabled=True)
+    with TestClient(case.app) as client, case.worker() as worker:
+        plain = client.post("/v1/extract", json={**body, "cache": False}, headers=auth)
+        switched = client.post(
+            "/v1/extract", json={**body, "cache": False, "unblock": unblock}, headers=auth
+        )
+
+        assert plain.status_code == switched.status_code == 200
+        assert switched.json()["status"] == plain.json()["status"]
+        assert switched.json()["error"] == plain.json()["error"]
+        assert switched.json()["data"]["mode_used"] == "fast"
+        assert worker.seen == []
+
+
+@pytest.mark.parametrize(("sent", "stored"), [({}, True), ({"unblock": False}, False)])
+def test_unblock_reaches_the_browser_job_of_an_escalation(
+    sent: dict[str, Any], stored: bool
+) -> None:
+    """Package 22: the escalated job (fast, then browser) carries the request's ``unblock``."""
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_unblock_enabled=True)
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "compliance": "ignore", **sent}, headers=ADMIN_AUTH
+        )
+
+        assert response.json()["data"]["mode_used"] == "browser"
+        assert worker.seen[0].job.options.unblock is stored
+
+
 def test_secrets_never_in_job_view_or_logs() -> None:
     # Review Focus 5: headers, cookies and action text reach the worker and nothing else.
     case = BrowserCase()

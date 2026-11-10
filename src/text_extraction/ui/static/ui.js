@@ -20,6 +20,9 @@
  * Extract form: the "Also take a screenshot" box needs the browser, so it is disabled and
  * unticked while the mode is "fast" (the "never" choice), and the hint that says why is shown.
  *
+ * "Site rules": the "Unblock browser" box (package 22) is shown only while the step "ignore" is
+ * chosen.
+ *
  * Copy (P15-R1, P15-S4): a result's "Copy" button (data-action=copy) is rendered hidden and
  * shown only where the clipboard API exists (a secure context); without this script it stays
  * hidden. It writes the text of the result's first pre.content (the source shown) to the
@@ -868,12 +871,36 @@
     });
   });
 
+  // The "Unblock browser" box (package 22) shows only while the chosen "Site rules" step is
+  // "ignore" (the radio's data-mode). Without this script it keeps the state it was rendered
+  // with; the service reads the box under "ignore" only.
+  function syncUnblockBox(form) {
+    var group = form.querySelector("[data-unblock]");
+    var radio = form.querySelector("input[name=access]:checked");
+    if (group && radio) {
+      group.hidden = radio.getAttribute("data-mode") !== "ignore";
+    }
+  }
+
+  function initUnblockBoxes() {
+    document.querySelectorAll("form [data-unblock]").forEach(function (group) {
+      var form = group.closest("form");
+      if (form) {
+        syncUnblockBox(form);
+      }
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", initUnblockBoxes);
+  document.addEventListener("htmx:load", initUnblockBoxes);
+
   document.addEventListener("change", function (event) {
     var radio = event.target;
     if (radio instanceof HTMLInputElement && radio.name === "access" && radio.form) {
       if (radio.form.classList.contains("tree-form")) {
         applyTreeMode(radio.form);
       }
+      syncUnblockBox(radio.form);
     }
   });
 

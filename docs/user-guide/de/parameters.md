@@ -24,6 +24,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Datumsangaben, Bilder, schema.org- und LRMI-Felder). |
 | `links` | Boolean | `false` | Die Links der Seite mitliefern, jeden mit `kind` und `category` (wohin er führt, etwa `imprint` oder `social`). |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
+| `unblock` | Boolean | `true` | Nur mit `compliance: ignore` (Admins) und eingeschaltetem Entsperrmodus: `false` lädt die Seite im Standard-Browser statt im Entsperr-Browser (für eine Website, auf der er instabil läuft). Sonst ohne Wirkung. Siehe [Website-Regeln](site-rules.md#maximale-extraktion). |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. Die Aktion `evaluate` (JavaScript) ist nur für Admin-Schlüssel; andere Schlüssel erhalten 403. |
@@ -58,6 +59,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `metadata` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `links` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Wie bei `POST /v1/extract`. |
+| `unblock` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `cache` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `actions` | Liste von Objekten | leer | Wie bei `POST /v1/extract`. |
@@ -85,7 +87,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | nicht gesetzt | Die Seite, die extrahiert und zerlegt wird, mit den Optionen von `POST /v1/extract`. |
-| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
+| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `unblock`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
 | `text_type` | `markdown` oder `plain` | `markdown` | Was `text` ist; Markdown-Chunks tragen ihren Überschriftenpfad. |
 | `chunking` | Objekt | Pflicht | Wie zerlegt wird. Siehe [`chunking`](#chunking). |
 | `format` | `markdown` oder `text` | `markdown` | Das Format von `content` und der Chunks. |
@@ -93,6 +95,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | `metadata` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `links` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Wie bei `POST /v1/extract`. |
+| `unblock` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `cache` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `actions` | Liste von Objekten | leer | Wie bei `POST /v1/extract`. |
@@ -126,6 +129,7 @@ Browser-Optionen und `wait_seconds`.
 | `metadata` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `links` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Wie bei `POST /v1/extract`. |
+| `unblock` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `cache` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `transcribe` | Boolean | `false` | Wie bei `POST /v1/extract`. |
@@ -179,6 +183,7 @@ Ein Bild einer Seite, im Browser gerendert: ein PNG in einem Fenster von 1920×1
 | `cookies` | Liste von Objekten | leer | Wie bei `POST /v1/extract`. |
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Wie bei `POST /v1/extract`. |
+| `unblock` | Boolean | `true` | Wie bei `POST /v1/extract`. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Wie bei `POST /v1/extract`: Nach so vielen Sekunden wird die Aufnahme ein Job. |
 
 <!-- request: POST /v1/screenshot -->

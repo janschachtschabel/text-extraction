@@ -9,7 +9,8 @@ a render itself are in ``browser_render.py``.
 the next page: after ``BROWSER_RECYCLE_AFTER_PAGES`` pages (the old browser is closed once its
 pages end) and after the browser went away (crashed, killed). The pages that were in flight then
 fail alone; the renderer turns that into ``internal_error``, retryable. A semaphore lets
-``BROWSER_CONCURRENCY`` pages run at once; pools of both drivers can share one (``slots``).
+``BROWSER_CONCURRENCY`` pages run at once; pools of both drivers can share one (``slots``). A pool
+may have a cap of its own within it (``limit``): the unblock pool's ``BROWSER_UNBLOCK_CONCURRENCY``.
 Each page gets its own browser context with its own proxy credentials, so the proxy counts and
 caps its bytes, and the context and its proxy context are always closed with the page. Closing
 never holds a render past its deadline: a page waits ``_CLOSE_WAIT_SECONDS`` for its context,
@@ -22,7 +23,8 @@ recycling and the crash handling are shared. A ``persistent`` launcher (Patchrig
 each page in a persistent context, which is its own browser: the pool then launches one for
 every page (launch reason ``page``), outside its lock so launches run side by side, and a page
 whose browser goes away fails alone as before. Pools of both drivers share one semaphore, so
-``BROWSER_CONCURRENCY`` caps the pages of both.
+``BROWSER_CONCURRENCY`` caps the pages of both; the unblock pool's own ``limit`` caps its pages
+(each a headful Chrome) at ``BROWSER_UNBLOCK_CONCURRENCY`` within that (package 22).
 
 **Renderer.** ``ChromiumRenderer`` takes a page from the pool and runs ``render_page`` in it;
 the unblock renderer (``browser_unblock.py``) is one with other options and a step after the
@@ -291,6 +293,7 @@ class BrowserPool:
         *,
         launcher: Launcher,
         slots: asyncio.Semaphore | None = None,
+        limit: asyncio.Semaphore | None = None,
     ) -> None:
         self._settings = settings
         self._proxy = proxy
@@ -299,6 +302,8 @@ class BrowserPool:
         self._slots = (
             slots if slots is not None else asyncio.Semaphore(settings.browser_concurrency)
         )
+        # This pool's own cap within the shared slots (the unblock pool's, package 22).
+        self._limit = limit
         self._lock = asyncio.Lock()
         self._current: _Slot | None = None
         self._open: set[_Slot] = set()  # launched and not closed yet
@@ -338,8 +343,12 @@ class BrowserPool:
     @asynccontextmanager
     async def page(self, options: RenderOptions) -> AsyncIterator[PooledPage]:
         """A fresh page in its own context, with ``options.cookies`` set. The context and its
-        proxy context are closed when the block ends, whatever happened."""
-        async with self._slots:
+        proxy context are closed when the block ends, whatever happened. A pool with a ``limit``
+        takes its turn there first, then a shared slot: a page waiting for its pool's limit
+        holds no slot another pool's page could use, and both are always taken in that order,
+        so they cannot wait for each other. ``async with`` gives both back on every way out."""
+        own_turn = self._limit if self._limit is not None else contextlib.nullcontext()
+        async with own_turn, self._slots:
             if self._stopped:
                 raise RuntimeError("the browser pool is stopped")
             driver = self.driver

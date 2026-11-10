@@ -271,6 +271,123 @@ def test_forged_ignore_from_a_user_starts_no_job(view: str, fields: dict[str, An
     assert fetcher.calls == []
 
 
+# --- the unblock box (package 22) ----------------------------------------------------------------
+
+# The forms that can render a page, so the box applies (a site crawl never renders).
+WITH_BOX = {name: prefix for name, prefix in WITH_CHOICE.items() if name != "site-structure"}
+
+
+def unblock_box(root: Any, prefix: str) -> Any:
+    found = root.xpath(f"//input[@id='{prefix}-unblock']")
+    return found[0] if found else None
+
+
+def box_shown(box: Any) -> bool:
+    """Whether the box's group is shown (it is hidden while another step is chosen)."""
+    group = box.xpath("ancestor::*[@data-unblock]")[0]
+    return group.get("hidden") is None
+
+
+def test_unblock_box_sends_false_only_when_unticked_under_ignore() -> None:
+    offered = {"url": PAGE, "unblock_offered": "enforce"}
+    for op in ("extract", "structured", "screenshot", "chunk"):
+        unticked = build_body(op, {**offered, "access": "ignore"})
+        assert unticked["unblock"] is False, op
+        ticked = build_body(op, {**offered, "access": "ignore", "unblock": "on"})
+        assert "unblock" not in ticked, op
+        # Another step: the box is hidden and sends nothing.
+        for step in ("default", "report", ""):
+            assert "unblock" not in build_body(op, {**offered, "access": step}), (op, step)
+    assert build_body("batch", {"unblock_offered": "enforce", "access": "ignore"})["unblock"] is (
+        False
+    )
+    # Without the box on the form (no unblock browser for this caller) nothing is sent.
+    assert "unblock" not in build_body("extract", {"url": PAGE, "access": "ignore"})
+    # The deployment's default step stands for ``ignore`` where that is the default.
+    lax = {"url": PAGE, "unblock_offered": "ignore", "access": "default"}
+    assert build_body("extract", lax)["unblock"] is False
+    assert "unblock" not in build_body("extract", {**lax, "unblock": "on"})
+    # A text has no page: no box, nothing sent.
+    text = {"text": "Some text.", "access": "ignore", "unblock_offered": "enforce"}
+    assert "unblock" not in build_body("chunk", text)
+    # Options may not give it too once the box was unticked.
+    with pytest.raises(OptionsError, match=r"^unblock is given twice\.$"):
+        build_body("extract", {**offered, "access": "ignore", "options": '{"unblock": true}'})
+
+
+def test_unblock_box_only_where_the_offer_has_unblock(admin_client: TestClient) -> None:
+    admin = app_root(admin_client, ADMIN)
+    user = app_root(admin_client, AUTH)
+    for name, prefix in WITH_BOX.items():
+        box = unblock_box(admin, prefix)
+        assert box is not None, name
+        assert box.get("type") == "checkbox"
+        assert box.get("name") == "unblock"
+        assert box.get("checked") is not None  # checked by default
+        assert not box_shown(box)  # the default step is not "ignore"
+        assert texts(admin, f"//label[@for='{prefix}-unblock']") == [en("access.unblock_box")]
+        assert described(admin, box) == [en("hint.access.unblock_box", value="unblock: false")]
+        assert unblock_box(user, prefix) is None, name
+    assert unblock_box(admin, "site") is None
+    with running(api_keys=KEYS, browser_enabled=True) as client:  # unblock browser off
+        admin = app_root(client, ADMIN)
+        for prefix in WITH_BOX.values():
+            assert unblock_box(admin, prefix) is None
+
+
+def test_unblock_box_shows_under_the_ignore_step(admin_client: TestClient) -> None:
+    preview = tree(
+        admin_client.post(
+            "/ui/run/batch-urls",
+            data={"urls": f"{PAGE}\nnot a url", "access": "ignore"},
+            headers={**HX, **ADMIN},
+        ).text
+    )
+    box = unblock_box(preview, "preview")
+    assert box is not None
+    assert box_shown(box)
+    assert box.get("checked") is not None
+    # An unticked box stays unticked in the preview of the same form.
+    unticked = tree(
+        admin_client.post(
+            "/ui/run/batch-urls",
+            data={
+                "urls": f"{PAGE}\nnot a url",
+                "access": "ignore",
+                "unblock_offered": "enforce",
+            },
+            headers={**HX, **ADMIN},
+        ).text
+    )
+    box = unblock_box(unticked, "preview")
+    assert box is not None
+    assert box.get("checked") is None
+    with running(api_keys=KEYS, compliance_default="ignore", **BOTH_ON) as client:
+        admin = app_root(client, ADMIN)
+        box = unblock_box(admin, "extract")
+        assert box is not None
+        assert box_shown(box)  # the default step is "ignore" here
+
+
+def test_unblock_box_follows_the_language(admin_client: TestClient) -> None:
+    german = app_root(admin_client, {**ADMIN, "X-UI-Language": "de"})
+    assert texts(german, "//label[@for='extract-unblock']") == ["Unblock-Browser"]
+    assert en("access.unblock_box") == "Unblock browser"
+
+
+def test_unticked_box_reaches_rest(
+    admin_client: TestClient, forwarded: list[tuple[str, dict[str, Any]]]
+) -> None:
+    sent = {**HX, **ADMIN}
+    answer = admin_client.post(
+        "/ui/run/batch-urls",
+        data={"urls": PAGE, "access": "ignore", "unblock_offered": "enforce"},
+        headers=sent,
+    )
+    assert answer.status_code == 200
+    assert [(path, body.get("unblock")) for path, body in forwarded] == [("/v1/batch", False)]
+
+
 # --- the browser fallback ------------------------------------------------------------------------
 
 

@@ -59,6 +59,25 @@ maximum extraction only for a site whose owner allowed it.
   `empty_content`). The answer is the better of the HTTP and the browser result.
 - `data.unblocked` is true when the page was loaded this way.
 
+### Switch the unblock browser off for one request
+
+Maximum extraction is on by default wherever its three conditions hold. Where the unblock browser
+is unstable for a site (it is a full Chrome with a window, far heavier than the normal browser),
+an admin sends `"unblock": false` with `compliance: ignore`: the checks stay off, but the page
+loads in the normal browser and falls back to it as without unblock mode. `data.unblocked` is then
+false. `unblock` is accepted from every key and with every compliance mode, and changes nothing
+there: `"unblock": true` never gives a user key the unblock browser. `POST /v1/extract`,
+`/v1/structured`, `/v1/chunk` (for a URL), `/v1/screenshot` and `/v1/batch` take it; MCP tools take
+it in `options`.
+
+```json
+{"url": "https://example.org/partner-page", "compliance": "ignore", "unblock": false}
+```
+
+The operator caps how many unblock pages one browser worker renders at once with
+`BROWSER_UNBLOCK_CONCURRENCY` (default 2, at most `BROWSER_CONCURRENCY`); a further one waits for
+its turn.
+
 ### What it does not do
 
 - It solves no image or puzzle captchas: such a page fails with `bot_protection` and the warning
@@ -141,6 +160,8 @@ checks for each run and not only for the whole deployment:
   URLs.
 - One site run: `compliance` in the body of `POST /v1/site-structure`. It applies to the whole run.
 - MCP: `compliance` goes into `options` of the tool.
+- `unblock: false` next to `compliance: ignore` keeps the checks off but uses the normal browser
+  (see [Switch the unblock browser off for one request](#switch-the-unblock-browser-off-for-one-request)).
 
 A key may only choose what it is allowed to: an admin chooses all three values; another key
 chooses `enforce` or `report` while the operator allows overrides (`COMPLIANCE_ALLOW_OVERRIDE`),
@@ -178,6 +199,11 @@ shows the compliance mode, and the badge "maximum extraction (unblocked)" when `
 true. A `bot_protection` error comes with a note on the ways past the protection (left out after
 an unblocked render), and an admin whose server runs the browser without unblock mode reads at
 "Checks off" that `BROWSER_UNBLOCK_ENABLED` is off.
+
+Where "Checks off" is maximum extraction, the box "Unblock browser" appears under it while that
+step is chosen (not in **Site structure**, which never uses the browser). It is ticked by default.
+Untick it to load the page in the normal browser: the form then sends `unblock: false`. Under any
+other step the box is hidden and sends nothing.
 
 In the site tree, URLs that the site's rules block are marked; see
 [Part of a site](part-of-a-site.md#in-the-playground).

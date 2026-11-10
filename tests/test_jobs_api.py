@@ -879,6 +879,24 @@ def stored_job(api: Api, job_id: str) -> JobRecord | None:
     return api.run(lambda valkey: JobStore(valkey, api.settings).get(job_id))
 
 
+def test_batch_stores_the_unblock_option_in_the_job_options(api: Api) -> None:
+    """Package 22: a batch's ``unblock`` reaches its items; the default is not stored, so the
+    options of a job without it stay as they were."""
+    off = api.batch([PAGE], headers=ROOT, compliance="ignore", unblock=False).json()["data"]["id"]
+    default = api.batch([PAGE], headers=ROOT, compliance="ignore").json()["data"]["id"]
+    user = api.batch([PAGE], unblock=False).json()["data"]["id"]  # accepted, changes nothing
+
+    records = [stored_job(api, job_id) for job_id in (off, default, user)]
+
+    assert [record.options.unblock for record in records if record is not None] == [
+        False,
+        True,
+        False,
+    ]
+    assert records[1] is not None
+    assert "unblock" not in records[1].options.model_dump()
+
+
 def test_batch_stores_the_ocr_option_in_the_job_options(api: Api) -> None:
     chosen = api.batch([PAGE], ocr="never").json()["data"]["id"]
     default = api.batch([PAGE]).json()["data"]["id"]

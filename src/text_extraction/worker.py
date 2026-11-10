@@ -406,7 +406,9 @@ class ExtractRunner:
             return None
         if self._browser_queue is None or job.options.mode != "auto":
             return envelope
-        unblock = unblock_for(principal, job.options.compliance, self._settings)
+        unblock = unblock_for(
+            principal, job.options.compliance, self._settings, requested=job.options.unblock
+        )
         if not (
             needs_browser(envelope, unblock=unblock)
             or transcript_panel_applies(envelope, self._settings, transcribe=request.transcribe)

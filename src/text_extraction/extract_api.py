@@ -878,7 +878,7 @@ async def _extraction(
     if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
         return None  # the Docling or ASR worker writes the job's result
     settings: Settings = state.settings
-    unblock = unblock_for(principal, compliance, settings)
+    unblock = unblock_for(principal, compliance, settings, requested=body.unblock)
     escalates = needs_browser(fast, unblock=unblock) or transcript_panel_applies(
         fast, settings, transcribe=body.transcribe
     )
@@ -1044,7 +1044,7 @@ async def _in_browser(
     finally:
         if handover.claimed == "pool":
             handover.settle(job_id)
-    unblock = unblock_for(principal, compliance, state.settings)
+    unblock = unblock_for(principal, compliance, state.settings, requested=body.unblock)
     try:
         result = await dispatcher.wait(
             job_id,

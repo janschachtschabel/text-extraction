@@ -55,6 +55,12 @@ class BatchRequest(BaseModel, extra="forbid", strict=True):
         description="`enforce`, `report` or `ignore` (admins only); default: the operator's. "
         "`ignore` also allows unblock mode where the operator enabled it.",
     )
+    unblock: bool = Field(
+        default=True,
+        description="As for `/v1/extract`: with `compliance: ignore` (admins) and "
+        "`BROWSER_UNBLOCK_ENABLED`, `false` renders with the standard browser instead of the "
+        "unblock browser. Ignored otherwise.",
+    )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
@@ -105,6 +111,10 @@ class JobOptions(BaseModel, extra="forbid"):
     metadata: bool = True
     links: bool = False
     compliance: ComplianceMode
+    # The request's ``unblock`` (package 22). Left out of a dump at its default, so stored jobs
+    # and their ``ExtractRequest`` stay as they were, and a worker of the release before reads
+    # the jobs of a request without it.
+    unblock: bool = Field(default=True, exclude_if=lambda value: value is True)
     cache: bool = True
     screenshot: bool = False
     full_page: bool = True

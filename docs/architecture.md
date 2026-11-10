@@ -439,7 +439,8 @@ optional rate limit.
   hold: the caller is an admin, the resolved compliance mode is `ignore`, and the operator set
   `BROWSER_UNBLOCK_ENABLED`. A user key never gets it, not even where the operator's default is
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
-  renders in the standard browser.
+  renders in the standard browser. An admin's request may switch it off with `unblock: false`
+  (package 22, B14); `unblock: true` never unlocks it for anyone else.
 - **Optional features for admin keys only (package 19, P19-D1 b, 2026-11-07):**
   `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default true) keep
   a feature the service has for admin keys (`feature_access.py`). A user key that asks for it by
@@ -912,6 +913,25 @@ while `BROWSER_ENABLED` is false, are unchanged.
     challenge keeps that answer out of the host's backoff.
   - Escalation: under unblock `auto` also escalates per B5, and on a plain refusal or an
     unfinished HTML result per B16. The result carries `unblocked: true`.
+  - Per request (package 22; Jan, 2026-11-10: "selectable where there is a crash risk; by
+    default it stays on"): the request field `unblock` (default `true`) on `/v1/extract`,
+    `/v1/structured`, `/v1/chunk`, `/v1/screenshot` and `/v1/batch`. `false` switches unblock mode
+    off for that request where it would apply (`escalation.unblock_for(..., requested=False)`): it
+    renders in the standard browser and escalates as without unblock mode. A user's `unblock`,
+    or one under another compliance mode, is accepted and changes nothing. The job options store
+    it only when `false`, the browser and extract workers read it from there (batch, escalation
+    and hand-off alike). The result cache keys `unblock: false` apart only where it changed the
+    renderer (an admin's `ignore` with `BROWSER_UNBLOCK_ENABLED`, not `mode: fast`); every other
+    key stays as it was. The playground shows the box "Unblock browser" (ticked) under the step
+    `ignore` where the offer has unblock; unticked it sends `unblock: false`. The MCP tools take no
+    `compliance`, so no `unblock` either.
+  - Own concurrency (package 22): `BROWSER_UNBLOCK_CONCURRENCY` (default 2, capped at
+    `BROWSER_CONCURRENCY`) unblock pages at once per browser worker; four headful Chromes at once
+    crashed a GitHub runner. The unblock pool takes a turn of its own semaphore first, then a
+    slot of the shared `BROWSER_CONCURRENCY` semaphore, always in that order, inside
+    `BrowserPool.page`'s `async with`, so both are given back on every way out and a waiting
+    unblock page holds no slot a standard page could use. The wait counts against the render
+    deadline, as the wait for a shared slot does.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or
   third-party solver services (Jan: nothing paid). Partners are advised to add an allowlist rule
   in their bot protection instead: a secret header (sent with `headers`) or our egress IP. No IP

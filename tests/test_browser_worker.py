@@ -62,8 +62,8 @@ from text_extraction.media.pool import MediaFetcher
 from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_media import MediaInputMeta, asr_available
-from text_extraction.render import ClearanceStore, Renderer
-from text_extraction.result_cache import ResultCache
+from text_extraction.render import ClearanceStore, Renderer, RenderOptions
+from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.scheduler import Claim, FairQueue
 from text_extraction.server import _server
 from text_extraction.settings import Settings
@@ -501,6 +501,256 @@ async def test_unblock_only_for_admin_ignore_jobs(
     result = await harness.result(job_id)
     assert result.data is not None
     assert result.data.unblocked is unblocked
+
+
+@pytest.mark.parametrize(
+    ("owner", "compliance", "requested", "unblocked"),
+    [
+        (ADMIN, "ignore", True, True),
+        # Package 22: an admin's ``unblock: false`` renders in the standard browser.
+        (ADMIN, "ignore", False, False),
+        # Review Focus 5: a user's or a ``report`` job's ``unblock`` changes nothing.
+        (ADMIN, "report", False, False),
+        (USER, "ignore", True, False),
+        (USER, "report", False, False),
+    ],
+)
+@scenario
+async def test_unblock_false_renders_with_the_standard_browser(
+    owner: Principal, compliance: str, requested: bool, unblocked: bool
+) -> None:
+    harness = Harness(browser_unblock_enabled=True, compliance_default=compliance)
+    options = JobOptions(mode="browser", compliance=compliance, unblock=requested)  # type: ignore[arg-type]
+    job_id = await harness.submit(options, owner=owner)
+
+    await harness.process_next()
+
+    assert len(harness.unblock_renderer.calls) == (1 if unblocked else 0)
+    assert len(harness.renderer.calls) == (0 if unblocked else 1)
+    result = await harness.result(job_id)
+    assert result.data is not None
+    assert result.data.unblocked is unblocked
+
+
+@pytest.mark.parametrize(
+    ("owner", "compliance", "requested", "keyed"),
+    [
+        (ADMIN, "ignore", True, False),  # the default keeps the key of the release before
+        (ADMIN, "ignore", False, True),  # the standard browser's result is kept apart
+        (ADMIN, "report", False, False),  # changed nothing, so not part of the key
+        (USER, "report", False, False),
+    ],
+)
+@scenario
+async def test_unblock_joins_the_cache_key_only_where_it_changed_the_renderer(
+    owner: Principal, compliance: str, requested: bool, keyed: bool
+) -> None:
+    harness = Harness(
+        FakeRenderer(rendered(ARTICLE)),
+        unblock_renderer=FakeRenderer(rendered(ARTICLE)),
+        browser_unblock_enabled=True,
+        compliance_default=compliance,
+    )
+    options = JobOptions(mode="browser", compliance=compliance, unblock=requested)  # type: ignore[arg-type]
+    await harness.submit(options, owner=owner)
+
+    await harness.process_next()
+
+    base: dict[str, Any] = {
+        "mode": "browser",
+        "format": "markdown",
+        "metadata": True,
+        "links": False,
+        "compliance": compliance,
+    }
+    expected = cache_key(PAGE, {**base, "unblock": False} if keyed else base)
+    assert sorted(await harness.valkey.keys("res:*")) == [expected.encode()]
+
+
+# --- the unblock browser's own concurrency (package 22) ---------------------------------------
+
+
+class FakeTraffic:
+    username = "u"
+    password = "p"  # noqa: S105 - a fake proxy context's
+
+    def close(self) -> None:
+        pass
+
+
+class FakeProxy:
+    url = "http://127.0.0.1:1"
+
+    def open_context(self) -> FakeTraffic:
+        return FakeTraffic()
+
+
+class FakePage:
+    def on(self, _event: str, _handler: Any) -> None:
+        pass
+
+    def is_closed(self) -> bool:
+        return False
+
+
+class FakeContext:
+    def __init__(self) -> None:
+        self.pages = [FakePage()]
+
+    def on(self, _event: str, _handler: Any) -> None:
+        pass
+
+    async def add_cookies(self, _cookies: Any) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class FakeLauncher:
+    """A persistent launcher (as Patchright's) whose contexts are fakes."""
+
+    persistent = True
+    user_agent = "Fake/1.0"
+
+    def __init__(self, driver: str, *, fail: bool = False) -> None:
+        self.driver = driver
+        self.fail = fail
+
+    async def open(self, _browser: Any, _proxy: Any, _options: Any) -> tuple[None, FakeContext]:
+        await asyncio.sleep(0)
+        if self.fail:
+            raise RuntimeError("no context")
+        return None, FakeContext()
+
+    async def release(self, _context: Any) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+
+def fake_pools(settings: Settings) -> tuple[BrowserPool, BrowserPool]:
+    """A standard and an unblock pool as ``create_browsers`` wires them, on fake launchers."""
+    proxy, registry = cast(EgressProxy, FakeProxy()), CollectorRegistry()
+    standard, unblock = browser_worker.browser_pools(
+        settings,
+        proxy,
+        registry,
+        cast(Any, FakeLauncher("playwright")),
+        cast(Any, FakeLauncher("patchright")),
+    )
+    return standard, unblock
+
+
+class Peak:
+    """Pages open at once, by pool, and the most ever seen."""
+
+    def __init__(self) -> None:
+        self.now: dict[str, int] = {}
+        self.most: dict[str, int] = {}
+        self.release = asyncio.Event()
+
+    async def hold(self, pool: BrowserPool, name: str) -> None:
+        async with pool.page(RenderOptions()):
+            self.now[name] = self.now.get(name, 0) + 1
+            self.most[name] = max(self.most.get(name, 0), self.now[name])
+            await self.release.wait()
+            self.now[name] -= 1
+
+
+@scenario
+async def test_unblock_pages_are_capped_by_their_own_limit() -> None:
+    settings = make_settings(
+        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=2
+    )
+    standard, unblock = fake_pools(settings)
+    peak = Peak()
+
+    tasks = [asyncio.create_task(peak.hold(unblock, "unblock")) for _ in range(4)]
+    await asyncio.sleep(0.05)
+    assert peak.now == {"unblock": 2}  # two wait for the unblock limit
+    # The waiting unblock pages hold no shared slot: two standard pages still open.
+    tasks += [asyncio.create_task(peak.hold(standard, "standard")) for _ in range(3)]
+    await asyncio.sleep(0.05)
+    assert peak.now == {"unblock": 2, "standard": 2}
+    peak.release.set()
+    async with asyncio.timeout(5):
+        await asyncio.gather(*tasks)
+
+    assert peak.most == {"unblock": 2, "standard": 2}
+    assert peak.now == {"unblock": 0, "standard": 0}
+
+
+@scenario
+async def test_standard_pages_keep_browser_concurrency() -> None:
+    settings = make_settings(
+        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=1
+    )
+    standard, _ = fake_pools(settings)
+    peak = Peak()
+
+    tasks = [asyncio.create_task(peak.hold(standard, "standard")) for _ in range(6)]
+    await asyncio.sleep(0.05)
+    assert peak.now == {"standard": 4}
+    peak.release.set()
+    async with asyncio.timeout(5):
+        await asyncio.gather(*tasks)
+    assert peak.most == {"standard": 4}
+
+
+@scenario
+async def test_the_unblock_limit_is_capped_at_browser_concurrency() -> None:
+    settings = make_settings(
+        browser_concurrency=2, browser_unblock_enabled=True, browser_unblock_concurrency=5
+    )
+    _, unblock = fake_pools(settings)
+    peak = Peak()
+
+    tasks = [asyncio.create_task(peak.hold(unblock, "unblock")) for _ in range(4)]
+    await asyncio.sleep(0.05)
+    assert peak.now == {"unblock": 2}
+    peak.release.set()
+    async with asyncio.timeout(5):
+        await asyncio.gather(*tasks)
+
+
+@scenario
+async def test_the_unblock_limit_is_released_on_every_error() -> None:
+    """A page whose context fails to open, a render that raises and a cancelled wait all give
+    their turn back: the next unblock page still opens."""
+    settings = make_settings(
+        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=1
+    )
+    standard, unblock = fake_pools(settings)
+    launcher = cast(FakeLauncher, unblock._launcher)
+
+    launcher.fail = True
+    with pytest.raises(RuntimeError, match="no context"):
+        async with unblock.page(RenderOptions()):
+            pass
+    launcher.fail = False
+    with pytest.raises(ValueError, match="render failed"):
+        async with unblock.page(RenderOptions()):
+            raise ValueError("render failed")
+    holder = Peak()
+    held = asyncio.create_task(holder.hold(unblock, "unblock"))
+    await asyncio.sleep(0.05)
+    waiting = asyncio.create_task(holder.hold(unblock, "unblock"))
+    await asyncio.sleep(0.05)
+    waiting.cancel()  # its deadline passed while it waited for the limit
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    holder.release.set()
+    async with asyncio.timeout(5):
+        await held
+        async with unblock.page(RenderOptions()):
+            pass
+        async with standard.page(RenderOptions()):
+            pass
+    assert unblock._limit is not None
+    assert not unblock._limit.locked()
+    assert not unblock._slots.locked()
 
 
 # --- the shared worker behaviour on pool ``browser`` ------------------------------------------
@@ -1010,9 +1260,13 @@ def test_browser_worker_wiring() -> None:
         assert pipeline._clearance is not None
         assert pipeline._timeout_seconds == settings.browser_timeout_seconds
         assert pipeline._cache._guard is parts.guard
-        # The two drivers share one semaphore: BROWSER_CONCURRENCY pages in all.
+        # The two drivers share one semaphore: BROWSER_CONCURRENCY pages in all; the unblock
+        # pool has its own limit on top (BROWSER_UNBLOCK_CONCURRENCY, package 22).
         standard, unblock = parts.browsers.pools
         assert standard._slots is unblock._slots
+        assert standard._limit is None
+        assert unblock._limit is not None
+        assert unblock._limit._value == settings.browser_unblock_concurrency
         assert parts.browsers.xvfb is not None
         assert parts.graceful_seconds >= settings.browser_unblock_timeout_seconds + 5
         assert runner._asr_queue is None  # without ASR, nothing moves to the asr pool

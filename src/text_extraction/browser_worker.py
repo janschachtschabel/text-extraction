@@ -17,7 +17,8 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
 2. rebuilds the request from the job's options and the secrets. A ``screenshot`` job renders in
    ``browser`` mode with ``screenshot`` and without metadata. The job's owner is the principal,
    so an admin owner's ``evaluate`` actions run, and unblock mode applies only to an admin's
-   ``compliance: ignore`` job while ``BROWSER_UNBLOCK_ENABLED`` (B14, R9). An ``auto`` request
+   ``compliance: ignore`` job while ``BROWSER_UNBLOCK_ENABLED`` (B14, R9), unless the job's
+   ``unblock: false`` switched it off (package 22). An ``auto`` request
    with secrets always renders (R8), one with a draft is compared with it (a YouTube video's
    details whose subtitles could not be read try its transcript view instead, P13-S2), one
    without either runs the fast step first;
@@ -46,7 +47,10 @@ fetcher's children and egress proxy, for platform videos), starts the egress pro
 for unblock mode with a headful Chrome: Patchright reads ``DISPLAY`` when its driver starts)
 and the browser pools: Playwright's Chromium, and with ``BROWSER_UNBLOCK_ENABLED``
 Patchright's Chrome. Both pools share one semaphore, so ``BROWSER_CONCURRENCY`` pages run at
-once in all; the worker runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). The
+once in all; the worker runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). Unblock
+pages (each a headful Chrome) also have a limit of their own, ``BROWSER_UNBLOCK_CONCURRENCY``
+(at most ``BROWSER_CONCURRENCY``): a further one waits for it, within its render deadline, without
+holding a slot, so standard pages keep the rest (package 22). The
 pipeline's deadline is ``BROWSER_TIMEOUT_SECONDS`` (an unblock render has
 ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``). After the loops have stopped, the pools, Xvfb and the
 proxy stop, in that order; the document pool and the media fetcher stop with the process. A
@@ -72,7 +76,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from text_extraction.asr_dispatch import ASR_OUTCOMES, ASR_POOL, AsrMove, asr_queue
-from text_extraction.browser import BrowserPool, ChromiumRenderer, PlaywrightLauncher
+from text_extraction.browser import BrowserPool, ChromiumRenderer, Launcher, PlaywrightLauncher
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets
 from text_extraction.browser_proxy import EgressProxy
 from text_extraction.browser_unblock import PatchrightLauncher, UnblockRenderer, Xvfb
@@ -325,17 +329,42 @@ async def _quietly(stopping: Awaitable[None], part: str) -> None:
         _log.warning("browser_stop_failed", part=part, error_type=type(error).__name__)
 
 
+def unblock_concurrency(settings: Settings) -> int:
+    """Unblock pages at once: ``BROWSER_UNBLOCK_CONCURRENCY``, at most ``BROWSER_CONCURRENCY``."""
+    return min(settings.browser_unblock_concurrency, settings.browser_concurrency)
+
+
+def browser_pools(
+    settings: Settings,
+    proxy: EgressProxy,
+    registry: CollectorRegistry,
+    standard: Launcher,
+    unblock: Launcher,
+) -> tuple[BrowserPool, BrowserPool]:
+    """The standard and the unblock pool: one semaphore of ``BROWSER_CONCURRENCY`` slots for
+    both, and the unblock pool's own limit (`unblock_concurrency`) within it (package 22)."""
+    slots = asyncio.Semaphore(settings.browser_concurrency)
+    return (
+        BrowserPool(settings, proxy, registry, launcher=standard, slots=slots),
+        BrowserPool(
+            settings,
+            proxy,
+            registry,
+            launcher=unblock,
+            slots=slots,
+            limit=asyncio.Semaphore(unblock_concurrency(settings)),
+        ),
+    )
+
+
 def create_browsers(settings: Settings, registry: CollectorRegistry) -> Browsers:
     """The browser parts for ``settings``, not started yet."""
     proxy = EgressProxy(settings, registry=registry)
-    slots = asyncio.Semaphore(settings.browser_concurrency)  # shared by both drivers
-    standard = BrowserPool(
-        settings, proxy, registry, launcher=PlaywrightLauncher(settings), slots=slots
-    )
     if not settings.browser_unblock_enabled:
+        standard = BrowserPool(settings, proxy, registry, launcher=PlaywrightLauncher(settings))
         return Browsers(proxy, None, (standard,), ChromiumRenderer(standard, settings), None)
-    unblock = BrowserPool(
-        settings, proxy, registry, launcher=PatchrightLauncher(settings), slots=slots
+    standard, unblock = browser_pools(
+        settings, proxy, registry, PlaywrightLauncher(settings), PatchrightLauncher(settings)
     )
     return Browsers(
         proxy,

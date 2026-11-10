@@ -128,7 +128,8 @@ conversion) and step 8. An ``auto`` result that will escalate is neither cached 
 of the fast result (or draft) and the render, only the better one is (``escalation.better``).
 Rendered results store no validators, so they are never revalidated. Unblock mode (admins,
 ``compliance: ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance
-cookies.
+cookies, unless the request's ``unblock: false`` switched it off (package 22): then it renders and
+escalates as without unblock mode, and its result is cached apart (``_cache_options``).
 
 A YouTube video's details whose subtitles could not be read (``escalation.needs_transcript_panel``,
 while ``MEDIA_TRANSCRIPT_PANEL_ENABLED`` and without ``transcribe``) escalate too, and an ``auto``
@@ -518,6 +519,7 @@ class _Run:
     cacheable: bool = True
     private: bool = False
     unblock: bool = False
+    unblock_off: bool = False  # the request's ``unblock: false`` switched it off (package 22)
     admin: bool = False
     draft: Envelope[ExtractResult] | None = None  # the fast result of an ``auto`` item (B5)
     artifacts: ArtifactSink | None = None
@@ -958,7 +960,9 @@ class Pipeline:
             raise_refusals=gate_refusals == "raise",
             cacheable=cacheable,
             private=private,
-            unblock=unblock_for(principal, mode, self._settings),
+            unblock=unblock_for(principal, mode, self._settings, requested=req.unblock),
+            # Switched off by the request where it would apply: keys the result apart.
+            unblock_off=not req.unblock and unblock_for(principal, mode, self._settings),
             admin=principal.role == "admin",
             draft=draft if req.mode == "auto" else None,
             artifacts=artifacts,
@@ -1929,6 +1933,7 @@ class Pipeline:
             media=run.media is not None,
             structured=structured_cache_part(options, run.learned) if options is not None else None,
             site_links=run.site_links,
+            unblock_off=run.unblock_off,
         )
 
     async def _cached(self, run: _Run) -> _Stored | None:
@@ -3442,6 +3447,7 @@ def _cache_options(
     media: bool = False,
     structured: Mapping[str, Any] | None = None,
     site_links: bool = False,
+    unblock_off: bool = False,
 ) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
@@ -3466,6 +3472,12 @@ def _cache_options(
 
     ``site_links`` (a site crawl's page, P9-S10) adds the page's typed links to the result; it
     is part of the key only when set, so the keys of other requests stay as they were.
+
+    ``unblock_off`` (package 22): an admin's ``unblock: false`` under ``compliance: ignore``
+    with ``BROWSER_UNBLOCK_ENABLED``, where unblock mode would otherwise apply, renders with the
+    standard browser. Its result is kept apart as ``unblock: false`` for every mode that can
+    render (not ``fast``). Unblock mode on, and an ``unblock`` that changed nothing (a user's,
+    or under another mode), keep the key of the release before.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
@@ -3484,6 +3496,8 @@ def _cache_options(
         options["structured"] = dict(structured)
     if site_links:
         options["site_links"] = True
+    if unblock_off and req.mode != "fast":
+        options["unblock"] = False
     return options
 
 

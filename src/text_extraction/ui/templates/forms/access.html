@@ -19,5 +19,18 @@ switches the checks off; an admin is told when that is because the server switch
   <label class="inline" for="{{ prefix }}-access-{{ value }}"><input type="radio" id="{{ prefix }}-access-{{ value }}" name="access" value="{{ value }}" data-mode="{{ mode }}" aria-describedby="{{ prefix }}-access-{{ value }}-hint"{% if chosen_access == value %} checked{% endif %}> {{ t("access." ~ mode) }}{% if value == "default" %}{{ t("access.default") }}{% endif %}</label>
   <p class="hint" id="{{ prefix }}-access-{{ value }}-hint">{% if mode == "ignore" %}{{ t(ignore_hint, value=code("compliance: ignore"), setting=code("BROWSER_UNBLOCK_ENABLED")) }}{% else %}{{ t("hint.access." ~ mode) }}{% endif %}</p>
   {%- endfor %}
+  {#- The "Unblock browser" box (package 22): only where "ignore" unlocks the unblock browser and
+  the form can render a page; shown while "ignore" is the chosen step (ui.js follows the radios).
+  ``unblock_offered`` names the default step's mode, so an unticked box sends ``unblock: false``
+  under "ignore" only. A form posted again (a batch preview) keeps an unticked box unticked. -#}
+  {%- if access.unblock and access_variant != "site" and "ignore" in access.modes %}
+  {%- set chosen_mode = access.default if chosen_access == "default" else chosen_access %}
+  {%- set unticked = chosen and chosen["unblock_offered"] and chosen["unblock"] != "on" %}
+  <div class="unblock-box" data-unblock{% if chosen_mode != "ignore" %} hidden{% endif %}>
+    <input type="hidden" name="unblock_offered" value="{{ access.default }}">
+    <label class="inline" for="{{ prefix }}-unblock"><input type="checkbox" id="{{ prefix }}-unblock" name="unblock" value="on" aria-describedby="{{ prefix }}-unblock-hint"{% if not unticked %} checked{% endif %}> {{ t("access.unblock_box") }}</label>
+    <p class="hint" id="{{ prefix }}-unblock-hint">{{ t("hint.access.unblock_box", value=code("unblock: false")) }}</p>
+  </div>
+  {%- endif %}
 </fieldset>
 {% endif %}

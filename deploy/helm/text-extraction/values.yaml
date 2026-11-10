@@ -71,6 +71,9 @@ config:
   # ATTACHMENTS_MAX of its linked documents appended, each fetched as the page is (0: off; 0-5).
   ATTACHMENTS_MAX: "2"
   ATTACHMENTS_BELOW_WORDS: "100"
+  # Unblock pages (each a headful Chrome) one browser worker renders at once, within and capped at
+  # workers.browser.concurrency; only used with workers.browser.unblock.
+  BROWSER_UNBLOCK_CONCURRENCY: "2"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both

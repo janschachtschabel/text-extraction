@@ -22,6 +22,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `metadata` | boolean | `true` | Include the page's metadata (title, authors, licence, dates, images, schema.org and LRMI fields). |
 | `links` | boolean | `false` | Include the page's links, each with its `kind` and its `category` (what it leads to, such as `imprint` or `social`). |
 | `compliance` | `enforce`, `report` or `ignore` | unset | The site rules: `enforce` refuses what robots.txt or a TDM opt-out forbids, `report` only reports it, `ignore` (admins only) skips the checks and allows maximum extraction. Unset: the operator's `COMPLIANCE_DEFAULT`. |
+| `unblock` | boolean | `true` | Only with `compliance: ignore` (admins) and unblock mode on: `false` loads the page in the standard browser instead of the unblock browser (for a site where it is unstable). Ignored otherwise. See [Site rules](site-rules.md#maximum-extraction). |
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
 | `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0`: a job at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
 | `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. The action `evaluate` (JavaScript) is for admin keys only; any other key gets 403. |
@@ -56,6 +57,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `metadata` | boolean | `true` | As for `POST /v1/extract`. |
 | `links` | boolean | `false` | As for `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` or `ignore` | unset | As for `POST /v1/extract`. |
+| `unblock` | boolean | `true` | As for `POST /v1/extract`. |
 | `cache` | boolean | `true` | As for `POST /v1/extract`. |
 | `wait_seconds` | number, 0 to 60 | unset | As for `POST /v1/extract`. |
 | `actions` | list of objects | empty | As for `POST /v1/extract`. |
@@ -83,7 +85,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | string | unset | The page to extract and chunk, with the options of `POST /v1/extract`. |
-| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
+| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `unblock`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
 | `text_type` | `markdown` or `plain` | `markdown` | What `text` is; Markdown chunks carry their heading path. |
 | `chunking` | object | required | How to split. See [`chunking`](#chunking). |
 | `format` | `markdown` or `text` | `markdown` | The format of `content` and of the chunks. |
@@ -91,6 +93,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | `metadata` | boolean | `true` | As for `POST /v1/extract`. |
 | `links` | boolean | `false` | As for `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` or `ignore` | unset | As for `POST /v1/extract`. |
+| `unblock` | boolean | `true` | As for `POST /v1/extract`. |
 | `cache` | boolean | `true` | As for `POST /v1/extract`. |
 | `wait_seconds` | number, 0 to 60 | unset | As for `POST /v1/extract`. |
 | `actions` | list of objects | empty | As for `POST /v1/extract`. |
@@ -124,6 +127,7 @@ options and `wait_seconds`.
 | `metadata` | boolean | `true` | As for `POST /v1/extract`. |
 | `links` | boolean | `false` | As for `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` or `ignore` | unset | As for `POST /v1/extract`. |
+| `unblock` | boolean | `true` | As for `POST /v1/extract`. |
 | `cache` | boolean | `true` | As for `POST /v1/extract`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | As for `POST /v1/extract`. |
 | `transcribe` | boolean | `false` | As for `POST /v1/extract`. |
@@ -177,6 +181,7 @@ An image of a page, rendered in the browser: a PNG in a window of 1920×1080 unl
 | `cookies` | list of objects | empty | As for `POST /v1/extract`. |
 | `headers` | object | empty | As for `POST /v1/extract`. |
 | `compliance` | `enforce`, `report` or `ignore` | unset | As for `POST /v1/extract`. |
+| `unblock` | boolean | `true` | As for `POST /v1/extract`. |
 | `wait_seconds` | number, 0 to 60 | unset | As for `POST /v1/extract`: after this many seconds the capture becomes a job. |
 
 <!-- request: POST /v1/screenshot -->
