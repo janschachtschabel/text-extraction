@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-10
+
 ### Added
 
 - More text from thin pages (package 22). A solution behind a button (serlo "Lösungsvorschlag",
@@ -704,7 +706,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.8...v0.1.9
