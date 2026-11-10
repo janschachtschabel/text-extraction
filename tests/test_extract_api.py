@@ -1689,7 +1689,17 @@ def test_handover_during_fast_phase_then_escalation_writes_into_p1_job() -> None
         assert seen.job.id == job_id
         assert seen.draft is not None
         assert seen.draft.status == "partial"
-        assert seen.job.lease_until is None  # cleared: the browser has its own time
+        # The handover queues the item and clears the lease right after; the worker's snapshot
+        # may predate that, so the stored record is what counts: poll until it is cleared.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = case.record(job_id)
+            assert current is not None
+            if current.lease_until is None:  # cleared: the browser has its own time
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("the P1 lease was not cleared after the handover")
 
         case.wait_for_idle()  # the extraction stored nothing: the worker writes item 0
         view = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["data"]

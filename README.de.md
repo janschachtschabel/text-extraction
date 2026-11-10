@@ -19,6 +19,8 @@ Englisch.
 - **Sauberer Text.** Markdown, reiner Text oder HTML ohne Navigation, Fußzeilen und anderen
   Boilerplate; MathML wird zu LaTeX; PHP-Fehlerausgaben, die eine Website in ihre Seiten schreibt,
   werden entfernt und aufgelistet.
+  Eine dünne Seite bekommt zusätzlich ihre eingeklappten Lösungen, bis zu zwei Anhänge, die Datei
+  eines edu-sharing-Knotens und, mit `transcribe`, ihr einzelnes Video.
 - **Metadaten.** Titel, Beschreibung, Autoren, Daten, Sprache, Bilder, kanonische URL,
   Schlagwörter, Felder aus schema.org und LRMI, die Lizenz (Creative Commons und andere, mit
   Quelle und Sicherheit), der Seitentyp (etwa `content`, `listing` oder `imprint`) und die Links

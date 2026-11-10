@@ -271,6 +271,20 @@ hängt ihren Text jeweils unter einer Überschrift mit ihrem Namen an, mit der W
 zu groß, keine Zeit mehr), ergibt die Warnung `attachment_failed` und lässt die Seite, wie sie
 war. Die Anhänge werden mit denselben Prüfungen und Grenzen geholt wie die Seite.
 
+Eine Lösung, die eine Seite hinter einer Schaltfläche versteckt (der „Lösungsvorschlag“ von
+serlo, ein `<details>`-Element oder ein Schalter, der sein Panel über `aria-controls` steuert),
+gehört zum Text: Der Inhalt steht schon im HTML der Seite und bleibt erhalten, statt als versteckt
+verworfen zu werden. Nur echte Schalter zählen; andere versteckte Elemente bleiben draußen.
+
+Eine Seite des edu-sharing-Repositories (`/edu-sharing/components/render/<Knoten-ID>`) ist eine
+Angular-Hülle ohne eigenen Text. Der Dienst liest den Knoten stattdessen über die öffentliche
+REST-Metadaten-API des Repositories und folgt der Datei des Knotens auf demselben Host wie einem
+Anhang (ein Dokument, eine SVG oder, mit `"transcribe": true`, eine Audio- oder Videodatei).
+Lizenz, Beschreibung, Schlagwörter und der kanonische Link des Knotens kommen in die Metadaten. In
+einer solchen Antwort ist `final_url` die URL der REST-Metadaten, während `url` und
+`metadata.canonical_url` die gesendete Seite nennen. Antwortet das Repository nicht, wird die Seite
+wie bisher gelesen.
+
 ### Audio und Video
 
 Für eine Video-URL von YouTube, Vimeo oder den Mediatheken von ARD, ZDF, arte und 3sat enthält die

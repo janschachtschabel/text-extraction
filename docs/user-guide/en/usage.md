@@ -259,6 +259,19 @@ attachment that cannot be read (blocked by robots.txt, refused, too large, out o
 warning `attachment_failed` and leaves the page as it was. The attachments are fetched with the
 same checks and limits as the page.
 
+A solution that a page hides behind a button (serlo's "Lösungsvorschlag", a `<details>` element or
+a toggle that controls its panel through `aria-controls`) is part of the text: the content is
+already in the page's HTML, so it is kept instead of dropped as hidden. Only real toggles count;
+other hidden elements stay out.
+
+A page of the edu-sharing repository (`/edu-sharing/components/render/<node id>`) is an Angular
+shell without text of its own. The service reads the node through the repository's public REST
+metadata API instead and follows the node's file on the same host like an attachment (a document,
+an SVG, or, with `"transcribe": true`, an audio or video file). Licence, description, keywords and
+the canonical link of the node go into the metadata. In such an answer `final_url` is the REST
+metadata URL, while `url` and `metadata.canonical_url` name the page you sent. If the repository
+does not answer, the page is read as before.
+
 ### Audio and video
 
 A video URL of YouTube, Vimeo or the Mediatheken of ARD, ZDF, arte and 3sat answers with the

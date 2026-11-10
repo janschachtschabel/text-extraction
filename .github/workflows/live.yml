@@ -103,8 +103,9 @@ jobs:
       COMPLIANCE: ${{ inputs.site_rules == 'off' && 'ignore' || 'report' }}
       UNBLOCK: ${{ inputs.site_rules == 'off' && 'true' || 'false' }}
       # An unblock render may take BROWSER_UNBLOCK_TIMEOUT_SECONDS (60 s) after the fast phase
-      # (25 s) and the queue wait (30 s), so the client waits longer then.
-      CLIENT_TIMEOUT: ${{ inputs.site_rules == 'off' && '150' || '120' }}
+      # (25 s), the queue wait (30 s) and the unblock turn wait (30 s), so the client waits
+      # longer then.
+      CLIENT_TIMEOUT: ${{ inputs.site_rules == 'off' && '180' || '120' }}
     services:
       valkey:
         image: valkey/valkey:8.1-alpine
@@ -163,6 +164,8 @@ jobs:
           VALKEY_URL: redis://127.0.0.1:6379/0
           BROWSER_ENABLED: "true"
           BROWSER_UNBLOCK_ENABLED: ${{ env.UNBLOCK }}
+          # Two unblock pages (headful Chrome each) at once; a third waits for a turn.
+          BROWSER_UNBLOCK_CONCURRENCY: "2"
           # One browser worker with 4 pages at once serves every escalation of the run: a sync
           # request waits up to 30 s for a free page, so a burst of escalations is measured as
           # the product's answer, not as a browser_unavailable of the test rig.
