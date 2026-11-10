@@ -64,6 +64,10 @@ config:
   # A YouTube video whose subtitles could not be read gets a second try in the browser where
   # YouTube offers its new transcript view (auto requests; nothing happens without browser workers).
   MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"
+  # A page with fewer than ATTACHMENTS_BELOW_WORDS words gets the text of at most
+  # ATTACHMENTS_MAX of its linked documents appended, each fetched as the page is (0: off; 0-5).
+  ATTACHMENTS_MAX: "2"
+  ATTACHMENTS_BELOW_WORDS: "100"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both

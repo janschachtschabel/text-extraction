@@ -251,6 +251,14 @@ scans and images (PNG, JPEG, TIFF, WebP, BMP) are read with OCR and OpenDocument
 ODP) are converted too; without it a scan answers its text layer with the warning
 `ocr_unavailable`, and images and OpenDocument files answer `unsupported_content_type`.
 
+A page with little text of its own (fewer than `ATTACHMENTS_BELOW_WORDS`, 100 words), such as a
+worksheet overview, often offers its material as a download. The service then reads up to
+`ATTACHMENTS_MAX` (2) of the documents it links to (PDF, Word, PowerPoint, Excel, EPUB, CSV) and
+appends their text under a heading with each one's name, with the warning `attachment_read`. An
+attachment that cannot be read (blocked by robots.txt, refused, too large, out of time) adds the
+warning `attachment_failed` and leaves the page as it was. The attachments are fetched with the
+same checks and limits as the page.
+
 ### Audio and video
 
 A video URL of YouTube, Vimeo or the Mediatheken of ARD, ZDF, arte and 3sat answers with the

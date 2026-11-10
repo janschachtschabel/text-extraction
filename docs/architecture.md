@@ -121,6 +121,32 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    subtitles and details in the host's turn. A body that sniffs as audio or video is a media
    file (transcribed with `transcribe: true`), and an HTML page's `<track>` text is appended
    after its conversion. Speech recognition is a job of the ASR worker. See "Audio and video".
+
+   **Step 7b, attachments of a thin page (package 22, `pipeline_attachments.py`):** a fetched or
+   rendered HTML page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words, and no bot
+   challenge, soft 404 or login wall, gets the text of at most `ATTACHMENTS_MAX` (2) of its
+   attachments appended, before its quality verdict (step 4) and the fingerprint (step 7): a
+   worksheet overview or a lesson plan often carries its material as a download. A site crawl's
+   pages do not: the crawl lists file links and never fetches them. The candidates
+   (`convert/attachments.py`) are the content's links to files in page order, then the Drupal
+   JSON:API `file--file` entities of its script data (Next.js flight chunks, JSON scripts), at
+   most 20; a candidate whose extension or declared type names a kind MarkItDown does not
+   convert (audio, video, archives, OpenDocument, images) is passed over without a request. Each
+   one tried is fetched as the page is (the steps of `fetch_raw`): URL validation, the request's
+   compliance mode for its origin (a block ends it before its request), the host's `DomainGate`
+   turn with every redirect hop checked and a hop to another host in that host's turn, the
+   fetcher's SSRF guard, `DOCUMENT_MAX_BYTES` (a declared size over it is not fetched) and the
+   header checks after the fetch. The body is sniffed; a MarkItDown kind is converted in the
+   document children without an OCR hand-off (a document that needs OCR gives its text layer).
+   Its text follows the page's under a heading with its label (`## label` in Markdown, a line of
+   its own in text, an `<h2>` in HTML), with the warning `attachment_read`; one that gives no
+   text adds `attachment_failed` and changes nothing else. `word_count`, `quality.word_count`
+   and the fingerprint are computed from the joined content; the result's status code, final
+   URL, content type and compliance report stay the page's. The attachments share the request's
+   deadline and stop 1 s before it, so the page keeps its answer. The cache key does not change:
+   the settings belong to the deployment. `follow_attachments` also follows a file named
+   elsewhere, whatever the page's words. A fast result that still escalates follows the
+   rendered page's attachments again (the render's run cannot reuse the fast one's).
 6. **Post-process (optional):** DOM metadata, links, screenshot; the DOM stage of `structured`
    (`metadata`, `selectors`, `tables`, and the cleaned HTML for `learn_selectors`) on an HTML
    page's HTML, cached with the extraction; then PII; then the post stage of `structured` and
@@ -191,7 +217,10 @@ add a note of its own):
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none, and null when PII handling was requested: the messages are page
   text that can name a person, and the PII step does not read them), and the playground shows
-  them in a fold.
+  them in a fold. `attachment_read` (the page was thin: the text of one of its attachments was
+  appended under its name; once per attachment; step 7b), `attachment_failed` (an attachment
+  of a thin page was blocked, refused, over `DOCUMENT_MAX_BYTES`, no document MarkItDown
+  converts, without words or out of time: the page as it was; once per attachment).
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
   `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
   `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,

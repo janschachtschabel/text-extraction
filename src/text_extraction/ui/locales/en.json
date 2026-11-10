@@ -299,6 +299,8 @@
   "warning.pages_partial": "OCR stopped at its time limit or skipped a page: the pages it read.",
   "warning.charset_mismatch": "The page said it was UTF-8 but is not: it was read as Windows-1252 (or the encoding its bytes fit).",
   "warning.server_errors_removed": "Error messages of the site's server (PHP warnings) were removed from the text.",
+  "warning.attachment_read": "The page had little text: the text of a document it links to was appended under its name.",
+  "warning.attachment_failed": "An attachment of the page could not be read (blocked, refused, too large, not a supported document or out of time): the page is unchanged.",
   "warning.document_fetched_directly": "The render ended on a file, which was fetched and converted.",
   "warning.subtitles_blocked": "The platform refused the subtitles: the metadata answers.",
   "warning.subtitles_failed": "The subtitles could not be read this time: the metadata answers.",

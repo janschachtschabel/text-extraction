@@ -240,6 +240,10 @@ class Settings(BaseSettings):
     # the pod that holds the bytes; OCR and ODF go to the Docling worker.
     document_max_bytes: int = Field(default=20_000_000, ge=1024)  # at most FETCH_MAX_BYTES
     document_max_pages: int = Field(default=100, ge=1)  # pages after it are cut
+    # A fetched or rendered page with fewer words than ATTACHMENTS_BELOW_WORDS gets the text of
+    # at most ATTACHMENTS_MAX of its linked documents appended (package 22); 0 switches it off.
+    attachments_max: int = Field(default=2, ge=0, le=5)
+    attachments_below_words: int = Field(default=100, ge=0)
     # Largest total of all entries of a ZIP-based document once unpacked (container bombs).
     document_max_uncompressed_bytes: int = Field(default=200_000_000, ge=1024)
     document_concurrency: int = Field(default=2, ge=1)  # conversion child processes per pod

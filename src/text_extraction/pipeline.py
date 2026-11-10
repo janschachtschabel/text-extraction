@@ -43,6 +43,10 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    audio or video type to that head only) passes the header checks and goes to
    ``MediaSteps.media_file``. A cut body that is no media is ``unsupported_content_type``, as is
    anything else.
+7b. A fetched or rendered HTML page with fewer than ``ATTACHMENTS_BELOW_WORDS`` words gets the
+   text of at most ``ATTACHMENTS_MAX`` of its attachments appended, each fetched through these
+   steps 2 to 7 (``fetch_raw``'s steps, ``DOCUMENT_MAX_BYTES``, the run's deadline) and
+   converted by MarkItDown (``pipeline_attachments``, package 22).
 8. Quality verdict, language, metadata, links (each with its category), the page type of a
    fetched or rendered HTML page (``page_types.page_type``), fingerprint and cache. A
    document's result is final: it never goes to the browser, and a cached one is served even
@@ -235,6 +239,7 @@ from text_extraction.outbound import (
 from text_extraction.page_types import PageTypeInfo
 from text_extraction.page_types import page_type as classify_page
 from text_extraction.pii.types import PiiOptions
+from text_extraction.pipeline_attachments import AttachmentSteps
 from text_extraction.pipeline_documents import (
     OCR_NOT_HANDED_MESSAGE,
     OCR_NOT_HANDED_REASON,
@@ -558,6 +563,22 @@ class _Run:
         return _failed(self.result(), code, message, retryable=retryable, details=details)
 
 
+def _attachment_run(run: _Run, url: str, deadline: asyncio.Timeout) -> _Run:
+    """The run of one attachment of ``run``'s page (step 7b): the request's options and
+    compliance mode, ``deadline`` (what the attachments may use of the request's), a report,
+    attempts and times of its own, and nothing cached."""
+    return _Run(
+        req=run.req,
+        report=ComplianceReport(mode=run.report.mode, decision="skipped"),  # until it is checked
+        cache="bypass",
+        started=time.perf_counter(),
+        deadline=deadline,
+        cacheable=False,
+        private=run.private,
+        target=url,
+    )
+
+
 def _refused(
     run: _Run, status: int, headers: Mapping[str, str], body: bytes | str
 ) -> Envelope[ExtractResult]:
@@ -788,6 +809,14 @@ class Pipeline:
             settings,
             self._envelope,
             registry,
+        )
+        self._attachments = AttachmentSteps(
+            settings,
+            self._pool,
+            self._documents,
+            sub_run=_attachment_run,
+            fetch=self._attachment_fetch,
+            sniff=self._kind,
         )
         self._media = (
             MediaSteps(
@@ -1798,6 +1827,11 @@ class Pipeline:
         challenge = quality.bot_challenge or is_challenge_answer(fetched.headers, fetched.content)
         return quality.model_copy(update={"challenge_status": challenge})
 
+    async def _attachment_fetch(self, run: _Run) -> FetchResult | Envelope[ExtractResult]:
+        """Fetch the attachment of an attachment's run (step 7b) as ``fetch_raw`` fetches: the
+        page's steps 2 to 5 and the header checks of step 7, within ``DOCUMENT_MAX_BYTES``."""
+        return await self._raw(run, max_bytes=self._settings.document_max_bytes, truncate=False)
+
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
         turn of ``url``'s host, taken here (or kept, when ``turn`` holds it already), so the
@@ -2005,6 +2039,10 @@ class Pipeline:
             site=processed.site,
             page_type=processed.page_type,
         )
+        if kind == "html":  # step 7b, before the verdict
+            result = await self._attachments.append_attachments(
+                run, result, text, raw_sha256=fetched.raw_sha256
+            )
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
             # B5: the browser's result, or the better of both, is stored instead of this one.
@@ -2659,6 +2697,9 @@ class Pipeline:
             structured=processed.structured,
             site=processed.site,
             page_type=processed.page_type,
+        )
+        result = await self._attachments.append_attachments(  # step 7b, before the verdict
+            run, result, rendered.html, raw_sha256=fetched.raw_sha256
         )
         if self._media is not None and screenshot is None:
             result = await self._media.tracks(

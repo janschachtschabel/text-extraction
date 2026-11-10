@@ -263,6 +263,14 @@ OpenDocument-Dateien (ODT, ODS, ODP) ebenfalls umgewandelt; ohne ihn liefert ein
 Textebene, mit der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateien ergeben
 `unsupported_content_type`.
 
+Eine Seite mit wenig eigenem Text (weniger als `ATTACHMENTS_BELOW_WORDS`, 100 Wörter), etwa die
+Übersicht eines Arbeitsblatts, bietet ihr Material oft als Download an. Der Dienst liest dann bis
+zu `ATTACHMENTS_MAX` (2) der verlinkten Dokumente (PDF, Word, PowerPoint, Excel, EPUB, CSV) und
+hängt ihren Text jeweils unter einer Überschrift mit ihrem Namen an, mit der Warnung
+`attachment_read`. Ein Anhang, der sich nicht lesen lässt (durch robots.txt gesperrt, abgelehnt,
+zu groß, keine Zeit mehr), ergibt die Warnung `attachment_failed` und lässt die Seite, wie sie
+war. Die Anhänge werden mit denselben Prüfungen und Grenzen geholt wie die Seite.
+
 ### Audio und Video
 
 Für eine Video-URL von YouTube, Vimeo oder den Mediatheken von ARD, ZDF, arte und 3sat enthält die
