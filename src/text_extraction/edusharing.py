@@ -6,7 +6,8 @@ metadata as JSON at ``<base>/rest/node/v1/nodes/-home-/<id>/metadata?propertyFil
 its title, name, description, keywords, licence, a web link (``ccm:wwwurl``) and the URL of its
 file (``downloadUrl``). ``render_node`` names the base and the node of a render URL,
 ``metadata_url`` the metadata request, ``parse_metadata`` reads the answer and ``node_page``
-writes a small HTML page of it, with the node's file as an ``Attachment``. Fetching is the
+writes a small HTML page of it (with ``licence_url`` as its licence link), with the node's file
+as an ``Attachment``. Fetching is the
 caller's business (``pipeline_edusharing``).
 
 Everything in the metadata comes from the remote site: each value is escaped where the page
@@ -29,6 +30,12 @@ _RENDER_PATH: Final = re.compile(
     rf"(?P<base>(?:/[^/]+)*?/edu-sharing)/components/render/(?P<node>{_UUID})(?:/[^/]+)?/?"
 )
 _DOWNLOAD_RIGHT: Final = "DownloadContent"
+_FIXED_LICENCES: Final = {
+    "CC_0": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "PDM": "https://creativecommons.org/publicdomain/mark/1.0/",
+}
+_CC_KEY: Final = re.compile(r"CC_BY(?:_NC)?(?:_SA|_ND)?")
+_CC_VERSION: Final = re.compile(r"[1-4]\.0")
 
 
 def render_node(url: str) -> tuple[str, str] | None:
@@ -70,10 +77,15 @@ def parse_metadata(body: bytes) -> dict[str, Any] | None:
 def node_page(meta: dict[str, Any], *, base: str | None = None) -> tuple[str, Attachment | None]:
     """A small HTML page of the metadata answer ``meta`` and the node's file.
 
-    The page has the ``<h1>`` (and ``<title>``) of ``node.title``, else ``cclom:title``, else
-    ``node.name``; the description, the keywords and the licence as paragraphs; ``ccm:wwwurl``
-    as a link; and the file, linked when its URL is safe. The file is an ``Attachment`` of
-    ``downloadUrl`` (resolved against ``base`` when relative), ``name``, ``mimetype`` and
+    The page's ``<head>`` has the ``<title>``, the description and the keywords as ``<meta>``,
+    the licence as ``<link rel="license">`` (``licence_url``) and ``base`` (the render URL) as
+    ``<link rel="canonical">``, so the page's metadata reads as any page's. Its body has the
+    ``<h1>`` of ``node.title``, else ``cclom:title``, else ``node.name``; the description; the
+    keywords as a plain comma list; then a table with the licence's display name (linked to the
+    licence), the web link (``ccm:wwwurl``) and the file (a link with its name when its URL is
+    safe). No label
+    of ours is written, so the content words are the node's own. The file is an ``Attachment``
+    of ``downloadUrl`` (resolved against ``base`` when relative), ``name``, ``mimetype`` and
     ``size``; None without a safe URL, or when ``access`` is a list without the right to
     download it."""
     node = meta.get("node")
@@ -85,33 +97,54 @@ def node_page(meta: dict[str, Any], *, base: str | None = None) -> tuple[str, At
     mime = _text(node.get("mimetype"))
     descriptions = _all(properties, "cclom:general_description")
     keywords = _all(properties, "cclom:general_keyword")
-    licence = _first(properties, "ccm:commonlicense_key")
+    licence = licence_url(node)
+    licence_name = _first(properties, "ccm:commonlicense_key_DISPLAYNAME") or _first(
+        properties, "ccm:commonlicense_key"
+    )
     website = _safe_url(_first(properties, "ccm:wwwurl"), base)
     download = _safe_url(_text(node.get("downloadUrl")), base)
+    canonical = _safe_url(base, None)
     access = node.get("access")
     if isinstance(access, list) and _DOWNLOAD_RIGHT not in access:
         download = None
 
+    head = ['<meta charset="utf-8">']
+    if title:
+        head.append(f"<title>{_escaped(title)}</title>")
+    if descriptions:
+        head.append(f'<meta name="description" content="{_escaped(" ".join(descriptions))}">')
+    if keywords:
+        head.append(f'<meta name="keywords" content="{_escaped(", ".join(keywords))}">')
+    if licence:
+        head.append(f'<link rel="license" href="{_escaped(licence)}">')
+    if canonical:
+        head.append(f'<link rel="canonical" href="{_escaped(canonical)}">')
     parts: list[str] = []
     if title:
         parts.append(f"<h1>{_escaped(title)}</h1>")
     parts.extend(f"<p>{_escaped(text)}</p>" for text in descriptions)
     if keywords:
-        parts.append(f"<p>Keywords: {_escaped(', '.join(keywords))}</p>")
-    if licence:
-        parts.append(f"<p>License: {_escaped(licence)}</p>")
-    if website:
-        parts.append(f'<p>Website: <a href="{_escaped(website)}">{_escaped(website)}</a></p>')
-    label = name or title or "File"
-    if download or name:
-        named = (
-            f'<a href="{_escaped(download)}">{_escaped(label)}</a>' if download else _escaped(label)
+        parts.append(f"<p>{_escaped(', '.join(keywords))}</p>")
+    # The licence, the web link and the file as the rows of a table: a paragraph of a link
+    # alone tips Trafilatura into flattening so short a page, a table row does not.
+    rows: list[str] = []
+    if licence_name:
+        rows.append(
+            f'<a rel="license" href="{_escaped(licence)}">{_escaped(licence_name)}</a>'
+            if licence
+            else _escaped(licence_name)
         )
-        details = ", ".join(part for part in (mime, _size_text(node.get("size"))) if part)
-        parts.append(f"<p>File: {named}" + (f" ({_escaped(details)})" if details else "") + "</p>")
-    head = f"<title>{_escaped(title)}</title>" if title else ""
+    if website:
+        rows.append(f'<a href="{_escaped(website)}">{_escaped(website)}</a>')
+    label = name or title or "File"
+    if download:
+        rows.append(f'<a href="{_escaped(download)}">{_escaped(label)}</a>')
+    elif name:
+        rows.append(_escaped(name))
+    if rows:
+        parts.append("<table>" + "".join(f"<tr><td>{row}</td></tr>" for row in rows) + "</table>")
     page = (
-        f'<!doctype html><html><head><meta charset="utf-8">{head}</head>'
+        f"<!doctype html><html><head>{''.join(head)}</head>"
         f"<body><main><article>{''.join(parts)}</article></main></body></html>"
     )
     attachment = (
@@ -120,6 +153,27 @@ def node_page(meta: dict[str, Any], *, base: str | None = None) -> tuple[str, At
         else None
     )
     return page, attachment
+
+
+def licence_url(node: dict[str, Any]) -> str | None:
+    """The URL of the node's licence: ``node.license.url``, else ``virtual:licenseurl``, else one
+    built from a Creative Commons ``ccm:commonlicense_key`` (with
+    ``ccm:commonlicense_cc_version`` for the ``CC_BY`` family); None when none is safe."""
+    licence = node.get("license")
+    if isinstance(licence, dict) and (found := _safe_url(_text(licence.get("url")), None)):
+        return found
+    properties = node.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    if found := _safe_url(_first(properties, "virtual:licenseurl"), None):
+        return found
+    key = (_first(properties, "ccm:commonlicense_key") or "").upper()
+    if key in _FIXED_LICENCES:
+        return _FIXED_LICENCES[key]
+    version = _first(properties, "ccm:commonlicense_cc_version") or ""
+    if _CC_KEY.fullmatch(key) and _CC_VERSION.fullmatch(version):
+        kind = key.removeprefix("CC_").lower().replace("_", "-")
+        return f"https://creativecommons.org/licenses/{kind}/{version}/"
+    return None
 
 
 def _text(value: object) -> str | None:
@@ -169,17 +223,6 @@ def _size(value: object) -> int | None:
     if isinstance(value, str) and value.isascii() and value.isdigit():
         return int(value)
     return None
-
-
-def _size_text(value: object) -> str | None:
-    size = _size(value)
-    if size is None:
-        return None
-    if size >= 1_000_000:
-        return f"{size / 1_000_000:.1f} MB"
-    if size >= 1_000:
-        return f"{size / 1_000:.0f} kB"
-    return f"{size} bytes"
 
 
 def _escaped(value: str) -> str:

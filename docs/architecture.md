@@ -172,15 +172,26 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    then fetched as an attachment is (the steps of `fetch_raw`: its own compliance check, the
    host's turn, every redirect hop checked, the SSRF guard), within `CONVERT_MAX_BYTES` and half
    of the time left. From the JSON (`{"node": {...}}`, at most `CONVERT_MAX_BYTES`, refused when
-   it is no JSON or nested too deep) `node_page` writes a small HTML page: an `<h1>` of
-   `node.title`, else `cclom:title`, else `node.name`; the description, the keywords and the
-   licence (`ccm:commonlicense_key`) as paragraphs; `ccm:wwwurl` as a link; and the node's file
-   (`downloadUrl`, `name`, `mimetype`, `size`) as a link. Every value is escaped, and a URL is
+   it is no JSON or nested too deep) `node_page` writes a small HTML page. Its `<head>` has the
+   title, `<meta name="description">`, `<meta name="keywords">`, `<link rel="license">` (the
+   licence URL: `node.license.url`, else `virtual:licenseurl`, else one built from a Creative
+   Commons `ccm:commonlicense_key` and `ccm:commonlicense_cc_version`) and
+   `<link rel="canonical">` (the render URL), so `metadata` reads the node's licence,
+   description, keywords and canonical URL as any page's. Its body has an `<h1>` of
+   `node.title`, else `cclom:title`, else `node.name`; the description; the keywords as a plain
+   comma list; and a table with the licence's display name (`ccm:commonlicense_key_DISPLAYNAME`,
+   linked to the licence), `ccm:wwwurl` and the node's file (`downloadUrl`, `name`) as links.
+   No label of ours, MIME type or size is written, so the content words (and the language
+   detected) are the node's own; the links are table rows because a paragraph of a link alone
+   tips Trafilatura into flattening so short a page. Every value is escaped, and a URL is
    kept only when it is an absolute `http(s)` URL with a host and without user info. The page
-   is converted and judged as an HTML page (steps 4 and 5). The node's file is followed as an
-   attachment (`follow_attachments`, whatever the page's words: the file is the material) and
-   its text appended under the file's name, with `attachment_read` or `attachment_failed`, as in
-   step 7b. **Cross-host files are listed, never fetched:** the file is followed only when its
+   is converted and judged as an HTML page (steps 4 and 5); a JSON answer of the API is no bot
+   challenge, soft 404 or login wall, so those findings of the page are cleared before its
+   verdict, whatever the node's words. The node's file is followed as an attachment
+   (`follow_attachments`, whatever the page's words: the file is the material, but not while
+   `ATTACHMENTS_MAX` is 0, which lists it as a link only) and its text appended under the file's
+   name, with `attachment_read` or `attachment_failed`, as in step 7b. **Cross-host files are
+   listed, never fetched:** the file is followed only when its
    URL is on the render URL's host; a `downloadUrl` elsewhere stays a link of the page, since
    the metadata comes from the remote site and must not send the service to a host the request
    did not name. A node without the `DownloadContent` right has no file to follow. A file of a

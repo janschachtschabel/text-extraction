@@ -20,10 +20,13 @@ decides) and is not a site crawl's page asks the repository for the node's metad
    link, file), which is converted and judged as an HTML page (step 7, 8). The result is the
    metadata answer's: its final URL, status and content type (``application/json``), with the
    compliance findings of both URLs. Since it is no HTML answer, ``escalation.needs_browser``
-   never sends it to the browser (B5), not even in unblock mode.
+   never sends it to the browser (B5), not even in unblock mode. A JSON answer of the API is no
+   bot challenge, soft 404 or login wall, whatever the node's words: those findings of the page
+   are cleared before it is judged.
 4. The node's file is followed as an attachment (``AttachmentSteps.follow_attachments``,
-   whatever the page's words: the file is the material) when its URL is on the render URL's host;
-   a file on another host is listed in the page, never fetched. A kind that is not converted
+   whatever the page's words: the file is the material) when its URL is on the render URL's host
+   and ``ATTACHMENTS_MAX`` is not 0; a file on another host, or with attachments switched off,
+   is listed in the page, never fetched. A kind that is not converted
    (audio, video, archives) is listed only. Its text is appended under the file's name as for
    step 7b, with ``attachment_read`` or ``attachment_failed``; a failure that may pass leaves the
    result uncached (``attachments_retry``).
@@ -149,7 +152,7 @@ class EduSharingSteps[R: NodeRun]:
             return None
         if attachment is None:
             return result
-        if not _same_host(attachment, run.target):
+        if not _same_host(attachment, run.target) or self._settings.attachments_max == 0:
             return result  # listed in the page, never fetched
         # Task 6 hook: an audio or video file (``follow_attachments`` passes it over) goes to the
         # media steps here when the request has ``transcribe``.

@@ -17,7 +17,13 @@ from tests.fakes import PARAGRAPH, FakeRenderer, fetched, rendered
 from tests.test_pipeline_documents import USER, FakePool, Harness, Loop, data_of, reply
 from text_extraction.convert.attachments import Attachment
 from text_extraction.convert.html import convert_html
-from text_extraction.edusharing import metadata_url, node_page, parse_metadata, render_node
+from text_extraction.edusharing import (
+    licence_url,
+    metadata_url,
+    node_page,
+    parse_metadata,
+    render_node,
+)
 from text_extraction.envelope import Envelope
 from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
@@ -33,6 +39,7 @@ TWILLO_NODE = "0b5c7e3a-1f2d-4c6b-9a8e-7d6c5b4a3f21"
 TWILLO = f"https://www.twillo.de/edu-sharing/components/render/{TWILLO_NODE}"
 SVG_NAME = "Zusammenfassung Kupfer mit Iod.svg"
 SVG_TYPE = "image/svg+xml"
+LICENCE = "https://creativecommons.org/licenses/by-sa/4.0/deed.de"
 DESCRIPTION = (
     "Die Grafik fasst die Reaktion von Kupfer mit Iod zusammen und zeigt die Teilchenebene "
     "nach dem Atommodell von Dalton."
@@ -75,7 +82,11 @@ def metadata(**node: Any) -> dict[str, Any]:
             "cclom:general_keyword": ["Atommodell", "Dalton", "Chemische Reaktion"],
             "ccm:wwwurl": ["https://www.example.org/kupfer-iod"],
             "ccm:commonlicense_key": ["CC_BY_SA"],
+            "ccm:commonlicense_cc_version": ["4.0"],
+            "ccm:commonlicense_key_DISPLAYNAME": ["CC BY-SA 4.0"],
+            "virtual:licenseurl": [LICENCE],
         },
+        "license": {"icon": f"{BASE}/assets/images/licenses/cc-by-sa.svg", "url": LICENCE},
     }
     values.update(node)
     return {"node": values}
@@ -182,10 +193,18 @@ def test_node_page_of_the_rlp_shape() -> None:
     assert f"<h1>{SVG_NAME}</h1>" in html
     assert f"<title>{SVG_NAME}</title>" in html
     assert DESCRIPTION in html
-    assert "Atommodell, Dalton, Chemische Reaktion" in html
-    assert "CC_BY_SA" in html
+    assert "<p>Atommodell, Dalton, Chemische Reaktion</p>" in html
+    assert f'<a rel="license" href="{LICENCE}">CC BY-SA 4.0</a>' in html
     assert '<a href="https://www.example.org/kupfer-iod">' in html
-    assert f'<a href="{DOWNLOAD.replace("&", "&amp;")}">{SVG_NAME}</a>' in html
+    assert f'<td><a href="{DOWNLOAD.replace("&", "&amp;")}">{SVG_NAME}</a></td>' in html
+    # The page's head says what any page's head says.
+    assert f'<link rel="license" href="{LICENCE}">' in html
+    assert f'<meta name="description" content="{DESCRIPTION}">' in html
+    assert '<meta name="keywords" content="Atommodell, Dalton, Chemische Reaktion">' in html
+    assert '<link rel="canonical"' not in html  # no base, no canonical
+    # No label of ours, no MIME type or size among the content words.
+    for label in ("Keywords", "License", "Website", "File", "image/svg+xml", "MB"):
+        assert label not in html.split("<body>")[1]
     assert attachment == Attachment(
         url=DOWNLOAD, label=SVG_NAME, mime="image/svg+xml", size=2097152
     )
@@ -220,11 +239,13 @@ def test_node_page_escapes_every_value() -> None:
             "cclom:general_description": [evil],
             "cclom:general_keyword": [evil],
             "ccm:commonlicense_key": [evil],
+            "ccm:commonlicense_key_DISPLAYNAME": [evil],
             "ccm:wwwurl": ['https://www.example.org/"><script>x</script>'],
         },
+        license={"url": 'https://licence.example/"><script>x</script>'},
     )
 
-    html, attachment = node_page(meta)
+    html, attachment = node_page(meta, base=f'{RENDER}?q="><script>x</script>')
 
     assert "<script" not in html
     assert "&lt;script&gt;" in html
@@ -252,8 +273,70 @@ def test_node_page_drops_unsafe_urls(url: str) -> None:
     html, attachment = node_page(meta)
 
     assert attachment is None
-    assert "href" not in html
+    assert "<a href" not in html  # only the licence's link is left
     assert SVG_NAME in html  # the file is still named
+
+
+def test_node_page_has_the_render_url_as_canonical() -> None:
+    html, _attachment = node_page(metadata(), base=RENDER)
+
+    assert f'<link rel="canonical" href="{RENDER}">' in html
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        ({}, LICENCE),
+        ({"license": None}, LICENCE),
+        ({"license": {"url": "javascript:x"}}, LICENCE),
+        (
+            {"license": "text", "properties": {"ccm:commonlicense_key": ["CC_0"]}},
+            "https://creativecommons.org/publicdomain/zero/1.0/",
+        ),
+        (
+            {
+                "license": None,
+                "properties": {
+                    "ccm:commonlicense_key": ["CC_BY_NC_SA"],
+                    "ccm:commonlicense_cc_version": ["3.0"],
+                },
+            },
+            "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+        ),
+        ({"license": None, "properties": {"ccm:commonlicense_key": ["CC_BY"]}}, None),
+        (
+            {
+                "license": None,
+                "properties": {
+                    "ccm:commonlicense_key": ["COPYRIGHT_FREE"],
+                    "ccm:commonlicense_cc_version": ["4.0"],
+                },
+            },
+            None,
+        ),
+        (
+            {
+                "license": None,
+                "properties": {
+                    "ccm:commonlicense_key": ["CC_BY"],
+                    "ccm:commonlicense_cc_version": ["4.0/../../x"],
+                },
+            },
+            None,
+        ),
+    ],
+)
+def test_licence_url(node: dict[str, Any], expected: str | None) -> None:
+    assert licence_url(metadata(**node)["node"]) == expected
+
+
+def test_licence_without_a_url_is_named_not_linked() -> None:
+    meta = metadata(license=None, properties={"ccm:commonlicense_key": ["CUSTOM"]})
+
+    html, _attachment = node_page(meta)
+
+    assert "<td>CUSTOM</td>" in html
+    assert 'rel="license"' not in html
 
 
 def test_node_page_resolves_a_relative_download_url() -> None:
@@ -630,3 +713,100 @@ def test_a_node_page_that_breaks_the_converter_falls_back(
     assert RENDER in fetched_urls(harness)
     assert data.final_url == RENDER
     assert data.content_type == "text/html"
+
+
+def test_node_answer_has_the_pages_metadata() -> None:
+    harness = browser_harness(svg_node())
+
+    data = data_of(run(harness, metadata=True))
+
+    assert data.metadata is not None
+    assert data.metadata.license is not None
+    assert data.metadata.license.id == "CC-BY-SA-4.0"
+    assert data.metadata.license.source == "rel-license"
+    assert data.metadata.canonical_url == RENDER
+    assert data.metadata.description == DESCRIPTION
+    assert data.metadata.keywords == ["Atommodell", "Dalton", "Chemische Reaktion"]
+
+
+def test_cc0_node_has_its_licence() -> None:
+    meta = metadata(
+        license={"icon": "x", "url": "https://creativecommons.org/publicdomain/zero/1.0/deed.de"}
+    )
+    meta["node"]["properties"]["ccm:commonlicense_key"] = ["CC_0"]
+    meta["node"]["properties"]["ccm:commonlicense_key_DISPLAYNAME"] = ["CC-0"]
+    del meta["node"]["properties"]["ccm:commonlicense_cc_version"]
+    del meta["node"]["properties"]["virtual:licenseurl"]
+    harness = browser_harness({METADATA: json_answer(meta)})
+
+    data = data_of(run(harness, metadata=True))
+
+    assert data.metadata is not None
+    assert data.metadata.license is not None
+    assert data.metadata.license.id == "CC0-1.0"
+
+
+def test_attachments_off_lists_the_file() -> None:
+    harness = browser_harness(svg_node(), attachments_max=0)
+
+    data = data_of(run(harness, links=True))
+
+    assert DOWNLOAD not in fetched_urls(harness)
+    assert not any(code.startswith("attachment_") for code in data.warnings)
+    assert SVG_NAME in (data.content or "")
+    assert data.links is not None
+    assert DOWNLOAD in [link.url for link in data.links]
+
+
+def test_a_node_about_captchas_is_no_bot_challenge() -> None:
+    meta = metadata(title="Was ist ein CAPTCHA?", name="captcha.mp3", mimetype="audio/mpeg")
+    meta["node"]["properties"]["cclom:general_description"] = [
+        "Please verify you are a human. Checking your browser before accessing the site. "
+        "Ein CAPTCHA prüft, ob ein Mensch oder ein Bot eine Seite aufruft."
+    ]
+    harness = browser_harness({RENDER: fetched(RENDER, SHELL), METADATA: json_answer(meta)})
+
+    envelope = run(harness)
+
+    data = data_of(envelope)
+    assert data.quality is not None
+    assert not data.quality.bot_challenge
+    assert not data.quality.challenge_status
+    assert envelope.error is None or envelope.error.code.value == "content_too_short"
+    assert not needs_browser(envelope, unblock=True)
+    renderer = harness.pipeline._renderer
+    assert isinstance(renderer, FakeRenderer)
+    assert renderer.calls == []
+
+
+@pytest.mark.parametrize(
+    "drop",
+    [
+        "cclom:general_description",
+        "cclom:general_keyword",
+        "ccm:wwwurl",
+        "licence",
+        "long_description",
+        "short_description",
+    ],
+)
+def test_node_page_keeps_its_shape_in_the_converter(drop: str) -> None:
+    meta = metadata()
+    properties = meta["node"]["properties"]
+    if drop == "licence":
+        meta["node"]["license"] = None
+        for key in list(properties):
+            if "licen" in key:
+                del properties[key]
+    elif drop == "long_description":
+        properties["cclom:general_description"] = [PARAGRAPH * 3]
+    elif drop == "short_description":
+        properties["cclom:general_description"] = ["Kurz."]
+    else:
+        del properties[drop]
+    harness = browser_harness({METADATA: json_answer(meta)}, attachments_max=0)
+
+    content = data_of(run(harness)).content or ""
+
+    assert content.startswith(f"# {SVG_NAME}\n\n")
+    assert f"[{SVG_NAME}]({DOWNLOAD})" in content

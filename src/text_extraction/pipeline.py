@@ -1888,11 +1888,26 @@ class Pipeline:
         self, run: _Run, page: FetchResult
     ) -> ExtractResult | Envelope[ExtractResult]:
         """Steps 7 and 8 (conversion and judgement, not yet stored) of the page step 4b wrote
-        for an edu-sharing node."""
+        for an edu-sharing node. The page is the API's JSON answer, which is no bot challenge,
+        soft 404 or login wall whatever the node's words say: those findings are cleared, and
+        the fingerprint is taken unless the content itself fails."""
         processed = await self._converted(run, page, "html", page.content.decode())
         if isinstance(processed, Envelope):
             return processed
-        return self._page_result(run, processed)
+        quality = processed.quality.model_copy(
+            update={
+                "bot_challenge": False,
+                "challenge_status": False,
+                "soft_404": False,
+                "login_wall": False,
+                "browser_recommended": processed.quality.js_heavy,
+            }
+        )
+        verdict = quality_error(quality, self._settings.quality_min_words)
+        fingerprint = processed.fingerprint
+        if fingerprint is None and (verdict is None or verdict[0] != "failed"):
+            fingerprint = compute_fingerprint(page.raw_sha256, processed.content)
+        return self._page_result(run, replace(processed, quality=quality, fingerprint=fingerprint))
 
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
