@@ -56,8 +56,6 @@ from pydantic import BaseModel
 from text_extraction.compliance import ComplianceReport
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import OutputFormat
-from text_extraction.documents.formats import first_heading, from_markdown
-from text_extraction.documents.meta import document_metadata
 from text_extraction.documents.pool import (
     ConversionCrashed,
     ConversionError,
@@ -67,13 +65,11 @@ from text_extraction.documents.pool import (
 )
 from text_extraction.documents.routing import (
     DOCLING_KINDS,
-    IN_PROCESS_KINDS,
     OCR_DISABLED_MESSAGE,
     needs_ocr,
     wants_ocr,
 )
 from text_extraction.documents.sniff import media_type
-from text_extraction.documents.svg import SvgUnreadable, svg_text
 from text_extraction.documents.types import (
     DocumentConversion,
     DocumentInfo,
@@ -126,6 +122,7 @@ _DOCUMENT_ERRORS: Final[dict[str, tuple[ErrorCode, str]]] = {
     ),
     "DocumentUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
     "PdfUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
+    "SvgUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
     "PasswordProtected": (ErrorCode.CONVERSION_FAILED, "The PDF is password-protected."),
 }
 
@@ -225,7 +222,7 @@ class _Judged:
     fingerprint: Fingerprint | None  # not yet compared with the previous one
 
 
-Converter = Literal["markitdown", "docling", "svg"]
+Converter = Literal["markitdown", "docling"]
 
 # Converts a document another way than the pipeline's MarkItDown children (the Docling worker's
 # conversion): its reply, or the failed envelope of the run.
@@ -432,8 +429,6 @@ class DocumentSteps:
                     "request has ocr: never.",
                 )
             return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, OCR_DISABLED_MESSAGE)
-        if kind in IN_PROCESS_KINDS:
-            return await self._svg(run, document)
         conversion = await self._convert(run, document, deadline)
         if isinstance(conversion, Envelope):
             return conversion
@@ -532,37 +527,6 @@ class DocumentSteps:
             return envelope.model_copy(update={"status": "success", "error": None})
         return envelope
 
-    async def _svg(self, run: DocumentRun, document: DocumentInput) -> Envelope[ExtractResult]:
-        """An SVG's text, parsed in this process on the conversion pool (no child, no rendering),
-        and judged like any document's. The body has passed ``DOCUMENT_MAX_BYTES``; markup the
-        parser refuses is ``conversion_failed``, not retryable."""
-        started = time.perf_counter()
-        outcome: DocumentConversion | Envelope[ExtractResult]
-        try:
-            outcome = await self._threads.run(
-                _svg_conversion,
-                document,
-                run.req.format,
-                self._settings.document_max_bytes,
-            )
-        except SvgUnreadable:
-            outcome = run.failed(ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE)
-        except RuntimeError as error:  # the conversion pool is shut down
-            outcome = _unavailable(run, error)
-        except Exception as error:  # never its message: it may quote the document
-            outcome = _our_fault(run, document.meta.kind, type(error).__name__)
-        finally:
-            run.convert_ms += _ms(started)
-        self._metrics.observe_outcome("svg", "svg", outcome, time.perf_counter() - started)
-        if isinstance(outcome, Envelope):
-            return outcome
-        judged = await self._judged_in_pool(run, document, outcome)
-        if isinstance(judged, Envelope):
-            return judged
-        return self._enveloped(
-            run, document, outcome, judged, converter="svg", ocr=False, warnings=[]
-        )
-
     async def _convert(
         self, run: DocumentRun, document: DocumentInput, deadline: float
     ) -> DocumentConversion | Envelope[ExtractResult]:
@@ -578,6 +542,7 @@ class DocumentSteps:
             "charset": meta.charset,
             "max_pages": self._settings.document_max_pages,
             "max_uncompressed": self._settings.document_max_uncompressed_bytes,
+            "max_chars": self._settings.convert_max_bytes,  # an SVG's text
         }
         started = time.perf_counter()
         outcome: DocumentConversion | Envelope[ExtractResult]
@@ -614,28 +579,6 @@ class DocumentSteps:
             metadata=metadata,
             fingerprint=None if failed else compute_fingerprint(document.meta.raw_sha256, content),
         )
-
-
-def _svg_conversion(
-    document: DocumentInput, fmt: OutputFormat, max_chars: int
-) -> DocumentConversion:
-    """The conversion of an SVG: its title and text, with the language guess of the metadata.
-    ``SvgUnreadable`` for markup the parser refuses. CPU-bound: runs on the conversion pool."""
-    title, text = svg_text(document.body, max_chars)
-    markdown = from_markdown(text, "markdown")
-    meta = document.meta
-    metadata = document_metadata(
-        document.body, "svg", meta.final_url, meta.content_language, markdown
-    )
-    return DocumentConversion(
-        content=markdown if fmt == "markdown" else from_markdown(markdown, fmt),
-        title=title or first_heading(markdown),
-        warnings=[],
-        pages=None,
-        pages_converted=None,
-        needs_ocr=False,
-        metadata=metadata.model_dump(mode="json"),
-    )
 
 
 # What a ``DocumentPool`` call can end in besides its reply, and ``from_reply``'s ``ValueError``.

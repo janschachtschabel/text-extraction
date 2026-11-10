@@ -634,9 +634,9 @@ SVG_BODY = (
 ).encode()
 
 
-def test_thin_page_linking_an_svg_gets_its_text_appended() -> None:
+def test_thin_page_linking_an_svg_gets_its_text_appended(loop: Loop) -> None:
     harness = Harness(
-        None,
+        loop,
         {
             PAGE: fetched(PAGE, page(links=link("/files/schema.svg", "schema.svg"))),
             SVG_URL: fetched(SVG_URL, SVG_BODY, content_type="image/svg+xml"),
@@ -655,7 +655,7 @@ def test_thin_page_linking_an_svg_gets_its_text_appended() -> None:
     assert data.content_type == "text/html"
 
 
-def test_svg_declared_by_a_file_entity_is_fetched_and_other_images_are_not() -> None:
+def test_svg_declared_by_a_file_entity_is_fetched_and_other_images_are_not(loop: Loop) -> None:
     entities = ",".join(
         [
             entity("bild.png", "/download/1", "image/png"),
@@ -665,7 +665,7 @@ def test_svg_declared_by_a_file_entity_is_fetched_and_other_images_are_not() -> 
     script = f'<script type="application/json">[{entities}]</script>'
     svg = f"{ORIGIN}/download/2"
     harness = Harness(
-        None,
+        loop,
         {
             PAGE: fetched(PAGE, page().replace("</body>", f"{script}</body>")),
             svg: fetched(svg, SVG_BODY, content_type="image/svg+xml"),
@@ -678,7 +678,7 @@ def test_svg_declared_by_a_file_entity_is_fetched_and_other_images_are_not() -> 
     assert SVG_TEXT in (data.content or "")
 
 
-def test_svg_with_a_doctype_entity_is_not_appended() -> None:
+def test_svg_with_a_doctype_entity_is_not_appended(loop: Loop) -> None:
     bad = (
         b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
         b'<svg xmlns="http://www.w3.org/2000/svg"><text>&x;</text></svg>'
@@ -688,7 +688,7 @@ def test_svg_with_a_doctype_entity_is_not_appended() -> None:
         SVG_URL: fetched(SVG_URL, bad, content_type="image/svg+xml"),
     }
 
-    data = data_of(run(Harness(None, answers)))
+    data = data_of(run(Harness(loop, answers)))
 
     assert "passwd" not in (data.content or "")
     assert data.warnings.count("attachment_failed") == 1

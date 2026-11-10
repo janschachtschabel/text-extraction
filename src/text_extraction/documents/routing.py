@@ -1,14 +1,13 @@
 """Which converter a document goes to (ruling F11): the one rule, for every caller.
 
 MarkItDown converts PDFs with a text layer, Office files of the OOXML and old Excel formats,
-EPUB and CSV, in the pod that holds the bytes. Docling (OCR, layout, tables) converts scans,
+EPUB, CSV and SVG (its text, parsed and never rendered), in the pod that holds the bytes.
+Docling (OCR, layout, tables) converts scans,
 broken text layers, images and OpenDocument files, in the Docling worker, and only while that
 worker exists: ``DOCLING_ENABLED``, and ``JOBS_ENABLED`` for the queue it is reached through.
 
 The request's ``ocr`` option: ``auto`` sends what needs it to Docling, ``never`` nothing (images
 and OpenDocument files are then unsupported), ``always`` also every PDF.
-
-An SVG is read in the pod itself (``documents/svg.py``), parsed and never rendered.
 
 Light: no converter imports, so the parent processes may use it.
 """
@@ -19,13 +18,11 @@ from text_extraction.documents.types import DocumentConversion, DocumentKind, Oc
 from text_extraction.settings import Settings
 
 MARKITDOWN_KINDS: Final[frozenset[DocumentKind]] = frozenset(
-    {"pdf", "docx", "pptx", "xlsx", "xls", "epub", "csv"}
+    {"pdf", "docx", "pptx", "xlsx", "xls", "epub", "csv", "svg"}
 )
 DOCLING_KINDS: Final[frozenset[DocumentKind]] = frozenset(
     {"odt", "ods", "odp", "png", "jpeg", "tiff", "webp", "bmp"}
 )
-# Read in the pod itself, parsed and never rendered (package 22): no child, no OCR.
-IN_PROCESS_KINDS: Final[frozenset[DocumentKind]] = frozenset({"svg"})
 OCR_DISABLED_MESSAGE: Final = "OCR is not enabled on this service."
 
 

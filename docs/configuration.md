@@ -393,8 +393,8 @@ All other browser variables go under `config.<NAME>` like any other setting.
 
 Documents (PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG, ODF and images) are converted to text by
 child processes of the pod that holds the bytes (MarkItDown); OCR and ODF files need the Docling
-worker. An SVG is read in the pod itself (its text elements, parsed and never rendered; a
-file that declares entities is refused). Docling is off by default: without it a scan keeps its text layer and an image answers
+worker. An SVG is read like the others, in a child (its text elements, parsed and never
+rendered; a file that declares entities is refused). Docling is off by default: without it a scan keeps its text layer and an image answers
 `unsupported_content_type`.
 
 | Variable | Default | Meaning |

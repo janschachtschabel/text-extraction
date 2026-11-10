@@ -36,7 +36,7 @@ class DocumentInfo(BaseModel):
     """What a result says about the document it was extracted from."""
 
     kind: DocumentKind
-    converter: Literal["markitdown", "docling", "svg"]
+    converter: Literal["markitdown", "docling"]
     pages: int | None  # in the document; None for kinds without pages
     pages_converted: int | None  # fewer than ``pages`` when the page limit cut it
     ocr: bool  # the text comes from OCR

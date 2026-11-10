@@ -2,12 +2,13 @@
 ``<flowRoot>`` and ``<desc>`` elements, parsed with defusedxml and never rendered. The files here
 are synthetic."""
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from tests.fakes import ORIGIN, PARAGRAPH, fetched
-from tests.test_pipeline_documents import Harness, data_of
+from tests.test_pipeline_documents import FakePool, Harness, Loop, data_of, reply
 from text_extraction.documents.sniff import media_type, sniff
 from text_extraction.documents.svg import SvgUnreadable, svg_text
 from text_extraction.envelope import Envelope, ErrorCode
@@ -170,19 +171,28 @@ def test_declared_svg_that_is_no_svg_is_not_supported() -> None:
     assert sniff(b"just some words", "image/svg+xml", None) is None
 
 
-# --- the pipeline ---
+# --- the pipeline: an SVG is converted in the document child, with its limits ---
 
 
-def harness(body: bytes, **overrides: Any) -> Harness:
-    return Harness(None, {URL: fetched(URL, body, content_type="image/svg+xml")}, **overrides)
+@pytest.fixture(scope="module")
+def loop() -> Iterator[Loop]:
+    instance = Loop()
+    try:
+        yield instance
+    finally:
+        instance.close()
 
 
-def extract(h: Harness) -> Envelope[ExtractResult]:
-    return h.run(url=URL, cache=False)
+def harness(body: bytes, loop: Loop, **overrides: Any) -> Harness:
+    return Harness(loop, {URL: fetched(URL, body, content_type="image/svg+xml")}, **overrides)
 
 
-def test_svg_url_gives_its_text() -> None:
-    envelope = extract(harness(drawing()))
+def extract(h: Harness, **request: Any) -> Envelope[ExtractResult]:
+    return h.run(url=URL, cache=False, **request)
+
+
+def test_svg_url_gives_its_text(loop: Loop) -> None:
+    envelope = extract(harness(drawing(), loop))
 
     assert envelope.status == "success", envelope.error
     data = data_of(envelope)
@@ -190,34 +200,29 @@ def test_svg_url_gives_its_text() -> None:
     assert data.title == "Wasserkreislauf"
     assert (data.content or "").startswith(PARAGRAPH[:40])
     assert data.document is not None
-    assert (data.document.kind, data.document.converter) == ("svg", "svg")
+    assert (data.document.kind, data.document.converter) == ("svg", "markitdown")
     assert data.word_count > 0
     assert data.fingerprint is not None
 
 
 @pytest.mark.parametrize("fmt", ["markdown", "text", "html"])
-def test_svg_in_each_output_format(fmt: str) -> None:
-    envelope = extract_with(harness(drawing()), format=fmt)
+def test_svg_in_each_output_format(loop: Loop, fmt: str) -> None:
+    envelope = extract(harness(drawing(), loop), format=fmt)
 
     assert envelope.status == "success", envelope.error
-    assert "Wasserkreislauf" not in (data_of(envelope).content or "") or fmt != "text"
     assert (data_of(envelope).content or "").strip()
 
 
-def extract_with(h: Harness, **request: Any) -> Envelope[ExtractResult]:
-    return h.run(url=URL, cache=False, **request)
-
-
-def test_svg_without_text_answers_like_any_document_without_text() -> None:
-    envelope = extract(harness(svg('<path d="M0 0L9 9"/>')))
+def test_svg_without_text_answers_like_any_document_without_text(loop: Loop) -> None:
+    envelope = extract(harness(svg('<path d="M0 0L9 9"/>'), loop))
 
     assert envelope.status == "failed"
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.EMPTY_CONTENT  # as a PDF without text
 
 
-def test_svg_with_few_words_is_content_too_short() -> None:
-    envelope = extract(harness(drawing("Nur drei Worte.")))
+def test_svg_with_few_words_is_content_too_short(loop: Loop) -> None:
+    envelope = extract(harness(drawing("Nur drei Worte."), loop))
 
     assert envelope.status == "partial"
     assert envelope.error is not None
@@ -225,8 +230,8 @@ def test_svg_with_few_words_is_content_too_short() -> None:
 
 
 @pytest.mark.parametrize("body", [XXE, LAUGHS], ids=["external", "laughs"])
-def test_malicious_svg_is_conversion_failed(body: bytes) -> None:
-    envelope = extract(harness(body))
+def test_malicious_svg_is_conversion_failed(loop: Loop, body: bytes) -> None:
+    envelope = extract(harness(body, loop))
 
     assert envelope.status == "failed"
     assert envelope.error is not None
@@ -235,13 +240,13 @@ def test_malicious_svg_is_conversion_failed(body: bytes) -> None:
     assert "passwd" not in envelope.model_dump_json()
 
 
-def test_deeply_nested_svg_answers_without_a_crash() -> None:
+def test_deeply_nested_svg_answers_without_a_crash(loop: Loop) -> None:
     depth = 200_000
     body = (
         f"<svg {NS}>".encode() + b"<g>" * depth + b"<text>tief</text>" + b"</g>" * depth + b"</svg>"
     )
 
-    envelope = extract(harness(body))
+    envelope = extract(harness(body, loop))
 
     assert envelope.status in {"failed", "partial", "success"}
     if envelope.status == "failed":
@@ -249,19 +254,44 @@ def test_deeply_nested_svg_answers_without_a_crash() -> None:
         assert envelope.error.code in {ErrorCode.CONVERSION_FAILED, ErrorCode.EMPTY_CONTENT}
 
 
-def test_svg_over_document_max_bytes_is_refused_by_the_size_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called: list[bytes] = []
-    monkeypatch.setattr(
-        "text_extraction.documents.svg.parse_xml", lambda data, **_kw: called.append(data)
-    )
+def test_svg_over_document_max_bytes_is_refused_before_any_conversion() -> None:
+    pool = FakePool(reply())
     body = svg("<text>" + "wort " * 1000 + "</text>")
-    h = harness(body, document_max_bytes=1024)
+    h = Harness(
+        None,
+        {URL: fetched(URL, body, content_type="image/svg+xml")},
+        pool=pool,
+        document_max_bytes=1024,
+    )
 
     envelope = extract(h)
 
     assert envelope.status == "failed"
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.TOO_LARGE
-    assert called == []
+    assert pool.calls == []
+
+
+def test_svg_is_parsed_in_the_child_never_in_the_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pathological SVG (a 20 MB tree takes ~500 MB) must run under the child's memory and
+    time limits and the document concurrency, so the parent must not parse it."""
+
+    def parent_parse(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the parent process parsed an SVG")
+
+    monkeypatch.setattr("text_extraction.documents.svg.parse_xml", parent_parse)
+    pool = FakePool(reply(content=PARAGRAPH * 2))
+    h = Harness(None, {URL: fetched(URL, drawing(), content_type="image/svg+xml")}, pool=pool)
+
+    envelope = extract(h)
+
+    assert envelope.status == "success", envelope.error
+    ((name, payload, _deadline),) = pool.calls
+    assert (name, payload["kind"]) == ("markitdown", "svg")
+    assert payload["max_chars"] == h.settings.convert_max_bytes
+
+
+def test_svg_text_is_capped_in_the_child(loop: Loop) -> None:
+    envelope = extract(harness(svg(f"<text>{'wort ' * 5000}</text>"), loop, convert_max_bytes=2048))
+
+    assert len(data_of(envelope).content or "") <= 2048
