@@ -23,7 +23,7 @@ Englisch.
   Schlagwörter, Felder aus schema.org und LRMI, die Lizenz (Creative Commons und andere, mit
   Quelle und Sicherheit), der Seitentyp (etwa `content`, `listing` oder `imprint`) und die Links
   mit ihrer Kategorie.
-- **Dokumente.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, HTML, reiner Text und Markdown, per URL
+- **Dokumente.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG (sein Text), HTML, reiner Text und Markdown, per URL
   oder als Upload (bis 20 MB, PDFs bis 100 Seiten). Mit dem OCR-Worker (Docling) auch Scans,
   Bilder (PNG, JPEG, TIFF, WebP, BMP) und OpenDocument-Dateien (ODT, ODS, ODP). Die Bytes
   entscheiden über den Typ, nicht der angegebene `Content-Type`.

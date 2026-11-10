@@ -6,6 +6,7 @@ import pytest
 
 from text_extraction.documents.routing import (
     DOCLING_KINDS,
+    IN_PROCESS_KINDS,
     MARKITDOWN_KINDS,
     needs_ocr,
     ocr_available,
@@ -46,8 +47,10 @@ def expected(kind: DocumentKind, scan: bool | None, ocr: OcrOption, available: b
 
 
 def test_every_kind_has_exactly_one_converter() -> None:
-    assert frozenset(KINDS) == MARKITDOWN_KINDS | DOCLING_KINDS
+    assert frozenset(KINDS) == MARKITDOWN_KINDS | DOCLING_KINDS | IN_PROCESS_KINDS
     assert not MARKITDOWN_KINDS & DOCLING_KINDS
+    assert not MARKITDOWN_KINDS & IN_PROCESS_KINDS
+    assert not DOCLING_KINDS & IN_PROCESS_KINDS
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ DocumentKind = Literal[
     "tiff",
     "webp",
     "bmp",
+    "svg",
 ]
 
 # The `ocr` option of a request: `auto` reads scans, broken text layers and images with OCR,
@@ -35,7 +36,7 @@ class DocumentInfo(BaseModel):
     """What a result says about the document it was extracted from."""
 
     kind: DocumentKind
-    converter: Literal["markitdown", "docling"]
+    converter: Literal["markitdown", "docling", "svg"]
     pages: int | None  # in the document; None for kinds without pages
     pages_converted: int | None  # fewer than ``pages`` when the page limit cut it
     ocr: bool  # the text comes from OCR

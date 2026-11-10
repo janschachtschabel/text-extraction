@@ -52,6 +52,7 @@ DOWNLOAD_EXTS = frozenset(
         ".wav",
         ".epub",
         ".mobi",
+        ".svg",
     }
 )
 

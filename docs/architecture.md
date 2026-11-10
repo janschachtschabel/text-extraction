@@ -970,6 +970,7 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | `xls` | OLE2 signature with a `Workbook` or `Book` stream | MarkItDown |
   | `epub` | ZIP whose first entry `mimetype` is `application/epub+zip` | MarkItDown |
   | `csv` | `text/csv` or `.csv`, decodable text | MarkItDown |
+  | `svg` | root `<svg>` after an optional XML declaration, comments and doctype (`vision.images.is_svg`) | in the pod, no child (package 22): `documents/svg.py`, defusedxml, the text of `<text>`, `<flowRoot>` and `<desc>`; entities and external references are refused (`conversion_failed`) |
   | `odt`, `ods`, `odp` | ZIP `mimetype` `application/vnd.oasis.opendocument.*` | Docling |
   | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |

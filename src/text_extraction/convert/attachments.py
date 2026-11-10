@@ -20,6 +20,7 @@ from text_extraction.convert.links import absolute_url, base_url_of, has_file_ex
 from text_extraction.convert.markup import is_outside_content
 
 MAX_ATTACHMENT_CANDIDATES = 20
+_SVG_TYPE = "image/svg+xml"
 _MAX_SCRIPT_CHARS = 2_000_000  # a larger script is skipped unread
 _MAX_ENTITY_MARKERS = 100  # "file--file" occurrences examined per script
 _MAX_OPENERS = 8  # enclosing "{" tried per marker
@@ -116,7 +117,10 @@ def _entity_attachment(obj: dict[str, Any], base: str) -> Attachment | None:
     name, mime, uri = source.get("filename"), source.get("filemime"), source.get("uri")
     if not isinstance(name, str) or not name.strip() or not isinstance(uri, dict):
         return None
-    if not isinstance(mime, str) or mime.lower().startswith("image/"):
+    # An image is no attachment, but an SVG has text (package 22).
+    if not isinstance(mime, str) or (
+        mime.lower().startswith("image/") and mime.lower().split(";", 1)[0].strip() != _SVG_TYPE
+    ):
         return None
     url = _safe_url(base, uri.get("url"))
     if url is None:

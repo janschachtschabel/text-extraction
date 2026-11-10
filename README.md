@@ -20,7 +20,7 @@ and a playground in English and German.
   schema.org and LRMI fields, the licence (Creative Commons and others, with its source and
   confidence), the page type (such as `content`, `listing` or `imprint`) and the links with their
   category.
-- **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, HTML, plain text and Markdown, by URL or
+- **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG (its text), HTML, plain text and Markdown, by URL or
   as an upload (up to 20 MB, PDFs up to 100 pages). With the OCR worker (Docling) also scans,
   images (PNG, JPEG, TIFF, WebP, BMP) and OpenDocument files (ODT, ODS, ODP). The bytes decide the
   type, not the declared `Content-Type`.

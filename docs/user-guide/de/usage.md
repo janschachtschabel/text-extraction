@@ -240,7 +240,7 @@ unter [Website-Regeln](site-rules.md).
 
 ### Dokumente und Uploads
 
-PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs und CSVs werden wie
+PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs, CSVs und SVG-Grafiken (ihre Textelemente) werden wie
 Seiten umgewandelt: `POST /v1/extract` mit ihrer URL oder `POST /v1/batch`. Die Bytes entscheiden
 vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` oder, wie
 oft bei einem `download.php`, als `text/html` ausgeliefert wird, bleibt ein PDF; als `text/html`
@@ -265,7 +265,7 @@ Textebene, mit der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateie
 
 Eine Seite mit wenig eigenem Text (weniger als `ATTACHMENTS_BELOW_WORDS`, 100 Wörter), etwa die
 Übersicht eines Arbeitsblatts, bietet ihr Material oft als Download an. Der Dienst liest dann bis
-zu `ATTACHMENTS_MAX` (2) der verlinkten Dokumente (PDF, Word, PowerPoint, Excel, EPUB, CSV) und
+zu `ATTACHMENTS_MAX` (2) der verlinkten Dokumente (PDF, Word, PowerPoint, Excel, EPUB, CSV, SVG) und
 hängt ihren Text jeweils unter einer Überschrift mit ihrem Namen an, mit der Warnung
 `attachment_read`. Ein Anhang, der sich nicht lesen lässt (durch robots.txt gesperrt, abgelehnt,
 zu groß, keine Zeit mehr), ergibt die Warnung `attachment_failed` und lässt die Seite, wie sie

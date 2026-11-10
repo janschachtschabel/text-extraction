@@ -621,3 +621,75 @@ def test_without_a_browser_the_scripted_page_gets_its_attachment() -> None:
     data = data_of(run(harness))
 
     assert data.warnings.count("attachment_read") == 1
+
+
+# --- SVG ---
+
+
+SVG_URL = f"{ORIGIN}/files/schema.svg"
+SVG_TEXT = "Der Wasserkreislauf besteht aus Verdunstung, Kondensation und Niederschlag."
+SVG_BODY = (
+    '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg">'
+    f'<path d="M0 0"/><text x="1" y="2">{SVG_TEXT}</text></svg>'
+).encode()
+
+
+def test_thin_page_linking_an_svg_gets_its_text_appended() -> None:
+    harness = Harness(
+        None,
+        {
+            PAGE: fetched(PAGE, page(links=link("/files/schema.svg", "schema.svg"))),
+            SVG_URL: fetched(SVG_URL, SVG_BODY, content_type="image/svg+xml"),
+        },
+    )
+
+    envelope = run(harness)
+
+    data = data_of(envelope)
+    assert SVG_URL in fetched_urls(harness)
+    assert "\n\n## schema.svg\n\n" in (data.content or "")
+    assert SVG_TEXT in (data.content or "").split("## schema.svg")[1]
+    assert data.warnings.count("attachment_read") == 1
+    assert "attachment_failed" not in data.warnings
+    assert data.document is None
+    assert data.content_type == "text/html"
+
+
+def test_svg_declared_by_a_file_entity_is_fetched_and_other_images_are_not() -> None:
+    entities = ",".join(
+        [
+            entity("bild.png", "/download/1", "image/png"),
+            entity("schema", "/download/2", "image/svg+xml"),
+        ]
+    )
+    script = f'<script type="application/json">[{entities}]</script>'
+    svg = f"{ORIGIN}/download/2"
+    harness = Harness(
+        None,
+        {
+            PAGE: fetched(PAGE, page().replace("</body>", f"{script}</body>")),
+            svg: fetched(svg, SVG_BODY, content_type="image/svg+xml"),
+        },
+    )
+
+    data = data_of(run(harness))
+
+    assert [url for url in fetched_urls(harness) if "/download/" in url] == [svg]
+    assert SVG_TEXT in (data.content or "")
+
+
+def test_svg_with_a_doctype_entity_is_not_appended() -> None:
+    bad = (
+        b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&x;</text></svg>'
+    )
+    answers: dict[str, Any] = {
+        PAGE: fetched(PAGE, page(links=link("/files/schema.svg", "schema.svg"))),
+        SVG_URL: fetched(SVG_URL, bad, content_type="image/svg+xml"),
+    }
+
+    data = data_of(run(Harness(None, answers)))
+
+    assert "passwd" not in (data.content or "")
+    assert data.warnings.count("attachment_failed") == 1
+    assert data.content == without_attachments(answers).content

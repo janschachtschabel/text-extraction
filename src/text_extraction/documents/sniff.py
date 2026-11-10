@@ -13,6 +13,7 @@ import zipfile
 from typing import Final, Literal
 
 from text_extraction.documents.types import DocumentKind
+from text_extraction.vision.images import is_svg
 
 __all__ = [
     "TEXT_TYPES",
@@ -64,6 +65,7 @@ _MEDIA_TYPES: Final[dict[DocumentKind, str]] = {
     "tiff": "image/tiff",
     "webp": "image/webp",
     "bmp": "image/bmp",
+    "svg": "image/svg+xml",
 }
 # Declared types under which a body that starts like an HTML page is that page: the document
 # types, an unknown type and none. Other types (``text/plain``, ``application/json``, ...) keep
@@ -118,6 +120,7 @@ _LABELS: Final[dict[DocumentKind, str]] = {
     "tiff": "a TIFF image",
     "webp": "a WebP image",
     "bmp": "a BMP image",
+    "svg": "an SVG image",
 }
 
 
@@ -293,6 +296,8 @@ def _sniff_bytes(body: bytes, *, at_start: bool) -> DocumentKind | None:
         return _sniff_zip(body)
     if head.startswith(_OLE_SIGNATURE):
         return "xls" if _ole_has_workbook(body) else None
+    if is_svg(body):
+        return "svg"
     return None
 
 

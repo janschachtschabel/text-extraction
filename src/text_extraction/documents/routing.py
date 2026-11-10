@@ -8,6 +8,8 @@ worker exists: ``DOCLING_ENABLED``, and ``JOBS_ENABLED`` for the queue it is rea
 The request's ``ocr`` option: ``auto`` sends what needs it to Docling, ``never`` nothing (images
 and OpenDocument files are then unsupported), ``always`` also every PDF.
 
+An SVG is read in the pod itself (``documents/svg.py``), parsed and never rendered.
+
 Light: no converter imports, so the parent processes may use it.
 """
 
@@ -22,6 +24,8 @@ MARKITDOWN_KINDS: Final[frozenset[DocumentKind]] = frozenset(
 DOCLING_KINDS: Final[frozenset[DocumentKind]] = frozenset(
     {"odt", "ods", "odp", "png", "jpeg", "tiff", "webp", "bmp"}
 )
+# Read in the pod itself, parsed and never rendered (package 22): no child, no OCR.
+IN_PROCESS_KINDS: Final[frozenset[DocumentKind]] = frozenset({"svg"})
 OCR_DISABLED_MESSAGE: Final = "OCR is not enabled on this service."
 
 

@@ -228,7 +228,7 @@ that you send with `headers`, or an exemption for the service's egress IP.
 
 ### Documents and uploads
 
-PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
+PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs, CSVs and SVG graphics (their text elements) convert like pages:
 `POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
 `Content-Type` does (a PDF served as `application/octet-stream` or as `text/html`, as a
 `download.php` often does, is still a PDF; binary data declared `text/html` answers
@@ -253,7 +253,7 @@ ODP) are converted too; without it a scan answers its text layer with the warnin
 
 A page with little text of its own (fewer than `ATTACHMENTS_BELOW_WORDS`, 100 words), such as a
 worksheet overview, often offers its material as a download. The service then reads up to
-`ATTACHMENTS_MAX` (2) of the documents it links to (PDF, Word, PowerPoint, Excel, EPUB, CSV) and
+`ATTACHMENTS_MAX` (2) of the documents it links to (PDF, Word, PowerPoint, Excel, EPUB, CSV, SVG) and
 appends their text under a heading with each one's name, with the warning `attachment_read`. An
 attachment that cannot be read (blocked by robots.txt, refused, too large, out of time) adds the
 warning `attachment_failed` and leaves the page as it was. The attachments are fetched with the
