@@ -15,6 +15,7 @@ from typing import Final
 from bs4 import BeautifulSoup, Tag
 
 from text_extraction.convert.mathml import to_latex
+from text_extraction.convert.panels import reveal_solution_panels
 
 HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
 
@@ -136,6 +137,7 @@ def parse_html(html: str) -> BeautifulSoup:
 def prepare_html(html: str) -> BeautifulSoup:
     """Parse the page and put every equation's source in the text as ``$$source$$``."""
     soup = parse_html(html)
+    reveal_solution_panels(soup)
     for equation in soup.select('script[type^="math/tex"], math, mjx-container'):
         if not equation.parent:
             continue
@@ -179,10 +181,13 @@ def restore_equations(text: str, equations: list[str], *, markup: bool) -> str:
 
 
 def strip_non_content(soup: BeautifulSoup) -> None:
-    """Remove scripts, styles, templates and everything hidden from readers, in place."""
+    """Remove scripts, styles, templates and everything hidden from readers, in place.
+
+    Solution panels were revealed by ``prepare_html``; a ``hidden`` class that is left hides
+    a menu or similar (Tailwind's ``hidden`` is ``display: none``)."""
     for tag in soup(_NON_CONTENT_TAGS):
         tag.decompose()
-    for tag in soup.find_all(is_hidden):
+    for tag in soup.find_all(lambda tag: is_hidden(tag) or "hidden" in attr(tag, "class").split()):
         if not tag.decomposed and tag.name not in {"html", "body"}:
             tag.decompose()
 
