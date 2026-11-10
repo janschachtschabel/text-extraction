@@ -24,12 +24,37 @@ def test_details_solution_is_kept() -> None:
     assert "Zwölf." in convert_html(html, "https://x.test/", "text").content
 
 
-def test_hidden_menu_panel_stays_dropped() -> None:
+def test_non_solution_control_never_reveals_its_panel() -> None:
     html = (
         '<main><p>Text.</p><div><button aria-controls="m">Menü</button></div>'
-        '<ul id="m" class="hidden"><li>Impressum</li></ul></main>'
+        '<ul id="m" hidden><li>Impressum</li></ul></main>'
     )
     assert "Impressum" not in convert_html(html, "https://x.test/", "text").content
+
+
+def test_responsive_hidden_class_content_is_kept() -> None:
+    html = (
+        '<main><p>Intro.</p><div class="hidden md:block"><p>Desktop sidebar text.</p></div></main>'
+    )
+    assert "Desktop sidebar text." in convert_html(html, "https://x.test/", "text").content
+
+
+def test_footer_link_does_not_reveal_a_cookie_banner() -> None:
+    html = (
+        '<main><p>Text.</p><footer><a href="/hilfe">Hinweise</a>'
+        "<div hidden><p>Cookie text.</p></div></footer></main>"
+    )
+    assert "Cookie text." not in convert_html(html, "https://x.test/", "text").content
+
+
+def test_two_controls_for_one_panel_reveal_it_once() -> None:
+    html = (
+        '<main><p>Q?</p><button aria-controls="s">Lösung</button>'
+        '<button aria-controls="s">Lösung</button><div id="s" hidden><p>Zwölf.</p></div></main>'
+    )
+    soup = BeautifulSoup(html, "lxml")
+    assert reveal_solution_panels(soup) == 1
+    assert len(soup.find_all("strong")) == 1
 
 
 def test_aria_controls_solution_panel_is_revealed() -> None:

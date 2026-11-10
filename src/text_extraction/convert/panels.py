@@ -9,6 +9,8 @@ from typing import Final
 
 from bs4 import BeautifulSoup, Tag
 
+from text_extraction.convert.dom import HIDDEN_STYLE, attr
+
 SOLUTION_LABEL: Final = re.compile(
     r"^(lösung(en|svorschlag|sweg)?|musterlösung|antwort(en)?|tipps?|hinweis(e)?|erklärung"
     r"|solution(s)?|show (the )?solution|answer(s)?|show answer|hint(s)?)\b",
@@ -17,14 +19,6 @@ SOLUTION_LABEL: Final = re.compile(
 _ARROWS = "▾▸►▼+"
 _SPACE = re.compile(r"\s+")
 _HIDDEN_CLASS = "hidden"
-_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
-
-
-def attr(tag: Tag, name: str) -> str:
-    value = tag.get(name)
-    if value is None:
-        return ""
-    return value if isinstance(value, str) else " ".join(value)
 
 
 def _label(control: Tag) -> str:
@@ -36,7 +30,7 @@ def _is_collapsed(tag: Tag) -> bool:
     return (
         tag.get("hidden") not in (None, "until-found")
         or _HIDDEN_CLASS in attr(tag, "class").split()
-        or bool(_HIDDEN_STYLE.search(attr(tag, "style")))
+        or bool(HIDDEN_STYLE.search(attr(tag, "style")))
     )
 
 
@@ -50,11 +44,11 @@ def _show(tag: Tag) -> None:
         else:
             del tag["class"]
     style = attr(tag, "style")
-    if style and _HIDDEN_STYLE.search(style):
+    if style and HIDDEN_STYLE.search(style):
         kept = [
             part
             for part in style.split(";")
-            if part.strip() and not _HIDDEN_STYLE.fullmatch(part.strip())
+            if part.strip() and not HIDDEN_STYLE.fullmatch(part.strip())
         ]
         if kept:
             tag["style"] = "; ".join(part.strip() for part in kept)
@@ -79,25 +73,43 @@ def _panel_of(soup: BeautifulSoup, control: Tag) -> Tag | None:
     return None
 
 
+def _is_toggle(control: Tag) -> bool:
+    """A control that opens something on the page: not a link to another page, and not a
+    link in the page's header or footer."""
+    has_target = bool(attr(control, "aria-controls"))
+    if control.name == "a" and not (
+        has_target
+        or control.get("href") is None
+        or attr(control, "href").startswith("#")
+        or attr(control, "role") == "button"
+    ):
+        return False
+    if control.name != "button" and not has_target:
+        return control.find_parent(["header", "footer"]) is None
+    return True
+
+
 def reveal_solution_panels(soup: BeautifulSoup) -> int:
     """Open the solution panels in place and return how many were revealed.
 
     A label paragraph goes in front of each revealed panel: the control itself often sits in a
     navigation that is removed later."""
     revealed = 0
+    done: set[int] = set()
     for details in soup.find_all("details"):
         summary = details.find("summary", recursive=False)
         is_solution = summary is not None and SOLUTION_LABEL.match(_label(summary))
         if is_solution and "open" not in details.attrs:
             details["open"] = ""
             revealed += 1
-    for control in soup.select('button, summary, [role="button"], a'):
+    for control in soup.select('button, [role="button"], a'):
         label = _label(control)
-        if not SOLUTION_LABEL.match(label) or control.name == "summary":
+        if not SOLUTION_LABEL.match(label) or not _is_toggle(control):
             continue
         panel = _panel_of(soup, control)
-        if panel is None:
+        if panel is None or id(panel) in done:
             continue
+        done.add(id(panel))
         _show(panel)
         for descendant in panel.find_all(_is_collapsed):
             _show(descendant)

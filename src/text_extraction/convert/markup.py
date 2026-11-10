@@ -14,10 +14,10 @@ from typing import Final
 
 from bs4 import BeautifulSoup, Tag
 
+from text_extraction.convert.dom import HIDDEN_STYLE as HIDDEN_STYLE
+from text_extraction.convert.dom import attr as attr
 from text_extraction.convert.mathml import to_latex
 from text_extraction.convert.panels import reveal_solution_panels
-
-HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
 
 # Marks an element that holds an equation's ``$$source$$``.
 _MATH_MARK = "data-extracted-math"
@@ -45,14 +45,6 @@ BLOCK_TAGS: Final = frozenset(
         *("tbody", "td", "tfoot", "th", "thead", "title", "tr", "ul", "xmp"),
     }
 )
-
-
-def attr(tag: Tag, name: str) -> str:
-    """An attribute as one string; empty when absent (a multi-valued one is joined by spaces)."""
-    value = tag.get(name)
-    if value is None:
-        return ""
-    return value if isinstance(value, str) else " ".join(value)
 
 
 def has_hidden_class(tag: Tag) -> bool:
@@ -181,13 +173,10 @@ def restore_equations(text: str, equations: list[str], *, markup: bool) -> str:
 
 
 def strip_non_content(soup: BeautifulSoup) -> None:
-    """Remove scripts, styles, templates and everything hidden from readers, in place.
-
-    Solution panels were revealed by ``prepare_html``; a ``hidden`` class that is left hides
-    a menu or similar (Tailwind's ``hidden`` is ``display: none``)."""
+    """Remove scripts, styles, templates and everything hidden from readers, in place."""
     for tag in soup(_NON_CONTENT_TAGS):
         tag.decompose()
-    for tag in soup.find_all(lambda tag: is_hidden(tag) or "hidden" in attr(tag, "class").split()):
+    for tag in soup.find_all(is_hidden):
         if not tag.decomposed and tag.name not in {"html", "body"}:
             tag.decompose()
 
