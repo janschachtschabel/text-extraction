@@ -1863,6 +1863,34 @@ def test_a_cancelled_request_still_abandons_its_job(wait_error: Exception | None
     assert dispatcher.abandoned
 
 
+@pytest.mark.parametrize("transcribe", [False, True])
+def test_a_transcribe_request_waits_for_its_render_as_the_asr_pool_may_take_it(
+    transcribe: bool,
+) -> None:
+    """M22: the render of a ``transcribe`` request may move on to the ``asr`` pool, so its wait
+    lasts until the route answers 202 with the job, never abandoning it before."""
+    dispatcher = AbandoningDispatcher(None)
+    seen: list[dict[str, Any]] = []
+
+    async def wait(*args: Any, **kwargs: Any) -> Envelope[ExtractResult] | None:
+        seen.append(kwargs)
+        return None
+
+    dispatcher.wait = wait  # type: ignore[method-assign]
+    state = SimpleNamespace(browser_dispatcher=dispatcher, settings=browser_settings())
+    body = ExtractRequest(url=PAGE, mode="browser", transcribe=transcribe)
+
+    async def scenario() -> None:
+        await _in_browser(
+            state, body, USER, "enforce", BrowserHandover(), "extract", None, time.perf_counter()
+        )
+
+    asyncio.run(scenario())
+
+    (kwargs,) = seen
+    assert kwargs["asr"] is transcribe
+
+
 def test_a_cookie_chromium_would_refuse_is_422_without_its_value() -> None:
     case = BrowserCase()
     with TestClient(case.app) as client:

@@ -64,6 +64,10 @@ __all__ = [
 
 # Seconds on top of the render deadline that a request waits for the result after the claim.
 _RESULT_MARGIN_SECONDS = 5
+# With ``transcribe``, seconds more: the longest wait of a sync request (``wait_seconds`` and its
+# defaults are at most 60 s), so a render that moved on to the ``asr`` pool (M22) is answered
+# 202 by the route before this wait gives the job up.
+_ASR_WAIT_SECONDS = 60.0
 
 type BrowserJobKind = Literal["extract", "screenshot"]
 
@@ -134,13 +138,16 @@ class BrowserDispatcher(PoolDispatcher):
         detached: Callable[[], bool],
         pii: bool = False,
         llm: bool = False,
+        asr: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The result of the job's item 0, or None when no worker claimed it within
         ``BROWSER_QUEUE_WAIT_SECONDS``, it had no result within the render deadline + 5 s after
         the claim (+ ``PII_SYNC_WAIT_SECONDS`` with ``pii``: the render moves on to the ``nlp``
         pool in the same job; + ``LLM_SYNC_WAIT_SECONDS`` with ``llm``: and on to the ``llm``
-        pool), the job is gone, or ``detached()`` turned true. Valkey errors propagate. Each call
-        counts its outcome once."""
+        pool; + ``_ASR_WAIT_SECONDS`` with ``asr``: the one media of a rendered page moves on to
+        the ``asr`` pool, M22, and the route answers 202 with the job before that ends), the job
+        is gone, or ``detached()`` turned true. Valkey errors propagate. Each call counts its
+        outcome once."""
         settings = self._settings
         render_seconds = (
             settings.browser_unblock_timeout_seconds
@@ -149,10 +156,15 @@ class BrowserDispatcher(PoolDispatcher):
         )
         pii_seconds = settings.pii_sync_wait_seconds if pii else 0.0
         llm_seconds = settings.llm_sync_wait_seconds if llm else 0.0
+        asr_seconds = _ASR_WAIT_SECONDS if asr else 0.0
         return await self.wait_for(
             job_id,
             answered="rendered",
             claim_within=settings.browser_queue_wait_seconds,
-            result_within=render_seconds + _RESULT_MARGIN_SECONDS + pii_seconds + llm_seconds,
+            result_within=render_seconds
+            + _RESULT_MARGIN_SECONDS
+            + pii_seconds
+            + llm_seconds
+            + asr_seconds,
             detached=detached,
         )

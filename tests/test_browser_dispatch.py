@@ -304,6 +304,23 @@ async def test_wait_gives_up_after_render_timeout(unblock: bool) -> None:
 
 
 @scenario
+async def test_a_transcribe_wait_outlasts_the_routes_longest_wait() -> None:
+    """With ``asr`` the render may move on to the ``asr`` pool (M22): the wait lasts until the
+    route answers 202 with the job (its longest wait is 60 s), never abandoning it before."""
+    time = FakeTime()
+    parts = Parts(time=time)
+    job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    time.now += 1
+    await parts.store.mark_running(job_id)
+
+    got = await parts.dispatcher.wait(job_id, unblock=False, detached=never_detached, asr=True)
+
+    assert got is None
+    waited = time.now - 101.0
+    assert SETTINGS.browser_timeout_seconds + 5 + 60 <= waited
+
+
+@scenario
 async def test_wait_gives_up_when_detached_or_the_job_is_gone() -> None:
     parts = Parts(time=FakeTime())
     job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")

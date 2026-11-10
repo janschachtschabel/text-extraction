@@ -30,6 +30,7 @@ from tests.fakes import (
 )
 from tests.test_pipeline_render import SHELL, SHELL_WITH_WORDS
 from text_extraction import browser_worker
+from text_extraction.asr_dispatch import asr_queue
 from text_extraction.auth import Principal
 from text_extraction.browser import BrowserPool
 from text_extraction.browser_options import (
@@ -60,6 +61,7 @@ from text_extraction.jobs import JobStore, browser_lease_seconds
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_media import MediaInputMeta, asr_available
 from text_extraction.render import ClearanceStore, Renderer
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue
@@ -127,6 +129,7 @@ class Harness:
         gate: object | None = None,
         guard: object | None = None,
         store: JobStore | None = None,
+        media: object | None = None,
         **overrides: Any,
     ) -> None:
         self.valkey = FakeAsyncRedis()
@@ -149,11 +152,18 @@ class Harness:
             unblock_renderer=cast(Renderer, self.unblock_renderer),
             clearance=cast(ClearanceStore, FakeClearance()),
             timeout_seconds=self.settings.browser_timeout_seconds,
+            media_fetcher=cast(MediaFetcher | None, media),
         )
         self.store = store or JobStore(self.valkey, self.settings, clock=self.clock)
         self.queue = FairQueue(self.valkey, self.settings, "browser", clock=self.clock)
+        self.asr_queue = asr_queue(self.valkey, self.settings)
         self.runner = BrowserRunner(
-            self.pipeline, self.store, self.settings, guard=cast(Any, guard)
+            self.pipeline,
+            self.store,
+            self.settings,
+            guard=cast(Any, guard),
+            asr_queue=self.asr_queue if asr_available(self.settings) else None,
+            registry=self.registry,
         )
         self.worker = Worker(
             self.settings,
@@ -611,6 +621,61 @@ async def test_a_deferred_item_keeps_its_draft_for_its_next_run() -> None:
     assert await harness.store.draft(job_id, 0) == draft
 
 
+# --- the one video of a thin page (package 22, M22) ----------------------------------------------
+
+
+@scenario
+async def test_a_rendered_thin_pages_video_moves_to_the_asr_pool() -> None:
+    """A ``transcribe`` item whose rendered page is thin with one video moves to the ``asr``
+    pool, with the page's answer as its draft (kept, not dropped with the browser's draft);
+    the browser pool completes it without a result."""
+    from tests.test_pipeline_media import MP4, ONE_VIDEO, VIDEO, FakeMediaFetcher, probe, thin_page
+
+    harness = Harness(
+        FakeRenderer(rendered(thin_page(ONE_VIDEO))),
+        answers={VIDEO: fetched(VIDEO, MP4, content_type="video/mp4")},
+        media=FakeMediaFetcher(probe()),
+        asr_enabled=True,
+    )
+    job_id = await harness.submit(JobOptions(mode="browser", compliance="enforce", transcribe=True))
+
+    await harness.process_next()
+
+    assert (await harness.item(job_id)).result is None
+    assert (await harness.asr_queue.counts()).pending == 1
+    stored = await harness.store.get_input(job_id, 0, MediaInputMeta)
+    assert stored is not None
+    _body, meta = stored
+    assert meta.page is True
+    assert meta.url == VIDEO
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.mode_used == "browser"
+    assert draft.data.title == "Film lesson"
+
+
+@scenario
+async def test_without_transcribe_the_rendered_page_is_the_result() -> None:
+    from tests.test_pipeline_media import MP4, ONE_VIDEO, VIDEO, FakeMediaFetcher, probe, thin_page
+
+    harness = Harness(
+        FakeRenderer(rendered(thin_page(ONE_VIDEO))),
+        answers={VIDEO: fetched(VIDEO, MP4, content_type="video/mp4")},
+        media=FakeMediaFetcher(probe()),
+        asr_enabled=True,
+    )
+    job_id = await harness.submit(BROWSER)
+
+    await harness.process_next()
+
+    result = await harness.result(job_id)
+    assert result.data is not None
+    assert result.data.media is not None
+    assert result.data.media.transcript_source is None
+    assert (await harness.asr_queue.counts()).pending == 0
+
+
 # --- the process ------------------------------------------------------------------------------
 
 
@@ -834,12 +899,25 @@ def test_browser_worker_wiring() -> None:
         assert standard._slots is unblock._slots
         assert parts.browsers.xvfb is not None
         assert parts.graceful_seconds >= settings.browser_unblock_timeout_seconds + 5
+        assert runner._asr_queue is None  # without ASR, nothing moves to the asr pool
     finally:
         parts.conversion_pool.shutdown()
+
+    transcribing = build_browser_worker(
+        make_settings(asr_enabled=True), FakeAsyncRedis(), CollectorRegistry()
+    )
+    try:
+        runner = transcribing.worker._runner
+        assert isinstance(runner, BrowserRunner)
+        assert runner._asr_queue is not None
+        assert runner._asr_queue.pool == "asr"
+    finally:
+        transcribing.conversion_pool.shutdown()
 
     plain = build_browser_worker(make_settings(), FakeAsyncRedis(), CollectorRegistry())
     try:
         assert len(plain.browsers.pools) == 1
+        assert plain.worker._runner._asr_queue is None  # type: ignore[attr-defined]
         assert plain.browsers.xvfb is None
         runner = plain.worker._runner
         assert isinstance(runner, BrowserRunner)

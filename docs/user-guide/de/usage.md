@@ -310,6 +310,10 @@ curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/
 #  "status_url": "/v1/jobs/<job id>"}, ...}
 ```
 
+Eine Seite mit wenig eigenem Text (weniger als `ATTACHMENTS_BELOW_WORDS` Wörter), deren einziges
+Medium ein Video- oder Audio-Player ist, bekommt mit `"transcribe": true` die Untertitel oder die
+Transkription dieses Mediums hinter ihren eigenen Text, als hätten Sie die URL des Mediums gesendet.
+
 Eine Transkription läuft auf 4 CPU-Threads etwa in Echtzeit (Medien bis 2 Stunden). Mit
 `ASR_BACKEND=openai` sendet der Worker das Audio stattdessen an einen OpenAI-kompatiblen Endpunkt
 (`ASR_EXTERNAL_BASE_URL`).

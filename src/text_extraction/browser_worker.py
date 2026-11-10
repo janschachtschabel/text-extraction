@@ -25,11 +25,15 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    ``job:{<id>}:artifact:<name>`` (``screenshot.png``, ``screenshot.jpg`` or
    ``screenshot.webp``) for ``ARTIFACT_TTL_SECONDS`` and served at
    ``/v1/jobs/<id>/artifacts/<name>``. While Valkey's memory guard is high, or when the
-   write fails, nothing is stored and the item fails ``internal_error``, retryable (B7);
+   write fails, nothing is stored and the item fails ``internal_error``, retryable (B7).
+   With ``transcribe: true`` and the service's ASR, the one media of a rendered thin page
+   (M22) moves the item to the ``asr`` pool (``asr_dispatch.AsrMove``: the media's input and
+   the page's answer as the item's draft); the item is then completed here without a result;
 4. deletes the secrets and the item's draft once the item has its outcome, also when the run
-   failed. An item that is given back to run again (a gate refusal it is deferred for, a Valkey
-   error, a cancelled shutdown) keeps them for that run; the secrets expire on their own after
-   their short TTL, a draft with the job.
+   failed (but not the draft of an item that moved to the ``asr`` pool). An item that is given
+   back to run again (a gate refusal it is deferred for, a Valkey error, a cancelled shutdown)
+   keeps them for that run; the secrets expire on their own after their short TTL, a draft
+   with the job.
 
 **The process** serves only the internal port, like the extract worker. Before ``/ready``
 answers 200 it loads the language model (and meanwhile starts the document pool's children,
@@ -63,6 +67,7 @@ from prometheus_client import REGISTRY, CollectorRegistry
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from text_extraction.asr_dispatch import ASR_OUTCOMES, ASR_POOL, AsrMove, asr_queue
 from text_extraction.browser import BrowserPool, ChromiumRenderer, PlaywrightLauncher
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets
 from text_extraction.browser_proxy import EgressProxy
@@ -89,6 +94,8 @@ from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
+from text_extraction.pipeline_media import asr_available
+from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.render import ArtifactUnavailable
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -150,7 +157,10 @@ class JobArtifacts:
 
 class BrowserRunner:
     """The ``browser`` pool's ``ItemRunner``; see the module docstring. ``guard`` is the memory
-    guard that keeps screenshots out of a nearly full Valkey."""
+    guard that keeps screenshots out of a nearly full Valkey (and media out of the ``asr``
+    pool). ``asr_queue`` is the ``asr`` pool's queue, None while the service has no ASR: the one
+    media of a rendered thin page moves there (M22); ``registry`` gets
+    ``text_extraction_asr_dispatch_total`` for the refused moves."""
 
     def __init__(
         self,
@@ -159,10 +169,19 @@ class BrowserRunner:
         settings: Settings,
         *,
         guard: MemoryPressure | None = None,
+        asr_queue: FairQueue | None = None,
+        registry: CollectorRegistry | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._store = store
+        self._settings = settings
         self._guard = guard
+        self._asr_queue = asr_queue
+        self._asr_outcomes = (
+            dispatch_counter_for(registry, ASR_OUTCOMES, pool=ASR_POOL)
+            if registry is not None and asr_queue is not None
+            else None
+        )
         self.lease_seconds = browser_lease_seconds(settings)
 
     async def run(
@@ -174,6 +193,7 @@ class BrowserRunner:
         gate_refusals: Literal["fail", "raise"],
     ) -> Envelope[ExtractResult] | None:
         finished = False  # the item gets its outcome now: its secrets are done with
+        moved = False  # to the ``asr`` pool, which reads the draft it stored
         try:
             secrets = await self._store.secrets(job.id)
             if job.has_secrets and secrets.empty():
@@ -183,14 +203,20 @@ class BrowserRunner:
                 _log.info("job_secrets_expired", job_id=job.id)
                 return failed_extract(ErrorCode.TIMEOUT, SECRETS_EXPIRED_MESSAGE, retryable=True)
             draft = await self._store.draft(job.id, item.index)
+            request = _request(job, url, secrets)
+            transcription = self._asr_move(job, item, url) if request.transcribe else None
             envelope = await self._pipeline.run(
-                _request(job, url, secrets),
+                request,
                 job_principal(job),
                 gate_refusals=gate_refusals,
                 artifacts=JobArtifacts(self._store, job.id, self._guard),
                 draft=draft,
+                asr_handoff=transcription,
             )
             finished = True
+            if transcription is not None and transcription.moved:
+                moved = True
+                return None  # the ASR worker writes the item's result
             return envelope
         except _GIVEN_BACK:
             raise
@@ -203,7 +229,22 @@ class BrowserRunner:
         finally:
             if finished:
                 await self._drop_secrets(job.id)
-                await self._drop_draft(job.id, item.index)
+                if not moved:
+                    await self._drop_draft(job.id, item.index)
+
+    def _asr_move(self, job: JobRecord, item: QueueItem, url: str) -> AsrMove | None:
+        if self._asr_queue is None:
+            return None
+        return AsrMove(
+            self._store,
+            self._asr_queue,
+            self._guard,
+            self._settings,
+            job,
+            item,
+            url,
+            outcomes=self._asr_outcomes,
+        )
 
     async def _drop_secrets(self, job_id: str) -> None:
         """Delete the secrets; a failure leaves them to their TTL rather than the result."""
@@ -377,7 +418,14 @@ def build_browser_worker(
     worker = Worker(
         settings,
         valkey,
-        BrowserRunner(pipeline, store, settings, guard=guard),
+        BrowserRunner(
+            pipeline,
+            store,
+            settings,
+            guard=guard,
+            asr_queue=asr_queue(valkey, settings) if asr_available(settings) else None,
+            registry=registry,
+        ),
         store,
         FairQueue(valkey, settings, POOL),
         registry,

@@ -74,6 +74,13 @@ rest:
   fingerprinted like any transcript; without text in it, the draft with the warning
   ``transcript_panel_unavailable``. The rendered page itself is never read.
 
+- The one media of a thin page (M22, the pipeline's step 8b): ``single_embed`` finds it,
+  ``page_media_handoff`` makes the page's answer the draft of its ``AsrNeeded`` (input
+  ``page: true``), ``page_with_subtitles`` appends a platform video's subtitle transcript to the
+  page, and ``page_transcribed`` / ``page_without_transcript`` build the ASR worker's result of
+  such a page: its own answer with the transcript after its text, or with ``no_speech`` or
+  ``asr_unavailable``.
+
 ``AsrNeeded`` goes to the run's ``asr_handoff`` once the deadline's steps are done, with
 ``without_asr``'s answer as the stand-in (never stored); without a handoff that answer is
 final: the draft with ``asr_unavailable`` and without its fingerprint, or, for a file,
@@ -138,6 +145,7 @@ from text_extraction.media.sniff import media_type_of
 from text_extraction.media.transcript import Transcription, build_transcript
 from text_extraction.media.types import (
     LanguageCode,
+    MediaEmbed,
     MediaInfo,
     MediaKind,
     Platform,
@@ -182,7 +190,13 @@ __all__ = [
     "cached_details_only",
     "media_too_long_message",
     "no_speech",
+    "page_media_handoff",
+    "page_transcribed",
+    "page_with_subtitles",
+    "page_with_transcript",
+    "page_without_transcript",
     "panel_result",
+    "single_embed",
     "transcribed",
     "transcribed_content",
     "transcription_final",
@@ -341,6 +355,9 @@ class MediaInputMeta(BaseModel):
     languages: list[LanguageCode]
     compliance: ComplianceReport | None  # the checks the URL passed
     attempts: int  # fetches of the target so far
+    # The one media of a page (M22): the item's draft is that page's result, and the
+    # transcript follows its text.
+    page: bool = False
 
 
 @dataclass(frozen=True)
@@ -413,6 +430,128 @@ def without_asr(
         update={"warnings": [*draft.data.warnings, ASR_UNAVAILABLE_WARNING], "fingerprint": None}
     )
     return draft.model_copy(update={"data": data})
+
+
+# --- the one media of a thin page (M22) ------------------------------------------------------
+
+
+def single_embed(result: ExtractResult, below_words: int | None) -> MediaEmbed | None:
+    """The one media of ``result``'s page that a ``transcribe`` request transcribes (M22): the
+    page's players and declared media are exactly one embed, no track of it was read, and the
+    page has fewer than ``below_words`` words (``ATTACHMENTS_BELOW_WORDS``; None: any number, for
+    an edu-sharing node's file). None for any other result, a bot challenge, a soft 404 or a
+    login wall among them."""
+    media, quality = result.media, result.quality
+    if media is None or media.platform != "html5" or media.transcript_source is not None:
+        return None
+    if len(media.embeds) != 1 or quality is None or result.content is None:
+        return None
+    if below_words is not None and quality.word_count >= below_words:
+        return None
+    if quality.bot_challenge or quality.soft_404 or quality.login_wall or quality.challenge_status:
+        return None
+    return media.embeds[0]
+
+
+def page_media_handoff(
+    needed: AsrNeeded, page: Envelope[ExtractResult], attempts: int
+) -> AsrNeeded:
+    """``needed`` (a media file's or a platform video's) as the one media of ``page`` (M22): the
+    page's judged answer is the draft (its fingerprint kept for the final result), ``attempts``
+    the fetches so far of the page and of the media."""
+    meta = needed.input.model_copy(update={"page": True, "attempts": attempts})
+    return AsrNeeded(draft=page, input=meta)
+
+
+def page_with_transcript(
+    page: ExtractResult, section: str, media: MediaInfo, settings: Settings
+) -> ExtractResult:
+    """``page`` with ``section`` (a transcript in the page's format) after its text, and
+    ``media`` (M22): word count, quality and fingerprint of the joined content; the page's
+    title, metadata, status code and warnings (but ``asr_unavailable``). Not yet judged."""
+    content = _append(page.content or "", [section], page.format)
+    word_count = page.word_count + count_words(section)
+    quality = (
+        page.quality.model_copy(update={"word_count": word_count})
+        if page.quality is not None
+        else None
+    )
+    verdict = quality_error(quality, settings.quality_min_words) if quality is not None else None
+    raw = (
+        page.fingerprint.raw_sha256
+        if page.fingerprint is not None
+        else hashlib.sha256(content.encode()).hexdigest()
+    )
+    failed = verdict is not None and verdict[0] == "failed"
+    return page.model_copy(
+        update={
+            "content": content,
+            "word_count": word_count,
+            "quality": quality,
+            "fingerprint": None if failed else compute_fingerprint(raw, content),
+            "warnings": [code for code in page.warnings if code != ASR_UNAVAILABLE_WARNING],
+            "media": media,
+        }
+    )
+
+
+def page_with_subtitles(
+    page: ExtractResult, transcript: ExtractResult, settings: Settings
+) -> ExtractResult:
+    """``page`` with the subtitle transcript of its one platform video (M22) after its text: the
+    transcript as the platform path wrote it (under the video's title), its source and language
+    in the page's ``media``. CPU-bound: runs on the conversion pool."""
+    found = transcript.media
+    base = page.media or MediaInfo(platform="html5", transcript_source=None)
+    media = base.model_copy(
+        update={
+            "transcript_source": found.transcript_source if found is not None else None,
+            "transcript_language": found.transcript_language if found is not None else None,
+        }
+    )
+    section = _as_section(transcript.content or "", page.format)
+    return page_with_transcript(page, section, media, settings)
+
+
+def page_transcribed(
+    page: ExtractResult, transcription: Transcription, settings: Settings
+) -> ExtractResult:
+    """The result of a page whose one media was transcribed (M22): the page with the transcript
+    after its text as ``## Transcript`` (as a player's track is, M8), ``transcript_source: asr``
+    with the model, the language heard and the duration in its ``media``. Not yet judged.
+    CPU-bound: runs on the conversion pool."""
+    section = _track_section(transcription.segments, None, page.format) or ""
+    base = page.media or MediaInfo(platform="html5", transcript_source=None)
+    media = base.model_copy(
+        update={
+            "transcript_source": "asr",
+            "transcript_language": transcription.language or None,
+            "duration_seconds": transcription.duration,
+            "asr_model": transcription.model,
+        }
+    )
+    return page_with_transcript(page, section, media, settings)
+
+
+def page_without_transcript(page: ExtractResult, warning: str, *, kept: bool) -> ExtractResult:
+    """``page`` when its one media gave no transcript (M22): its own answer with ``warning``
+    (``no_speech``, or ``asr_unavailable`` after a failed transcription), and its fingerprint
+    only when ``kept``: the media is the reason, so the stored answer is final for a later
+    ``transcribe`` request too (``transcription_final``)."""
+    kept_warnings = [code for code in page.warnings if code != ASR_UNAVAILABLE_WARNING]
+    return page.model_copy(
+        update={
+            "warnings": list(dict.fromkeys([*kept_warnings, warning])),
+            "fingerprint": page.fingerprint if kept else None,
+        }
+    )
+
+
+def _as_section(content: str, fmt: OutputFormat) -> str:
+    """A whole result's ``content`` as a part of another one's: an HTML document's body."""
+    if fmt == "html":
+        return content.removeprefix("<html><body>").removesuffix("</body></html>").strip()
+    return content.strip()
 
 
 # --- the ASR worker's results ----------------------------------------------------------------

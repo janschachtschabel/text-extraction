@@ -1051,6 +1051,7 @@ async def _in_browser(
             unblock=unblock,
             detached=lambda: handover.detached,
             pii=body.pii is not None,
+            asr=body.transcribe,
             llm=wants_llm(
                 body.structured,
                 body.chunking,

@@ -63,6 +63,14 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    with ``ocr_unavailable``. An HTML page that does not escalate (fast) or was rendered gets
    the transcripts of its players' ``<track>`` elements appended and its embeds listed
    (``MediaSteps.tracks``), before its verdict.
+8b. With ``transcribe: true``, such a page (in ``auto`` mode the better of the fast result and
+   the render) with fewer than ``ATTACHMENTS_BELOW_WORDS`` words whose players and declared
+   media are one embed (``single_embed``) runs that media through the media steps of its URL in
+   a sub-run (``_page_media``, M22): a file's head as a media URL's (step 4, 5, sniffed as
+   audio or video), a platform player as step 2b. Subtitles follow the page's text; media that
+   needs speech recognition becomes an ``AsrNeeded`` with the page's answer as its draft. An
+   edu-sharing node's audio or video file on its host (step 4b) takes the same step, whatever
+   its words. Anything else leaves the page's answer as it is.
 
 Media that needs speech recognition (``transcribe: true``) becomes an ``AsrNeeded`` for
 ``asr_handoff``, which ``run`` calls once the deadline's steps are done, with the answer without
@@ -88,7 +96,8 @@ draft, and for a URL the fingerprint and the cache as above (F14).
 
 The ASR worker builds the result of transcribed media with ``transcribed_result``: the
 transcript (or the draft with ``asr_unavailable`` when the transcription failed), and for a URL
-the fingerprint and the cache as above (M10).
+the fingerprint and the cache as above (M10). The one media of a page (step 8b) keeps the page:
+its answer with the transcript after its text (``_page_transcribed``).
 
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
@@ -200,6 +209,7 @@ from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
 from text_extraction.documents.sniff import media_type, named_text_type, not_text, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
+from text_extraction.edusharing import render_node
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import (
@@ -227,7 +237,7 @@ from text_extraction.media.pool import MediaFetcher
 from text_extraction.media.sites import MediaTarget, media_target
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
 from text_extraction.media.transcript import Transcription
-from text_extraction.media.types import MediaInfo, MediaKind
+from text_extraction.media.types import MediaEmbed, MediaInfo, MediaKind
 from text_extraction.metadata import (
     PageMetadata,
     StructuredItems,
@@ -266,6 +276,8 @@ from text_extraction.pipeline_documents import (
 )
 from text_extraction.pipeline_edusharing import EduSharingSteps
 from text_extraction.pipeline_media import (
+    ASR_UNAVAILABLE_WARNING,
+    NO_SPEECH_WARNING,
     PLAYLIST_MESSAGE,
     TRANSCRIPTION_DISABLED_MESSAGE,
     TRANSCRIPTION_NOT_HANDED_MESSAGE,
@@ -278,7 +290,12 @@ from text_extraction.pipeline_media import (
     cached_details_only,
     is_transcript,
     no_speech,
+    page_media_handoff,
+    page_transcribed,
+    page_with_subtitles,
+    page_without_transcript,
     panel_result,
+    single_embed,
     transcribed,
     transcribed_content,
     transcription_final,
@@ -384,6 +401,11 @@ _RENDER_MARGIN_SECONDS = 2.0
 # extraction's deadline, so a renderer that overruns its own still leaves time to answer with
 # the draft (P13-S2).
 _PANEL_ANSWER_SECONDS = 1.0
+# The one media of a thin page (step 8b, M22) is fetched or probed until this much before the
+# extraction's deadline, so the page still gets its answer.
+_PAGE_MEDIA_RESERVE_SECONDS = 1.0
+# The platform answers whose transcript follows a page's text (M22).
+_SUBTITLE_SOURCES = frozenset({"manual_subtitles", "auto_subtitles"})
 # Only the start of a page is searched for the <html lang> attribute.
 _LANG_SCAN_CHARS = 65_536
 _MAX_TAG_CHARS = 4096
@@ -839,6 +861,7 @@ class Pipeline:
             check=self._target_report,
             fetch=self._json_fetch,
             page=self._node_page,
+            media=self._node_media,
         )
         self._media = (
             MediaSteps(
@@ -1183,7 +1206,13 @@ class Pipeline:
         a URL the answer is compared with the URL's previous fingerprint and stored in the result
         cache under the URL's key (a platform video's canonical URL, with ``media``), like a fast
         result (``_finish``), so the next request is a hit. An upload's is not: its fingerprint is
-        computed, but neither compared nor stored (F17)."""
+        computed, but neither compared nor stored (F17).
+
+        The one media of a page (``meta.page``, M22) is answered by ``_page_transcribed``."""
+        if meta.page and isinstance(req, ExtractRequest) and draft is not None and draft.data:
+            return await self._page_transcribed(
+                req, principal, meta, draft.data, transcription, final=final
+            )
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
@@ -1251,6 +1280,49 @@ class Pipeline:
             kept=verdict is None or verdict[0] != "failed",
         )
         return self._envelope(result)
+
+    async def _page_transcribed(
+        self,
+        req: ExtractRequest,
+        principal: Principal,
+        meta: MediaInputMeta,
+        page: ExtractResult,
+        transcription: Transcription | Envelope[ExtractResult],
+        *,
+        final: bool,
+    ) -> Envelope[ExtractResult]:
+        """The result of a page whose one media the ASR worker transcribed (M22): the page's
+        answer (the item's draft) with the transcript after its text (``page_transcribed``), its
+        quality verdict deciding the status. Without speech the page's answer with
+        ``no_speech``, kept; after a failed transcription with ``asr_unavailable``, kept only
+        when the failure is the media's own (``final``, not retryable). Compared and stored under
+        the page's key, with the page's compliance report and final URL."""
+        run = self._media_run(req, principal, meta)
+        run.media = None  # filed under the page's URL, as the page is
+        run.report = page.compliance
+        run.final_url = page.final_url
+        await self._load_learned(run)
+        result: ExtractResult
+        if isinstance(transcription, Envelope):
+            error = transcription.error
+            kept = final and error is not None and not error.retryable
+            result = page_without_transcript(page, ASR_UNAVAILABLE_WARNING, kept=kept)
+        else:
+            run.attempts += 1  # the download
+            run.fetch_ms += transcription.fetch_ms
+            run.convert_ms += transcription.convert_ms
+            if not transcription.has_speech:
+                result = page_without_transcript(page, NO_SPEECH_WARNING, kept=True)
+            else:
+                started = time.perf_counter()
+                result = await self._pool.run(page_transcribed, page, transcription, self._settings)
+                run.convert_ms += _ms(started)
+        result = result.model_copy(
+            update={"attempts": run.attempts, "timings": run.timings(), "cache": run.cache}
+        )
+        envelope = await self._finish(run, self._envelope(result), Validators())
+        envelope.trace_id = current_trace_id()
+        return envelope
 
     def _media_run(self, req: ExtractRequest, principal: Principal, meta: MediaInputMeta) -> _Run:
         """The run state of a URL's transcribed media, from what its extraction learned: the
@@ -1482,8 +1554,8 @@ class Pipeline:
             return await self._panel_rendered(run, run.draft)
 
         stored = await self._cached(run) if run.cacheable else None
-        if stored is not None and req.transcribe and _metadata_only(stored.result):
-            stored = None  # the details only: a transcription may do better
+        if stored is not None and req.transcribe and self._transcript_owed(run, stored.result):
+            stored = None  # the details or the page only: a transcription may do better
         if stored is not None and stored.fresh:
             return self._serve_hit(run, stored)
         if target is not None:
@@ -1631,6 +1703,187 @@ class Pipeline:
             else TRANSCRIPTION_DISABLED_MESSAGE
         )
         return without_asr(needed, run, message=message)
+
+    # --- step 8b: the one media of a thin page (M22) -------------------------------------------
+
+    def _transcribes(self, run: _Run) -> bool:
+        """Whether ``run`` may transcribe the one media of its page (M22): the media steps, a
+        ``transcribe`` request of a key that may use transcription (``ASR_ALLOW_USERS``) on a
+        service that has it, and not a site crawl's page, a file a render ended on or a request
+        with caller secrets (the media would be fetched without them)."""
+        settings = self._settings
+        return (
+            self._media is not None
+            and run.req.transcribe
+            and asr_available(settings)
+            and allowed("asr", "admin" if run.admin else "user", settings)
+            and not run.private
+            and not run.site_links
+            and not run.direct
+        )
+
+    def _transcript_owed(self, run: _Run, stored: ExtractResult) -> bool:
+        """Whether a stored result is no hit for a ``transcribe`` request: a platform video's
+        details without a transcript (``_metadata_only``), or a page (an edu-sharing node) whose
+        one media step 8b would transcribe and that no transcription answered for good."""
+        if _metadata_only(stored):
+            return True
+        below = None if render_node(run.target) is not None else self._below_words()
+        return (
+            self._transcribes(run)
+            and not transcription_final(stored)
+            and single_embed(stored, below) is not None
+        )
+
+    def _below_words(self) -> int:
+        return self._settings.attachments_below_words
+
+    async def _with_page_media(
+        self, run: _Run, envelope: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        """Step 8b (M22): the answer of a page with fewer than ``ATTACHMENTS_BELOW_WORDS`` words
+        whose players and declared media are one embed (``single_embed``), for a ``transcribe``
+        request: with that video's subtitles after its text, or the stand-in of its hand-off to
+        the transcription (``_page_media``). Any other answer is returned as it is."""
+        data = envelope.data
+        if data is None or not self._transcribes(run):
+            return envelope
+        embed = single_embed(data, self._below_words())
+        if embed is None:
+            return envelope
+        found = await self._page_media(run, data, embed, envelope)
+        return envelope if found is None else self._envelope(found)
+
+    async def _node_media(
+        self, run: _Run, result: ExtractResult, embed: MediaEmbed
+    ) -> ExtractResult | None:
+        """Step 8b for an edu-sharing node's audio or video file (step 4b, R3), whatever the
+        node's words: as for a page's one media."""
+        if not self._transcribes(run):
+            return None
+        return await self._page_media(run, result, embed, self._envelope(result))
+
+    async def _page_media(
+        self, run: _Run, page: ExtractResult, embed: MediaEmbed, judged: Envelope[ExtractResult]
+    ) -> ExtractResult | None:
+        """``page`` (``judged`` its answer) with what its one media ``embed`` gave, not yet
+        judged, or None (today's answer). The media runs through the media steps of a URL in a
+        sub-run of its own (``_attachment_run``) until ``_PAGE_MEDIA_RESERVE_SECONDS`` before
+        the deadline: a file's head is fetched as a media URL is (``_raw``: its compliance
+        checks, its host's turn, ``MEDIA_HEAD_BYTES``) and must sniff as audio or video; a
+        platform video is probed as its URL would be (``_embedded_platform``). Subtitles follow
+        the page's text at once. Media that needs speech recognition goes to the run's
+        ``asr_handoff`` with the page's answer as its draft (``page_media_handoff``); the
+        stand-in is that answer with ``asr_unavailable`` and without its fingerprint. Without a
+        hand-off nothing is fetched for a file, and a platform video without subtitles leaves
+        the page's answer as it is."""
+        if embed.kind == "file" and run.asr_handoff is None:
+            return None
+        loop = asyncio.get_running_loop()
+        when = run.deadline.when() if run.deadline is not None else None
+        if when is None:  # pragma: no cover - the run always has a deadline
+            when = loop.time() + self._settings.extract_timeout_seconds
+        cutoff = asyncio.timeout_at(when - _PAGE_MEDIA_RESERVE_SECONDS)
+        sub = _attachment_run(run, embed.url, cutoff)
+        found: AsrNeeded | ExtractResult | None = None
+        try:
+            async with cutoff:
+                if embed.kind == "file":
+                    found = await self._embedded_file(sub)
+                else:
+                    found = await self._embedded_platform(sub, embed.url)
+        except TimeoutError:
+            if not cutoff.expired():
+                raise
+            _log.info("page_media_failed", host=sub.host, reason="timeout")
+        finally:
+            run.attempts += sub.attempts
+            run.fetch_ms += sub.fetch_ms
+            run.compliance_ms += sub.compliance_ms
+            run.convert_ms += sub.convert_ms
+        # The page's fetches (a draft's included, in ``auto``) and the media's.
+        attempts = page.attempts + sub.attempts
+        if isinstance(found, AsrNeeded):
+            if run.asr_handoff is None:
+                return None  # a platform video without subtitles: nothing to hand it to
+            needed = page_media_handoff(found, judged, attempts)
+            run.asr_needed = needed  # `run` hands it over once the deadline is off
+            stand_in = without_asr(needed, run).data
+            if stand_in is None:  # pragma: no cover - a page's draft has data
+                return None
+            return stand_in.model_copy(update={"attempts": attempts})
+        if found is None:
+            return None
+        started = time.perf_counter()
+        try:
+            merged = await self._pool.run(page_with_subtitles, page, found, self._settings)
+        finally:
+            run.convert_ms += _ms(started)
+        return merged.model_copy(update={"attempts": attempts})
+
+    async def _embedded_file(self, sub: _Run) -> AsrNeeded | None:
+        """The ``AsrNeeded`` of the media file at ``sub``'s URL, its head fetched as a media URL
+        is; None when it is blocked, fails, answers no 2xx or is no audio or video (logged with
+        the host and the reason, never the URL)."""
+        if self._media is None:  # pragma: no cover - only called with media on
+            return None
+        fetched = await self._raw(sub, max_bytes=MEDIA_HEAD_BYTES, truncate=True)
+        if isinstance(fetched, Envelope):
+            reason = fetched.error.code.value if fetched.error is not None else "failed"
+            _log.info("page_media_failed", host=sub.host, reason=reason)
+            return None
+        if not 200 <= fetched.status < 300:
+            _log.info("page_media_failed", host=sub.host, reason=f"status_{fetched.status}")
+            return None
+        kind = await self._pool.run(
+            sniff_media, fetched.content[:MEDIA_HEAD_BYTES], fetched.content_type
+        )
+        if kind is None:
+            _log.info("page_media_failed", host=sub.host, reason="not_media")
+            return None
+        outcome = await self._media.media_file(sub, fetched, kind)
+        return outcome if isinstance(outcome, AsrNeeded) else None
+
+    async def _embedded_platform(self, sub: _Run, url: str) -> AsrNeeded | ExtractResult | None:
+        """The platform video ``url`` as step 2b reads its URL (M1): the canonical URL's
+        compliance checks, then the media steps in its host's turn. Its subtitle transcript, or
+        the ``AsrNeeded`` of a video without subtitles; None for anything else (blocked, no
+        video, too long, a failure: logged)."""
+        target = media_target(url)
+        media = self._media
+        if media is None or target is None or target.video_id is None:
+            return None
+        canonical = target.canonical_url
+        sub.final_url = canonical
+        sub.host = urlsplit(canonical).hostname
+
+        async def probe() -> Envelope[ExtractResult] | AsrNeeded | NoVideo | None:
+            turn = HostTurn(self._gate)
+            try:
+                sub.report = await self._check_origin(sub, canonical, turn)
+                if compliance_block(sub.report) is not None:
+                    return None
+                waited = time.perf_counter()
+                await turn.take(sub.host or "", sub.report.crawl_delay)
+                sub.fetch_ms += _ms(waited)
+                return await media.platform(sub, target)
+            finally:
+                await turn.give_back()
+
+        outcome = await self._guarded(sub, probe())
+        if isinstance(outcome, AsrNeeded):
+            return outcome
+        found = outcome.data if isinstance(outcome, Envelope) else None
+        if (
+            isinstance(outcome, Envelope)
+            and outcome.status != "failed"
+            and found is not None
+            and found.media is not None
+            and found.media.transcript_source in _SUBTITLE_SOURCES
+        ):
+            return found
+        _log.info("page_media_failed", host=sub.host, reason="no_subtitles")
+        return None
 
     def _cache_options_of(self, run: _Run) -> dict[str, Any]:
         options = dom_options(run.req.structured, run.req.pii)
@@ -2121,6 +2374,7 @@ class Pipeline:
             tracked = await self._media.tracks(run, text, result, raw_sha256=fetched.raw_sha256)
             if tracked is not result:
                 envelope = self._envelope(tracked)
+            envelope = await self._with_page_media(run, envelope)  # step 8b
         return await self._finish(run, envelope, run.validators)
 
     def _page_result(self, run: _Run, processed: _Processed) -> ExtractResult:
@@ -2496,6 +2750,7 @@ class Pipeline:
         # This run's fast result keeps its validators; a draft (fetched elsewhere) or a render
         # has none, and a run that took no fast step has none either.
         fast = winner.data is not None and winner.data.mode_used == "fast"
+        winner = await self._with_page_media(run, winner)  # step 8b, on the better result
         return await self._finish(run, winner, run.validators if fast else Validators())
 
     async def _render_and_extract(self, run: _Run) -> Envelope[ExtractResult]:
@@ -2813,7 +3068,8 @@ class Pipeline:
         ):
             await self._clearance.put(run.host or "", list(rendered.cookies))
         if run.comparing:
-            return envelope
+            return envelope  # `_rendered` takes step 8b once the better result is known
+        envelope = await self._with_page_media(run, envelope)  # step 8b
         return await self._finish(run, envelope, Validators())  # B10: never revalidated
 
     def _file_of(self, run: _Run, rendered: Rendered) -> str | None:

@@ -26,15 +26,18 @@ decides) and is not a site crawl's page asks the repository for the node's metad
 4. The node's file is followed as an attachment (``AttachmentSteps.follow_attachments``,
    whatever the page's words: the file is the material) when its URL is on the render URL's host
    and ``ATTACHMENTS_MAX`` is not 0; a file on another host, or with attachments switched off,
-   is listed in the page, never fetched. A kind that is not converted
-   (audio, video, archives) is listed only. Its text is appended under the file's name as for
-   step 7b, with ``attachment_read`` or ``attachment_failed``; a failure that may pass leaves the
-   result uncached (``attachments_retry``).
+   is listed in the page, never fetched. A kind that is not converted (an archive, for example)
+   is listed only. Its text is appended under the file's name as for step 7b, with
+   ``attachment_read`` or ``attachment_failed``; a failure that may pass leaves the result
+   uncached (``attachments_retry``).
+5. An audio or video file (by its declared ``mimetype``) is no attachment: it is listed in
+   ``media.embeds`` as well, and on the render URL's host a request with ``transcribe: true``
+   hands it to the media steps as a thin page's one media (the pipeline's step 8b, ruling M22),
+   whatever ``ATTACHMENTS_MAX`` says: the node's page is the stand-in, and its text comes
+   before the transcript.
 
 The answer is cached and fingerprinted as a page's is (``_finish``), without validators: a stale
-entry is read through the API again. ``mode_used`` stays ``fast``. Audio and video files are
-listed; the transcription of a node's media file (``transcribe: true``) belongs to package 22's
-single-media hand-off (Task 6), whose hook is marked below.
+entry is read through the API again. ``mode_used`` stays ``fast``.
 """
 
 import asyncio
@@ -51,6 +54,8 @@ from text_extraction.edusharing import metadata_url, node_page, parse_metadata, 
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.fetch import FetchResult
+from text_extraction.media.sniff import is_declared_media
+from text_extraction.media.types import MediaEmbed, MediaInfo
 from text_extraction.pipeline_attachments import AttachmentRun, AttachmentSteps
 from text_extraction.settings import Settings
 
@@ -80,7 +85,9 @@ class EduSharingSteps[R: NodeRun]:
     the gate), ``fetch`` fetches a sub-run's URL as JSON within ``CONVERT_MAX_BYTES`` (a
     ``FetchResult`` of any status, or the failed envelope of a block, a refusal or a fetch error),
     and ``page`` converts a node's page as a fetched HTML page (its result, or the failed
-    envelope of a page that broke the converter)."""
+    envelope of a page that broke the converter), and ``media`` takes an audio or video file on the
+    render URL's host to the media steps (the pipeline's step 8b: its subtitles or transcription,
+    or None when the request does not transcribe it)."""
 
     def __init__(
         self,
@@ -92,6 +99,7 @@ class EduSharingSteps[R: NodeRun]:
         check: Callable[[R], Awaitable[ComplianceReport | Envelope[ExtractResult]]],
         fetch: Callable[[R], Awaitable[FetchResult | Envelope[ExtractResult]]],
         page: Callable[[R, FetchResult], Awaitable[ExtractResult | Envelope[ExtractResult]]],
+        media: Callable[[R, ExtractResult, MediaEmbed], Awaitable[ExtractResult | None]],
     ) -> None:
         self._settings = settings
         self._threads = threads
@@ -100,6 +108,7 @@ class EduSharingSteps[R: NodeRun]:
         self._check = check
         self._fetch = fetch
         self._page = page
+        self._media = media
 
     async def node_result(self, run: R) -> ExtractResult | None:
         """The result of ``run``'s render URL from its node's metadata and file, not yet judged
@@ -152,10 +161,17 @@ class EduSharingSteps[R: NodeRun]:
             return None
         if attachment is None:
             return result
+        if is_declared_media(attachment.mime):
+            # Listed as the node's media (D4 a); on the render URL's host, a ``transcribe``
+            # request hands it on as a page's one media (M22, R3), whatever ATTACHMENTS_MAX says.
+            embed = MediaEmbed(url=attachment.url, kind="file")
+            info = MediaInfo(platform="html5", transcript_source=None, embeds=[embed])
+            result = result.model_copy(update={"media": info})
+            if _same_host(attachment, run.target):
+                return await self._media(run, result, embed) or result
+            return result
         if not _same_host(attachment, run.target) or self._settings.attachments_max == 0:
             return result  # listed in the page, never fetched
-        # Task 6 hook: an audio or video file (``follow_attachments`` passes it over) goes to the
-        # media steps here when the request has ``transcribe``.
         followed, warnings = await self._attachments.follow_attachments(run, [attachment], 1)
         return await self._attachments.appended(
             run, result, followed, warnings, raw_sha256=fetched.raw_sha256
