@@ -6,6 +6,7 @@ The pages are synthetic. One test converts a real DOCX in the module's MarkItDow
 others answer each conversion with a fake pool."""
 
 import asyncio
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -348,6 +349,26 @@ def test_attachment_that_needs_ocr_appends_its_text_layer() -> None:
     assert data.document is None
 
 
+def test_slow_attachment_uses_half_of_the_time_left_at_most() -> None:
+    url = pdf_url(1)
+
+    async def slow(_validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(30)
+        return pdf_answer(url)
+
+    harness = fake_harness(
+        {PAGE: fetched(PAGE, page(links=pdf_link(1))), url: slow}, extract_timeout_seconds=8
+    )
+    started = time.perf_counter()
+
+    envelope = run(harness)
+
+    # Half of the ~8 s left, not up to 1 s before the deadline: the page's own last steps (a
+    # player's tracks) keep their time.
+    assert time.perf_counter() - started < 5.5
+    assert data_of(envelope).warnings.count("attachment_failed") == 1
+
+
 def test_slow_attachment_leaves_the_page_its_answer() -> None:
     url = pdf_url(1)
 
@@ -414,3 +435,189 @@ def test_site_crawl_page_fetches_no_attachment() -> None:
 
     assert pdf_url(1) not in fetched_urls(harness)
     assert "attachment_read" not in data.warnings
+
+
+# --- retryable failures are not cached ---
+
+
+@pytest.mark.parametrize(
+    ("status", "cached"), [(503, False), (429, False), (404, True), (403, True)]
+)
+def test_only_a_permanent_attachment_failure_is_cached(status: int, cached: bool) -> None:
+    url = f"{OTHER}/files/blatt-1.pdf"
+    harness = fake_harness(
+        {
+            PAGE: fetched(PAGE, page(links=link(url, "Blatt 1"))),
+            url: fetched(url, "Fehler", status=status),
+        }
+    )
+
+    envelope = run(harness, cache=True)
+
+    assert data_of(envelope).warnings.count("attachment_failed") == 1
+    assert (harness.keys("res:*") != []) is cached
+
+
+def test_attachment_timeout_is_not_cached() -> None:
+    url = pdf_url(1)
+
+    async def slow(_validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(10)
+        return pdf_answer(url)
+
+    harness = fake_harness(
+        {PAGE: fetched(PAGE, page(links=pdf_link(1))), url: slow}, extract_timeout_seconds=3
+    )
+
+    envelope = run(harness, cache=True)
+
+    assert data_of(envelope).warnings.count("attachment_failed") == 1
+    assert harness.keys("res:*") == []
+
+
+def test_read_attachment_is_cached() -> None:
+    harness = fake_harness(
+        {PAGE: fetched(PAGE, page(links=pdf_link(1))), pdf_url(1): pdf_answer(pdf_url(1))}
+    )
+
+    envelope = run(harness, cache=True)
+
+    assert data_of(envelope).warnings.count("attachment_read") == 1
+    assert harness.keys("res:*") != []
+
+
+# --- declared types and the attachment's own warnings ---
+
+
+def entity(name: str, path: str, mime: str) -> str:
+    return (
+        f'{{"type":"file--file","id":"{name}","attributes":{{"filename":"{name}",'
+        f'"uri":{{"value":"public://{name}","url":"{path}"}},"filemime":"{mime}"}}}}'
+    )
+
+
+def test_declared_types_that_do_not_convert_are_not_fetched() -> None:
+    entities = ",".join(
+        [
+            entity("paket", "/download/1", "application/zip"),
+            entity("text", "/download/2", "application/vnd.oasis.opendocument.text"),
+            entity("blatt", "/download/3", "application/octet-stream"),
+        ]
+    )
+    script = f'<script type="application/json">[{entities}]</script>'
+    blatt = f"{ORIGIN}/download/3"
+    harness = fake_harness(
+        {
+            PAGE: fetched(PAGE, page().replace("</body>", f"{script}</body>")),
+            blatt: pdf_answer(blatt),
+        },
+        attachments_max=1,
+    )
+
+    data = data_of(run(harness))
+
+    assert [url for url in fetched_urls(harness) if "/download/" in url] == [blatt]
+    assert data.warnings.count("attachment_read") == 1
+
+
+def test_attachment_warnings_reach_the_page() -> None:
+    harness = Harness(
+        None,
+        {PAGE: fetched(PAGE, page(links=pdf_link(1))), pdf_url(1): pdf_answer(pdf_url(1))},
+        pool=FakePool(reply(content=ATTACHMENT_TEXT, warnings=["pages_truncated"])),
+    )
+
+    data = data_of(run(harness))
+
+    assert data.warnings.count("pages_truncated") == 1
+    assert data.warnings.count("attachment_read") == 1
+
+
+def test_attachment_without_its_ocr_says_so() -> None:
+    harness = Harness(
+        None,
+        {PAGE: fetched(PAGE, page(links=pdf_link(1))), pdf_url(1): pdf_answer(pdf_url(1))},
+        pool=FakePool(reply(content=ATTACHMENT_TEXT, needs_ocr=True)),
+        docling_enabled=True,
+    )
+
+    data = data_of(run(harness))
+
+    assert data.warnings.count("ocr_unavailable") == 1
+
+
+# --- auto: the page's own verdict decides the escalation ---
+
+SCRIPTED = '<script>document.title = "x";</script>'
+RICH = page(PARAGRAPH * 5)
+
+
+def test_hanging_attachment_does_not_cost_the_render_its_time() -> None:
+    url = f"{OTHER}/files/blatt-1.pdf"
+
+    async def hanging(_validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(30)
+        return pdf_answer(url)
+
+    thin = page(links=link(url, "Blatt 1")).replace("</body>", f"{SCRIPTED}</body>")
+    harness = Harness(
+        None,
+        {PAGE: fetched(PAGE, thin), url: hanging},
+        pool=FakePool(reply(content=ATTACHMENT_TEXT)),
+        renderer=FakeRenderer(rendered(RICH)),
+        browser_enabled=True,
+        extract_timeout_seconds=8,
+    )
+
+    envelope = run(harness)
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.mode_used == "browser"
+    assert url not in fetched_urls(harness)
+    assert "attachment_failed" not in data.warnings
+
+
+def test_thin_scripted_page_still_escalates() -> None:
+    thin = page(links=pdf_link(1)).replace("</body>", f"{SCRIPTED}</body>")
+    harness = Harness(
+        None,
+        {PAGE: fetched(PAGE, thin), pdf_url(1): pdf_answer(pdf_url(1))},
+        pool=FakePool(reply(content=ATTACHMENT_TEXT)),
+        renderer=FakeRenderer(rendered(RICH)),
+        browser_enabled=True,
+    )
+
+    envelope = run(harness)
+
+    data = data_of(envelope)
+    assert data.mode_used == "browser"
+    assert "Photosynthesis" in (data.content or "")
+    assert "## Blatt 1" not in (data.content or "")
+    assert pdf_url(1) not in fetched_urls(harness)  # the rendered page is not thin
+
+
+def test_escalated_thin_page_follows_the_rendered_pages_attachments() -> None:
+    thin = page(links=pdf_link(1)).replace("</body>", f"{SCRIPTED}</body>")
+    harness = Harness(
+        None,
+        {PAGE: fetched(PAGE, thin), pdf_url(1): pdf_answer(pdf_url(1))},
+        pool=FakePool(reply(content=ATTACHMENT_TEXT)),
+        renderer=FakeRenderer(rendered(page(links=pdf_link(1)))),
+        browser_enabled=True,
+    )
+
+    data = data_of(run(harness))
+
+    assert data.mode_used == "browser"
+    assert data.warnings.count("attachment_read") == 1
+    assert fetched_urls(harness).count(pdf_url(1)) == 1  # once, by the render's step
+
+
+def test_without_a_browser_the_scripted_page_gets_its_attachment() -> None:
+    thin = page(links=pdf_link(1)).replace("</body>", f"{SCRIPTED}</body>")
+    harness = fake_harness({PAGE: fetched(PAGE, thin), pdf_url(1): pdf_answer(pdf_url(1))})
+
+    data = data_of(run(harness))
+
+    assert data.warnings.count("attachment_read") == 1

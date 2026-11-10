@@ -45,8 +45,10 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    anything else.
 7b. A fetched or rendered HTML page with fewer than ``ATTACHMENTS_BELOW_WORDS`` words gets the
    text of at most ``ATTACHMENTS_MAX`` of its attachments appended, each fetched through these
-   steps 2 to 7 (``fetch_raw``'s steps, ``DOCUMENT_MAX_BYTES``, the run's deadline) and
-   converted by MarkItDown (``pipeline_attachments``, package 22).
+   steps 2 to 7 (``fetch_raw``'s steps, ``DOCUMENT_MAX_BYTES``, half of the time left) and
+   converted by MarkItDown (``pipeline_attachments``, package 22). A fast ``auto`` result that
+   escalates on its own verdict follows none: the render's step 7b does. A result whose
+   attachment failed for a reason that may pass is not cached (``attachments_retry``).
 8. Quality verdict, language, metadata, links (each with its category), the page type of a
    fetched or rendered HTML page (``page_types.page_type``), fingerprint and cache. A
    document's result is final: it never goes to the browser, and a cached one is served even
@@ -510,6 +512,8 @@ class _Run:
     learned: dict[str, SelectorRule] = field(default_factory=dict)
     learned_unavailable: bool = False
     site_links: bool = False  # the page's typed links go into ``data.site`` (P9-S10)
+    # An attachment failed for a reason that may pass (step 7b): the result is not cached.
+    attachments_retry: bool = False
 
     @property
     def cache_url(self) -> str:
@@ -2039,14 +2043,17 @@ class Pipeline:
             site=processed.site,
             page_type=processed.page_type,
         )
-        if kind == "html":  # step 7b, before the verdict
-            result = await self._attachments.append_attachments(
-                run, result, text, raw_sha256=fetched.raw_sha256
-            )
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
             # B5: the browser's result, or the better of both, is stored instead of this one.
+            # The page's own verdict decides; the render's step 7b follows the attachments.
             return envelope
+        if kind == "html":  # step 7b, then the verdict again
+            appended = await self._attachments.append_attachments(
+                run, result, text, raw_sha256=fetched.raw_sha256
+            )
+            if appended is not result:
+                result, envelope = appended, self._envelope(appended)
         if kind == "html" and self._media is not None:
             tracked = await self._media.tracks(run, text, result, raw_sha256=fetched.raw_sha256)
             if tracked is not result:
@@ -2159,7 +2166,10 @@ class Pipeline:
         # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again, nor
         # a result whose selector rules did not run (a queue wait, a respawned or failed child:
         # transient, as ``learned_selectors_unavailable``; the next request runs them again).
-        complete = not _UNCACHED_WARNINGS.intersection(result.warnings)
+        # Nor one whose attachment failed for a reason that may pass (step 7b).
+        complete = (
+            not _UNCACHED_WARNINGS.intersection(result.warnings) and not run.attachments_retry
+        )
         if (
             run.cacheable
             and envelope.status != "failed"

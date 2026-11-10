@@ -125,13 +125,18 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    **Step 7b, attachments of a thin page (package 22, `pipeline_attachments.py`):** a fetched or
    rendered HTML page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words, and no bot
    challenge, soft 404 or login wall, gets the text of at most `ATTACHMENTS_MAX` (2) of its
-   attachments appended, before its quality verdict (step 4) and the fingerprint (step 7): a
-   worksheet overview or a lesson plan often carries its material as a download. A site crawl's
-   pages do not: the crawl lists file links and never fetches them. The candidates
+   attachments appended, then is judged again (step 4) and fingerprinted (step 7): a worksheet
+   overview or a lesson plan often carries its material as a download. A site crawl's pages do
+   not: the crawl lists file links and never fetches them. In `auto` mode the escalation is
+   decided on the page's own verdict first; a page that goes to the browser follows no
+   attachment in the fast phase, the render's step 7b does (a slow attachment host must not cost
+   the render its time, and a script page must not be answered by its download). The candidates
    (`convert/attachments.py`) are the content's links to files in page order, then the Drupal
    JSON:API `file--file` entities of its script data (Next.js flight chunks, JSON scripts), at
    most 20; a candidate whose extension or declared type names a kind MarkItDown does not
-   convert (audio, video, archives, OpenDocument, images) is passed over without a request. Each
+   convert (audio, video, archives, OpenDocument, images; any declared type but a converted
+   kind's, an alias of one or a generic one such as `application/octet-stream`) is passed over
+   without a request. Each
    one tried is fetched as the page is (the steps of `fetch_raw`): URL validation, the request's
    compliance mode for its origin (a block ends it before its request), the host's `DomainGate`
    turn with every redirect hop checked and a hop to another host in that host's turn, the
@@ -139,14 +144,20 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    header checks after the fetch. The body is sniffed; a MarkItDown kind is converted in the
    document children without an OCR hand-off (a document that needs OCR gives its text layer).
    Its text follows the page's under a heading with its label (`## label` in Markdown, a line of
-   its own in text, an `<h2>` in HTML), with the warning `attachment_read`; one that gives no
-   text adds `attachment_failed` and changes nothing else. `word_count`, `quality.word_count`
+   its own in text, an `<h2>` in HTML), with the warning `attachment_read` (its own
+   `pages_truncated` and `ocr_unavailable` reach the page's warnings once); one that gives no
+   text adds `attachment_failed` and changes nothing else. A failure that may pass (a timeout, a
+   refusal of the outbound gate, a 5xx, 408, 425 or 429) keeps the result out of the cache, so
+   a revalidation cannot renew a page without its material; a permanent one (404, robots.txt) is
+   cached as any. `word_count`, `quality.word_count`
    and the fingerprint are computed from the joined content; the result's status code, final
    URL, content type and compliance report stay the page's. The attachments share the request's
-   deadline and stop 1 s before it, so the page keeps its answer. The cache key does not change:
+   deadline: at most half of the time left, and they stop 1 s before it at the latest, so the
+   page keeps its answer and a player's tracks their time. The cache key does not change:
    the settings belong to the deployment. `follow_attachments` also follows a file named
-   elsewhere, whatever the page's words. A fast result that still escalates follows the
-   rendered page's attachments again (the render's run cannot reuse the fast one's).
+   elsewhere, whatever the page's words. Known limit: a page with about 25 or more file links is
+   never thin with the defaults, because the converter keeps the file links the text lacks as a
+   list, and their labels count as words.
 6. **Post-process (optional):** DOM metadata, links, screenshot; the DOM stage of `structured`
    (`metadata`, `selectors`, `tables`, and the cleaned HTML for `learn_selectors`) on an HTML
    page's HTML, cached with the extraction; then PII; then the post stage of `structured` and
