@@ -105,23 +105,31 @@ SERLO_LIKE = """<html><body><main>
 <p>Mit diesem Ergebnis kann nun die Dichte bestimmt werden.</p></div></div>
 </main></body></html>"""
 
+
 def test_serlo_like_solution_survives_conversion():
     out = convert_html(SERLO_LIKE, "https://de.serlo.org/mathe/1/aufgabe", "markdown").content
     assert "Mit diesem Ergebnis kann nun die Dichte bestimmt werden." in out
     assert "Lösungsvorschlag" in out  # the label is kept as a heading before the panel
 
+
 def test_details_solution_is_kept():
     html = "<main><p>Aufgabe.</p><details><summary>Lösung</summary><p>Zwölf.</p></details></main>"
     assert "Zwölf." in convert_html(html, "https://x.test/", "text").content
 
+
 def test_hidden_menu_panel_stays_dropped():
-    html = ('<main><p>Text.</p><div><button aria-controls="m">Menü</button></div>'
-            '<ul id="m" class="hidden"><li>Impressum</li></ul></main>')
+    html = (
+        '<main><p>Text.</p><div><button aria-controls="m">Menü</button></div>'
+        '<ul id="m" class="hidden"><li>Impressum</li></ul></main>'
+    )
     assert "Impressum" not in convert_html(html, "https://x.test/", "text").content
 
+
 def test_aria_controls_solution_panel_is_revealed():
-    html = ('<main><p>Frage?</p><button aria-controls="s1">Show solution</button>'
-            '<div id="s1" hidden><p>Forty-two.</p></div></main>')
+    html = (
+        '<main><p>Frage?</p><button aria-controls="s1">Show solution</button>'
+        '<div id="s1" hidden><p>Forty-two.</p></div></main>'
+    )
     assert "Forty-two." in convert_html(html, "https://x.test/", "text").content
 ```
 
