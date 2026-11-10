@@ -177,6 +177,21 @@ class AttachmentSteps[R: AttachmentRun]:
         followed, warnings = await self.follow_attachments(
             run, candidates, self._settings.attachments_max
         )
+        return await self.appended(run, result, followed, warnings, raw_sha256=raw_sha256)
+
+    async def appended(
+        self,
+        run: R,
+        result: ExtractResult,
+        followed: list[tuple[Attachment, ExtractResult]],
+        warnings: list[str],
+        *,
+        raw_sha256: str,
+    ) -> ExtractResult:
+        """``result`` with the text of the ``followed`` attachments appended under their labels
+        and ``warnings`` (of ``follow_attachments``) added; word count, quality and fingerprint
+        (from ``raw_sha256``) computed again from the joined content. Unchanged without
+        warnings, that is when nothing was tried."""
         if not warnings:
             return result
         if not followed:

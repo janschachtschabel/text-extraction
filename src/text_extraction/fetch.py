@@ -357,11 +357,13 @@ class Fetcher:
         timeout_seconds: float | None = None,
         truncate: bool = False,
         on_redirect: RedirectHook | None = None,
+        accept: str | None = None,
     ) -> FetchResult:
         """GET ``url``, following redirects, or raise ``FetchError``.
 
         ``truncate`` keeps the first ``max_bytes`` of a longer body instead of failing with
-        ``too_large``. ``on_redirect`` runs inside the deadline of this call.
+        ``too_large``. ``on_redirect`` runs inside the deadline of this call. ``accept``
+        replaces the ``Accept`` header (an API's JSON, package 22).
         """
         limit = max_bytes if max_bytes is not None else self._settings.fetch_max_bytes
         deadline = (
@@ -373,7 +375,7 @@ class Fetcher:
         limits = _Limits(limit, truncate, deadline, started)
         try:
             async with asyncio.timeout(deadline):
-                return await self._fetch(url, validators, limits, on_redirect)
+                return await self._fetch(url, validators, limits, on_redirect, accept)
         except FetchError:
             raise
         except (InvalidUrlError, httpx.InvalidURL) as error:
@@ -409,8 +411,11 @@ class Fetcher:
         validators: Validators | None,
         limits: _Limits,
         on_redirect: RedirectHook | None,
+        accept: str | None = None,
     ) -> FetchResult:
         headers = dict(_REQUEST_HEADERS)
+        if accept is not None:
+            headers["Accept"] = accept
         # Validators come from an earlier answer of the target (possibly from the cache): only a
         # value that can be sent unchanged goes out, so no header value can make the request fail.
         if validators is not None and (etag := _sendable(validators.etag)):

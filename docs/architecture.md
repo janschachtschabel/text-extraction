@@ -158,6 +158,43 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    elsewhere, whatever the page's words. Known limit: a page with about 25 or more file links is
    never thin with the defaults, because the converter keeps the file links the text lacks as a
    list, and their labels count as words.
+
+   **Step 4b, edu-sharing render pages through the REST API (package 22,
+   `edusharing.py`, `pipeline_edusharing.py`):** an edu-sharing render URL
+   (`<prefix>/edu-sharing/components/render/<uuid>`, optionally with a version segment or a
+   query) serves a 3 KB Angular shell, which only a render could read. Before its page is
+   fetched, a `fast` or `auto` request (not `browser`, a screenshot, browser options or an `auto`
+   item with a draft, which want the page as a browser shows it, and not a site crawl's page)
+   asks the repository instead:
+   `GET <base>/rest/node/v1/nodes/-home-/<uuid>/metadata?propertyFilter=-all-` with
+   `Accept: application/json`. The render URL gets its compliance check first (step 2, as the
+   page would; a block leaves it to today's path, which answers the block); the metadata URL is
+   then fetched as an attachment is (the steps of `fetch_raw`: its own compliance check, the
+   host's turn, every redirect hop checked, the SSRF guard), within `CONVERT_MAX_BYTES` and half
+   of the time left. From the JSON (`{"node": {...}}`, at most `CONVERT_MAX_BYTES`, refused when
+   it is no JSON or nested too deep) `node_page` writes a small HTML page: an `<h1>` of
+   `node.title`, else `cclom:title`, else `node.name`; the description, the keywords and the
+   licence (`ccm:commonlicense_key`) as paragraphs; `ccm:wwwurl` as a link; and the node's file
+   (`downloadUrl`, `name`, `mimetype`, `size`) as a link. Every value is escaped, and a URL is
+   kept only when it is an absolute `http(s)` URL with a host and without user info. The page
+   is converted and judged as an HTML page (steps 4 and 5). The node's file is followed as an
+   attachment (`follow_attachments`, whatever the page's words: the file is the material) and
+   its text appended under the file's name, with `attachment_read` or `attachment_failed`, as in
+   step 7b. **Cross-host files are listed, never fetched:** the file is followed only when its
+   URL is on the render URL's host; a `downloadUrl` elsewhere stays a link of the page, since
+   the metadata comes from the remote site and must not send the service to a host the request
+   did not name. A node without the `DownloadContent` right has no file to follow. A file of a
+   kind that is not converted (audio, video, archives) is listed only; the transcription of a
+   node's audio or video file is the single-media hand-off's (Task 6 of package 22). The answer
+   reports the metadata's fetch: its final URL, status and content type (`application/json`), so
+   `escalation.needs_browser` never sends it to the browser, not even under unblock mode;
+   `mode_used` stays `fast`, and its compliance report holds the findings of both URLs. It is
+   fingerprinted from the metadata's bytes and the final content, and cached as a page's result,
+   without validators (a stale entry is read through the API again); a file failure that may
+   pass keeps it out of the cache. Any other answer of the API (a block, a refusal of the gate,
+   401, 404, 5xx, HTML, broken JSON, no `node` object, a timeout) sends the request on to
+   today's path unchanged, without an error or a warning of its own (logged as
+   `edusharing_fallback` with the host and the reason).
 6. **Post-process (optional):** DOM metadata, links, screenshot; the DOM stage of `structured`
    (`metadata`, `selectors`, `tables`, and the cleaned HTML for `learn_selectors`) on an HTML
    page's HTML, cached with the extraction; then PII; then the post stage of `structured` and

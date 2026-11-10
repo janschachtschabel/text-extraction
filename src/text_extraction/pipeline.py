@@ -22,6 +22,14 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    every request to the host counts against its limits. The fetcher checks every request with
    the gate (``DomainGate.before_request``): the turn's own requests go back to back, and each
    keeps the spacing to the latest request of any other turn.
+4b. An edu-sharing render URL (``edusharing.render_node``) of a request that wants no page as
+   a browser shows it (``_wants_render``), not a site crawl's page, is read through the
+   repository's REST API (``pipeline_edusharing``, package 22): after step 4 for it, the node's
+   metadata is fetched through steps 2 to 5 (``Accept: application/json``,
+   ``CONVERT_MAX_BYTES``, half of the time left), the node's page converted and judged (steps 7
+   and 8), and its file on the same host followed as in step 7b. The answer is the metadata's
+   (``application/json``: it never goes to the browser) and is cached as a page's. Any other
+   answer of the API sends the request on to step 5 unchanged.
 5. The fetch, inside the host's ``DomainGate`` turn (the one of step 4, if taken), and its
    outcome reported to the gate. A stale cache entry's validators are sent; a 304 or unchanged
    bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
@@ -256,6 +264,7 @@ from text_extraction.pipeline_documents import (
     document_input,
     without_ocr,
 )
+from text_extraction.pipeline_edusharing import EduSharingSteps
 from text_extraction.pipeline_media import (
     PLAYLIST_MESSAGE,
     TRANSCRIPTION_DISABLED_MESSAGE,
@@ -822,6 +831,15 @@ class Pipeline:
             fetch=self._attachment_fetch,
             sniff=self._kind,
         )
+        self._edusharing = EduSharingSteps(
+            settings,
+            self._pool,
+            self._attachments,
+            sub_run=_attachment_run,
+            check=self._target_report,
+            fetch=self._json_fetch,
+            page=self._node_page,
+        )
         self._media = (
             MediaSteps(
                 media_fetcher, fetcher, gate, settings, self._envelope, registry, threads=self._pool
@@ -1321,9 +1339,10 @@ class Pipeline:
         return RawFetch(outcome, run.report, None, run.attempts, run.timings())
 
     async def _raw(
-        self, run: _Run, *, max_bytes: int, truncate: bool
+        self, run: _Run, *, max_bytes: int, truncate: bool, accept: str | None = None
     ) -> FetchResult | Envelope[ExtractResult]:
-        """The steps of ``fetch_raw``: the answer, or the envelope of what ended it."""
+        """The steps of ``fetch_raw``: the answer, or the envelope of what ended it. ``accept``
+        replaces the fetcher's ``Accept`` header."""
         try:
             validate_url(run.target)
         except InvalidUrlError as error:
@@ -1336,7 +1355,9 @@ class Pipeline:
                 run.report = await self._check_origin(run, run.target, turn)
                 if (block := compliance_block(run.report)) is not None:
                     return run.failed(block.code, block.message, retryable=block.retryable)
-                return await self._fetch(run, None, turn, max_bytes=max_bytes, truncate=truncate)
+                return await self._fetch(
+                    run, None, turn, max_bytes=max_bytes, truncate=truncate, accept=accept
+                )
             finally:
                 await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
 
@@ -1489,6 +1510,10 @@ class Pipeline:
             stored = None  # a rendered result has no validators and is never revalidated (B10)
         if self._renders_first(run):
             return await self._rendered(run, earlier=run.draft)
+        # Step 4b, for a request that wants no page of its own (None: the page's path).
+        node = None if self._wants_render(run) else await self._edusharing.node_result(run)
+        if node is not None:
+            return await self._finish(run, self._envelope(node), Validators())
         fast = await self._guarded(run, self._fetch_and_extract(run, stored))
         if self._renderer is not None and self._panel_escalates(run, fast):
             return await self._panel_rendered(run, fast)  # never a page render (P13-S2)
@@ -1836,6 +1861,39 @@ class Pipeline:
         page's steps 2 to 5 and the header checks of step 7, within ``DOCUMENT_MAX_BYTES``."""
         return await self._raw(run, max_bytes=self._settings.document_max_bytes, truncate=False)
 
+    async def _json_fetch(self, run: _Run) -> FetchResult | Envelope[ExtractResult]:
+        """Fetch an API answer of a sub-run (step 4b: an edu-sharing node's metadata) as
+        ``fetch_raw`` fetches, with ``Accept: application/json``, within ``CONVERT_MAX_BYTES``."""
+        return await self._raw(
+            run,
+            max_bytes=self._settings.convert_max_bytes,
+            truncate=False,
+            accept="application/json",
+        )
+
+    async def _target_report(self, run: _Run) -> ComplianceReport | Envelope[ExtractResult]:
+        """Step 4 for the run's own URL, whose page is not fetched (step 4b): the report, or the
+        envelope of a refusal of the gate."""
+
+        async def check() -> ComplianceReport:
+            turn = HostTurn(self._gate)
+            try:
+                return await self._check_origin(run, run.target, turn)
+            finally:
+                await turn.give_back()
+
+        return await self._guarded(run, check())
+
+    async def _node_page(
+        self, run: _Run, page: FetchResult
+    ) -> ExtractResult | Envelope[ExtractResult]:
+        """Steps 7 and 8 (conversion and judgement, not yet stored) of the page step 4b wrote
+        for an edu-sharing node."""
+        processed = await self._converted(run, page, "html", page.content.decode())
+        if isinstance(processed, Envelope):
+            return processed
+        return self._page_result(run, processed)
+
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
         turn of ``url``'s host, taken here (or kept, when ``turn`` holds it already), so the
@@ -1863,6 +1921,7 @@ class Pipeline:
         *,
         max_bytes: int | None = None,
         truncate: bool = False,
+        accept: str | None = None,
     ) -> FetchResult:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
@@ -1872,12 +1931,15 @@ class Pipeline:
         Missing files of the target's origin are fetched in the target's turn.
         The outcome is recorded for the host that gave it, judged against the time that host's
         request actually had. ``max_bytes`` and ``truncate`` (``fetch_raw`` only) replace the
-        fetcher's byte limit and let it cut a longer body instead of failing.
+        fetcher's byte limit and let it cut a longer body instead of failing; ``accept`` (an
+        API's JSON) replaces its ``Accept`` header.
         """
         checked = {run.target}
         limits: dict[str, Any] = {}
         if max_bytes is not None:
             limits = {"max_bytes": max_bytes, "truncate": truncate}
+        if accept is not None:
+            limits["accept"] = accept
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
         budget = 0.0  # seconds the request at `turn.answering` has, for `_record_failure`
@@ -2028,21 +2090,7 @@ class Pipeline:
         if isinstance(processed, Envelope):
             return processed
         run.validators = Validators.from_headers(fetched.headers)
-        result = run.result(
-            language=processed.language,
-            word_count=processed.quality.word_count,
-            title=processed.title,
-            content=processed.content,
-            quality=processed.quality,
-            metadata=processed.metadata,
-            links=processed.links,
-            fingerprint=processed.fingerprint,
-            warnings=processed.warnings,
-            server_errors=processed.server_errors,
-            structured=processed.structured,
-            site=processed.site,
-            page_type=processed.page_type,
-        )
+        result = self._page_result(run, processed)
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
             # B5: the browser's result, or the better of both, is stored instead of this one.
@@ -2059,6 +2107,24 @@ class Pipeline:
             if tracked is not result:
                 envelope = self._envelope(tracked)
         return await self._finish(run, envelope, run.validators)
+
+    def _page_result(self, run: _Run, processed: _Processed) -> ExtractResult:
+        """The result of a converted page, not yet judged."""
+        return run.result(
+            language=processed.language,
+            word_count=processed.quality.word_count,
+            title=processed.title,
+            content=processed.content,
+            quality=processed.quality,
+            metadata=processed.metadata,
+            links=processed.links,
+            fingerprint=processed.fingerprint,
+            warnings=processed.warnings,
+            server_errors=processed.server_errors,
+            structured=processed.structured,
+            site=processed.site,
+            page_type=processed.page_type,
+        )
 
     async def _converted(
         self,
@@ -2386,9 +2452,13 @@ class Pipeline:
         """``browser``, a screenshot, browser options (actions, cookies, headers: the fast fetch
         could not use them) and an ``auto`` item with a draft render without a fast fetch;
         ``auto`` otherwise renders only when its fast result needs it."""
+        return self._wants_render(run) and self._renderer_for(run) is not None
+
+    def _wants_render(self, run: _Run) -> bool:
+        """Whether the request wants the page as a browser shows it: ``browser``, a screenshot,
+        browser options or an ``auto`` item with a draft."""
         req = run.req
-        wants = req.mode == "browser" or req.screenshot or run.private or run.draft is not None
-        return wants and self._renderer_for(run) is not None
+        return req.mode == "browser" or req.screenshot or run.private or run.draft is not None
 
     async def _rendered(
         self, run: _Run, *, earlier: Envelope[ExtractResult] | None
