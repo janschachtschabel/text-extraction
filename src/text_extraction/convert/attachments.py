@@ -23,7 +23,7 @@ MAX_ATTACHMENT_CANDIDATES = 20
 _MAX_SCRIPT_CHARS = 2_000_000  # a larger script is skipped unread
 _MAX_ENTITY_MARKERS = 100  # "file--file" occurrences examined per script
 _MAX_OPENERS = 8  # enclosing "{" tried per marker
-_FILE_ENTITY = '"type":"file--file"'
+_FILE_ENTITY = re.compile(r'"type"\s*:\s*"file--file"')
 _FLIGHT_CHUNK = re.compile(r'__next_f\.push\(\[\s*\d+\s*,\s*("(?:[^"\\]|\\.)*")\s*\]\)')
 
 
@@ -72,7 +72,7 @@ def _safe_url(base: str, href: object) -> str | None:
     try:
         parts = urlsplit(url)
         has_user_info = parts.username is not None or parts.password is not None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if parts.scheme not in {"http", "https"} or not parts.hostname or has_user_info:
         return None
@@ -85,7 +85,7 @@ def _script_texts(text: str) -> list[str]:
     for match in _FLIGHT_CHUNK.finditer(text):
         try:
             decoded = json.loads(match.group(1))
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(decoded, str):
             texts.append(decoded)
@@ -103,7 +103,7 @@ def _entity_at(text: str, marker: int) -> dict[str, Any] | None:
         end = start
         try:
             obj, stop = decoder.raw_decode(text, start)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(obj, dict) and stop > marker and obj.get("type") == "file--file":
             return obj
@@ -140,13 +140,13 @@ def _file_entities(soup: BeautifulSoup, base: str) -> list[Attachment]:
             continue
         markers = 0
         for text in _script_texts(raw):
-            pos = text.find(_FILE_ENTITY)
-            while pos >= 0 and markers < _MAX_ENTITY_MARKERS:
+            for match in _FILE_ENTITY.finditer(text):
+                if markers >= _MAX_ENTITY_MARKERS:
+                    break
                 markers += 1
-                obj = _entity_at(text, pos)
+                obj = _entity_at(text, match.start())
                 if obj is not None and (item := _entity_attachment(obj, base)):
                     found.append(item)
-                pos = text.find(_FILE_ENTITY, pos + len(_FILE_ENTITY))
     return found
 
 

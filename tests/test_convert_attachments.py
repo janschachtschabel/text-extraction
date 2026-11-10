@@ -90,3 +90,14 @@ def test_malformed_and_huge_scripts_do_not_break() -> None:
 def test_at_most_20_candidates() -> None:
     payload = ",".join(_entity(f"/f/{i}.docx") for i in range(30))
     assert len(attachment_candidates(_flight(payload), PAGE_URL)) == 20
+
+
+def test_deeply_nested_script_is_skipped() -> None:
+    html = "<script>" + '{"type":"file--file","x":' + '{"a":' * 200000 + "</script>"
+    assert attachment_candidates(html, "https://x.test/") == []
+
+
+def test_pretty_printed_entity_found() -> None:
+    pretty = json.dumps(json.loads(_entity()), indent=2).replace('"type":', '"type" :')
+    html = f'<script type="application/json">{pretty}</script>'
+    assert [a.label for a in attachment_candidates(html, PAGE_URL)] == ["wasserkreislauf.docx"]
