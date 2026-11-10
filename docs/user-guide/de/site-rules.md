@@ -82,7 +82,10 @@ MCP-Tools in `options`.
 
 Wie viele Seiten ein Browser-Worker gleichzeitig im Entsperr-Browser lädt, begrenzt der Betreiber
 mit `BROWSER_UNBLOCK_CONCURRENCY` (Standard 2, höchstens `BROWSER_CONCURRENCY`); eine weitere
-wartet, bis sie an der Reihe ist.
+wartet, bis sie an der Reihe ist, bevor ihr Zeitbudget beginnt. Kommt sie nicht innerhalb von
+`BROWSER_QUEUE_WAIT_SECONDS` an die Reihe, wird sie später erneut versucht; beim letzten Versuch
+antwortet sie mit ihrem HTTP-Ergebnis und der Warnung `browser_unavailable` (oder
+`rate_limited`, wiederholbar), nie mit einer Zeitüberschreitung der Website.
 
 ### Was sie nicht tut
 

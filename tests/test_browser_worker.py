@@ -567,190 +567,257 @@ async def test_unblock_joins_the_cache_key_only_where_it_changed_the_renderer(
     assert sorted(await harness.valkey.keys("res:*")) == [expected.encode()]
 
 
-# --- the unblock browser's own concurrency (package 22) ---------------------------------------
-
-
-class FakeTraffic:
-    username = "u"
-    password = "p"  # noqa: S105 - a fake proxy context's
-
-    def close(self) -> None:
-        pass
-
-
-class FakeProxy:
-    url = "http://127.0.0.1:1"
-
-    def open_context(self) -> FakeTraffic:
-        return FakeTraffic()
-
-
-class FakePage:
-    def on(self, _event: str, _handler: Any) -> None:
-        pass
-
-    def is_closed(self) -> bool:
-        return False
-
-
-class FakeContext:
-    def __init__(self) -> None:
-        self.pages = [FakePage()]
-
-    def on(self, _event: str, _handler: Any) -> None:
-        pass
-
-    async def add_cookies(self, _cookies: Any) -> None:
-        pass
-
-    async def close(self) -> None:
-        pass
-
-
-class FakeLauncher:
-    """A persistent launcher (as Patchright's) whose contexts are fakes."""
-
-    persistent = True
-    user_agent = "Fake/1.0"
-
-    def __init__(self, driver: str, *, fail: bool = False) -> None:
-        self.driver = driver
-        self.fail = fail
-
-    async def open(self, _browser: Any, _proxy: Any, _options: Any) -> tuple[None, FakeContext]:
-        await asyncio.sleep(0)
-        if self.fail:
-            raise RuntimeError("no context")
-        return None, FakeContext()
-
-    async def release(self, _context: Any) -> None:
-        pass
-
-    async def stop(self) -> None:
-        pass
-
-
-def fake_pools(settings: Settings) -> tuple[BrowserPool, BrowserPool]:
-    """A standard and an unblock pool as ``create_browsers`` wires them, on fake launchers."""
-    proxy, registry = cast(EgressProxy, FakeProxy()), CollectorRegistry()
-    standard, unblock = browser_worker.browser_pools(
-        settings,
-        proxy,
-        registry,
-        cast(Any, FakeLauncher("playwright")),
-        cast(Any, FakeLauncher("patchright")),
+@scenario
+async def test_switching_unblock_off_and_on_reports_no_change_of_the_page() -> None:
+    """Minor 3 of the review: the fingerprint of a page rendered with ``unblock: false`` is
+    compared with the earlier one of the same switch only, as its cache key is kept apart."""
+    harness = Harness(
+        FakeRenderer(rendered(SHELL_WITH_WORDS)),
+        unblock_renderer=FakeRenderer(rendered(ARTICLE)),
+        browser_unblock_enabled=True,
+        compliance_default="ignore",
     )
-    return standard, unblock
+    changes = []
+    for unblock in (True, False, True, False):
+        options = JobOptions(mode="browser", compliance="ignore", unblock=unblock, cache=False)
+        job_id = await harness.submit(options, owner=ADMIN)
+        await harness.process_next()
+        data = (await harness.result(job_id)).data
+        assert data is not None
+        assert data.fingerprint is not None
+        changes.append(data.fingerprint.changed)
+
+    assert changes == [None, None, False, False]
 
 
-class Peak:
-    """Pages open at once, by pool, and the most ever seen."""
+# --- the unblock browser's own turns (package 22) -----------------------------------------------
+
+
+IGNORE_BROWSER = JobOptions(mode="browser", compliance="ignore", cache=False)
+
+
+class GatedRenderer(FakeRenderer):
+    """Renders after ``release`` is set; notes how many renders run at once, and how much of its
+    deadline each render had left when it began."""
 
     def __init__(self) -> None:
-        self.now: dict[str, int] = {}
-        self.most: dict[str, int] = {}
+        super().__init__(rendered(ARTICLE))
         self.release = asyncio.Event()
+        self.now = 0
+        self.most = 0
+        self.left: list[float] = []
 
-    async def hold(self, pool: BrowserPool, name: str) -> None:
-        async with pool.page(RenderOptions()):
-            self.now[name] = self.now.get(name, 0) + 1
-            self.most[name] = max(self.most.get(name, 0), self.now[name])
+    async def render(self, url: str, check: Any, options: RenderOptions, *, deadline: float) -> Any:
+        self.left.append(deadline - asyncio.get_running_loop().time())
+        self.now += 1
+        self.most = max(self.most, self.now)
+        try:
             await self.release.wait()
-            self.now[name] -= 1
+            return await super().render(url, check, options, deadline=deadline)
+        finally:
+            self.now -= 1
+
+
+class CountingPipeline:
+    """The real pipeline, counting the runs that began (the host's turn is taken inside)."""
+
+    def __init__(self, real: Pipeline) -> None:
+        self.real = real
+        self.started = 0
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        self.started += 1
+        return await self.real.run(*args, **kwargs)
+
+
+def turn_harness(**overrides: Any) -> tuple[Harness, GatedRenderer, GatedRenderer]:
+    standard, unblock = GatedRenderer(), GatedRenderer()
+    values: dict[str, Any] = {
+        "browser_unblock_enabled": True,
+        "browser_concurrency": 4,
+        "browser_unblock_concurrency": 2,
+        "compliance_default": "ignore",
+        **overrides,
+    }
+    harness = Harness(standard, unblock_renderer=unblock, **values)
+    harness.runner._unblock_turns = asyncio.Semaphore(
+        browser_worker.unblock_concurrency(harness.settings)
+    )
+    return harness, standard, unblock
+
+
+async def claim_all(harness: Harness, count: int) -> list[Any]:
+    return [(await harness.claim()).item for _ in range(count)]
 
 
 @scenario
-async def test_unblock_pages_are_capped_by_their_own_limit() -> None:
-    settings = make_settings(
-        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=2
-    )
-    standard, unblock = fake_pools(settings)
-    peak = Peak()
+async def test_a_burst_of_unblock_items_waits_outside_the_render_deadline() -> None:
+    """Four unblock items, two turns: two render at once, the other two wait for a turn before
+    their pipeline (and deadline, and the host's turn) starts, and none ends in ``timeout``."""
+    harness, _, unblock = turn_harness(browser_queue_wait_seconds=30)
+    counting = CountingPipeline(harness.pipeline)
+    harness.runner._pipeline = cast(Pipeline, counting)
+    # Four hosts: the queue's per-domain cap would keep a fifth claim of one host back anyway.
+    jobs = [
+        await harness.submit(IGNORE_BROWSER, owner=ADMIN, urls=[f"https://h{n}.example.org/"])
+        for n in range(4)
+    ]
+    items = await claim_all(harness, 4)
 
-    tasks = [asyncio.create_task(peak.hold(unblock, "unblock")) for _ in range(4)]
-    await asyncio.sleep(0.05)
-    assert peak.now == {"unblock": 2}  # two wait for the unblock limit
-    # The waiting unblock pages hold no shared slot: two standard pages still open.
-    tasks += [asyncio.create_task(peak.hold(standard, "standard")) for _ in range(3)]
-    await asyncio.sleep(0.05)
-    assert peak.now == {"unblock": 2, "standard": 2}
-    peak.release.set()
+    running = [asyncio.create_task(harness.worker.process(item)) for item in items]
+    await wait_for(lambda: unblock.now == 2)
+    await asyncio.sleep(0.2)
+    assert counting.started == 2  # the waiting two hold no host turn and no deadline
+    unblock.release.set()
+    async with asyncio.timeout(20):
+        await asyncio.gather(*running)
+
+    assert unblock.most == 2
+    assert counting.started == 4
+    budget = harness.settings.browser_unblock_timeout_seconds
+    # Each render had the same budget, the two that waited (over 0.2 s) included: the
+    # deadline started after the turn.
+    assert min(unblock.left) > budget - 3
+    assert max(unblock.left) - min(unblock.left) < 0.15
+    for job_id in jobs:
+        result = await harness.result(job_id)
+        assert result.status == "success"
+        assert result.data is not None
+        assert result.data.unblocked is True
+
+
+@scenario
+async def test_standard_items_never_wait_for_the_unblock_turns() -> None:
+    harness, standard, unblock = turn_harness()
+    standard.release.set()
+    turns = harness.runner._unblock_turns
+    assert turns is not None
+    await turns.acquire()
+    await turns.acquire()  # every unblock turn is taken
+    plain = await harness.submit(
+        JobOptions(mode="browser", compliance="enforce", cache=False), owner=ADMIN
+    )
+    off = await harness.submit(
+        JobOptions(mode="browser", compliance="ignore", unblock=False, cache=False), owner=ADMIN
+    )
+    user = await harness.submit(
+        JobOptions(mode="browser", compliance="enforce", cache=False), owner=USER
+    )
+
     async with asyncio.timeout(5):
-        await asyncio.gather(*tasks)
+        for _ in range(3):
+            await harness.process_next()
 
-    assert peak.most == {"unblock": 2, "standard": 2}
-    assert peak.now == {"unblock": 0, "standard": 0}
-
-
-@scenario
-async def test_standard_pages_keep_browser_concurrency() -> None:
-    settings = make_settings(
-        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=1
-    )
-    standard, _ = fake_pools(settings)
-    peak = Peak()
-
-    tasks = [asyncio.create_task(peak.hold(standard, "standard")) for _ in range(6)]
-    await asyncio.sleep(0.05)
-    assert peak.now == {"standard": 4}
-    peak.release.set()
-    async with asyncio.timeout(5):
-        await asyncio.gather(*tasks)
-    assert peak.most == {"standard": 4}
+    assert len(standard.calls) == 3
+    assert unblock.calls == []
+    for job_id in (plain, off, user):
+        assert (await harness.result(job_id)).status == "success"
 
 
 @scenario
-async def test_the_unblock_limit_is_capped_at_browser_concurrency() -> None:
-    settings = make_settings(
-        browser_concurrency=2, browser_unblock_enabled=True, browser_unblock_concurrency=5
-    )
-    _, unblock = fake_pools(settings)
-    peak = Peak()
+async def test_no_turn_defers_the_item_without_asking_the_host() -> None:
+    harness, _, unblock = turn_harness(browser_queue_wait_seconds=0.05)
+    turns = harness.runner._unblock_turns
+    assert turns is not None
+    await turns.acquire()
+    await turns.acquire()
+    job_id = await harness.submit(IGNORE_BROWSER, owner=ADMIN, secrets=SECRETS)
 
-    tasks = [asyncio.create_task(peak.hold(unblock, "unblock")) for _ in range(4)]
-    await asyncio.sleep(0.05)
-    assert peak.now == {"unblock": 2}
-    peak.release.set()
-    async with asyncio.timeout(5):
-        await asyncio.gather(*tasks)
+    await harness.process_next()
+
+    assert harness.outcome("deferred") == 1
+    assert (await harness.item(job_id)).state == "pending"
+    assert await harness.store.secrets(job_id) == SECRETS  # kept for its next run
+    assert unblock.calls == []
+    assert harness.fetcher.calls == []
+    assert await harness.valkey.keys("out:*") == []  # no host turn taken, no failure counted
+    turns.release()
+    turns.release()
+    assert turns._value == 2  # the deferred item holds none
 
 
 @scenario
-async def test_the_unblock_limit_is_released_on_every_error() -> None:
-    """A page whose context fails to open, a render that raises and a cancelled wait all give
-    their turn back: the next unblock page still opens."""
-    settings = make_settings(
-        browser_concurrency=4, browser_unblock_enabled=True, browser_unblock_concurrency=1
+async def test_no_turn_at_the_last_attempt_answers_without_timeout() -> None:
+    """At ``JOB_ITEM_MAX_ATTEMPTS`` the item is not deferred again: a draft answers with
+    ``browser_unavailable``, an item without one ``rate_limited``; never ``timeout``, and the
+    host's failures are not counted."""
+    harness, _, unblock = turn_harness(
+        browser_queue_wait_seconds=0.05,
+        job_item_max_attempts=1,
+        answers={PAGE: fetched(body=ARTICLE)},
     )
-    standard, unblock = fake_pools(settings)
-    launcher = cast(FakeLauncher, unblock._launcher)
+    turns = harness.runner._unblock_turns
+    assert turns is not None
+    await turns.acquire()
+    await turns.acquire()
+    bare = await harness.submit(IGNORE_BROWSER, owner=ADMIN)
+    await harness.process_next()  # deferred once: now at the limit
+    harness.clock.now += 2  # past the deferral's short pause
+    await harness.process_next()
 
-    launcher.fail = True
-    with pytest.raises(RuntimeError, match="no context"):
-        async with unblock.page(RenderOptions()):
-            pass
-    launcher.fail = False
-    with pytest.raises(ValueError, match="render failed"):
-        async with unblock.page(RenderOptions()):
-            raise ValueError("render failed")
-    holder = Peak()
-    held = asyncio.create_task(holder.hold(unblock, "unblock"))
-    await asyncio.sleep(0.05)
-    waiting = asyncio.create_task(holder.hold(unblock, "unblock"))
-    await asyncio.sleep(0.05)
-    waiting.cancel()  # its deadline passed while it waited for the limit
+    code, retryable = error_of(await harness.result(bare))
+    assert (code, retryable) == (ErrorCode.RATE_LIMITED, True)
+    assert await harness.valkey.keys("out:*") == []  # the host was never asked
+
+    auto = await harness.submit(JobOptions(mode="auto", compliance="ignore"), owner=ADMIN)
+    draft = await harness.pipeline.run(
+        ExtractRequest(url=PAGE, mode="fast", compliance="ignore"), ADMIN
+    )
+    await harness.store.put_draft(auto, 0, draft)
+    gate_keys = sorted(await harness.valkey.keys("out:*"))  # the draft's own fetch
+    await harness.process_next()
+    harness.clock.now += 2
+    await harness.process_next()
+    assert sorted(await harness.valkey.keys("out:*")) == gate_keys
+
+    result = await harness.result(auto)
+    assert result.data is not None
+    assert result.data.mode_used == "fast"
+    assert "browser_unavailable" in result.data.warnings
+    assert result.data.fingerprint is None
+    assert unblock.calls == []
+    for kind in (b"fail", b"circuit", b"cooldown"):
+        assert [key for key in gate_keys if kind in key] == []
+
+
+@scenario
+async def test_the_turn_is_given_back_when_the_run_fails_or_is_cancelled() -> None:
+    harness, _, unblock = turn_harness(browser_unblock_concurrency=1)
+    turns = harness.runner._unblock_turns
+    assert turns is not None
+    unblock.results = [RuntimeError("render failed")]
+    unblock.release.set()
+    await harness.submit(IGNORE_BROWSER, owner=ADMIN)
+    await harness.process_next()  # the worker stores the failure
+    assert not turns.locked()
+
+    unblock.release.clear()
+    unblock.results = [rendered(ARTICLE)]
+    await harness.submit(IGNORE_BROWSER, owner=ADMIN)
+    [item] = await claim_all(harness, 1)
+    task = asyncio.create_task(harness.worker.process(item))
+    await wait_for(lambda: unblock.now == 1)
+    assert turns.locked()
+    task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await waiting
-    holder.release.set()
-    async with asyncio.timeout(5):
-        await held
-        async with unblock.page(RenderOptions()):
-            pass
-        async with standard.page(RenderOptions()):
-            pass
-    assert unblock._limit is not None
-    assert not unblock._limit.locked()
-    assert not unblock._slots.locked()
+        await task
+    assert not turns.locked()
+
+
+def test_unblock_turns_are_capped_at_browser_concurrency() -> None:
+    assert (
+        browser_worker.unblock_concurrency(
+            make_settings(browser_concurrency=2, browser_unblock_concurrency=5)
+        )
+        == 2
+    )
+    assert browser_worker.unblock_concurrency(make_settings(browser_concurrency=4)) == 2
+    # The wait for a turn fits the lease beside the render deadline.
+    tight = make_settings(
+        browser_queue_wait_seconds=60, browser_timeout_seconds=5, browser_unblock_timeout_seconds=10
+    )
+    assert browser_worker.unblock_turn_seconds(tight) == 10
+    assert browser_worker.unblock_turn_seconds(make_settings()) == 10
 
 
 # --- the shared worker behaviour on pool ``browser`` ------------------------------------------
@@ -1260,13 +1327,12 @@ def test_browser_worker_wiring() -> None:
         assert pipeline._clearance is not None
         assert pipeline._timeout_seconds == settings.browser_timeout_seconds
         assert pipeline._cache._guard is parts.guard
-        # The two drivers share one semaphore: BROWSER_CONCURRENCY pages in all; the unblock
-        # pool has its own limit on top (BROWSER_UNBLOCK_CONCURRENCY, package 22).
+        # The two drivers share one semaphore: BROWSER_CONCURRENCY pages in all; unblock items
+        # take a turn of their own first (BROWSER_UNBLOCK_CONCURRENCY, package 22).
         standard, unblock = parts.browsers.pools
         assert standard._slots is unblock._slots
-        assert standard._limit is None
-        assert unblock._limit is not None
-        assert unblock._limit._value == settings.browser_unblock_concurrency
+        assert runner._unblock_turns is not None
+        assert runner._unblock_turns._value == settings.browser_unblock_concurrency
         assert parts.browsers.xvfb is not None
         assert parts.graceful_seconds >= settings.browser_unblock_timeout_seconds + 5
         assert runner._asr_queue is None  # without ASR, nothing moves to the asr pool
@@ -1293,6 +1359,7 @@ def test_browser_worker_wiring() -> None:
         assert isinstance(runner, BrowserRunner)
         assert runner._pipeline._unblock_renderer is None
         assert runner._pipeline._clearance is None
+        assert runner._unblock_turns is None
     finally:
         plain.conversion_pool.shutdown()
 

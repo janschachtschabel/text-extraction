@@ -29,6 +29,7 @@ from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
+ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
 SETTINGS = Settings(auth_mode="none", browser_enabled=True)
 
 
@@ -288,9 +289,8 @@ async def test_wait_gives_up_when_unclaimed() -> None:
     assert max(time.sleeps) == pytest.approx(0.5)
 
 
-@pytest.mark.parametrize("unblock", [False, True])
 @scenario
-async def test_wait_gives_up_after_render_timeout(unblock: bool) -> None:
+async def test_wait_gives_up_after_render_timeout() -> None:
     time = FakeTime()
     settings = Settings(auth_mode="none", browser_enabled=True, browser_unblock_enabled=True)
     parts = Parts(settings, time=time)
@@ -298,14 +298,43 @@ async def test_wait_gives_up_after_render_timeout(unblock: bool) -> None:
     time.now += 9  # claimed just before the queue wait ran out
     await parts.store.mark_running(job_id)
 
-    got = await parts.dispatcher.wait(job_id, unblock=unblock, detached=never_detached)
+    got = await parts.dispatcher.wait(job_id, unblock=False, detached=never_detached)
 
     assert got is None
-    render = (
-        settings.browser_unblock_timeout_seconds if unblock else settings.browser_timeout_seconds
-    )
     waited = time.now - 109.0
-    assert render + 5 <= waited < render + 6
+    assert settings.browser_timeout_seconds + 5 <= waited < settings.browser_timeout_seconds + 6
+
+
+@pytest.mark.parametrize(("claimed_after", "gives_up_after"), [(0.5, 75), (9, 75)])
+@scenario
+async def test_an_unblock_wait_covers_the_workers_wait_for_a_turn(
+    claimed_after: float, gives_up_after: float
+) -> None:
+    """Package 22: after the claim the worker may wait up to BROWSER_QUEUE_WAIT_SECONDS (10 s)
+    for a turn of the unblock browser before the render's deadline (60 s) starts. The wait
+    covers that, but never lasts longer in all than the queue wait plus the render + 5 s, the
+    bound the graceful shutdown is sized for."""
+    time = FakeTime()
+    settings = Settings(auth_mode="none", browser_enabled=True, browser_unblock_enabled=True)
+    parts = Parts(settings, time=time)
+    job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), ADMIN, "ignore")
+    sleep = time.sleep
+
+    async def claiming(seconds: float) -> None:  # the worker claims the item meanwhile
+        await sleep(seconds)
+        if time.now - 100.0 >= claimed_after:
+            await parts.store.mark_running(job_id)
+
+    parts.dispatcher._sleep = claiming
+
+    got = await parts.dispatcher.wait(job_id, unblock=True, detached=never_detached)
+
+    assert got is None
+    budget = settings.browser_queue_wait_seconds + settings.browser_unblock_timeout_seconds + 5
+    assert gives_up_after == budget
+    assert budget <= time.now - 100.0 < budget + 1
+    # More than the render + 5 s after the claim: the turn's wait is covered.
+    assert time.now - 100.0 - claimed_after > settings.browser_unblock_timeout_seconds + 5
 
 
 @scenario

@@ -13,7 +13,10 @@ browser options, or an ``auto`` result that escalates) is handed to the ``browse
 2. ``wait`` polls the job every 0.2 s, rising to 0.5 s. It gives up when no worker has claimed
    the item (the job is still ``queued``) after ``BROWSER_QUEUE_WAIT_SECONDS``, or when the item
    has no result ``BROWSER_TIMEOUT_SECONDS`` + 5 s after the claim
-   (``BROWSER_UNBLOCK_TIMEOUT_SECONDS`` + 5 s in unblock mode).
+   (``BROWSER_UNBLOCK_TIMEOUT_SECONDS`` + 5 s in unblock mode, plus the worker's wait for a turn
+   of the unblock browser, ``BROWSER_QUEUE_WAIT_SECONDS``; in all never longer than
+   ``BROWSER_QUEUE_WAIT_SECONDS`` + that render time + 5 s, the bound of an item claimed just
+   before its queue wait ran out).
 3. A request that gives up calls ``abandon``, which deletes the job: a worker that claims the
    item later finds no job and drops it.
 4. A request that answers with the result calls ``answered``: nobody can read the job any
@@ -38,6 +41,7 @@ Logs carry job ids only, never a URL, header, cookie or action.
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable
 from typing import Literal
@@ -158,14 +162,23 @@ class BrowserDispatcher(PoolDispatcher):
         pii_seconds = settings.pii_sync_wait_seconds if pii else 0.0
         llm_seconds = settings.llm_sync_wait_seconds if llm else 0.0
         asr_seconds = _ASR_WAIT_SECONDS if asr else 0.0
+        result_within = (
+            render_seconds + _RESULT_MARGIN_SECONDS + pii_seconds + llm_seconds + asr_seconds
+        )
+        total_within = math.inf
+        if unblock:
+            # The worker waits up to BROWSER_QUEUE_WAIT_SECONDS for a turn of the unblock
+            # browser after its claim, before the render's deadline starts (package 22). The
+            # wait covers it, but never lasts longer in all than an unclaimed item's queue wait
+            # plus the render: the graceful shutdown's bound stays as it was.
+            queue_wait = settings.browser_queue_wait_seconds
+            total_within = queue_wait + result_within
+            result_within += queue_wait
         return await self.wait_for(
             job_id,
             answered="rendered",
             claim_within=settings.browser_queue_wait_seconds,
-            result_within=render_seconds
-            + _RESULT_MARGIN_SECONDS
-            + pii_seconds
-            + llm_seconds
-            + asr_seconds,
+            result_within=result_within,
+            total_within=total_within,
             detached=detached,
         )

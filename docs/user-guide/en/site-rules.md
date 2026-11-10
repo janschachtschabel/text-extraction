@@ -76,7 +76,9 @@ it in `options`.
 
 The operator caps how many unblock pages one browser worker renders at once with
 `BROWSER_UNBLOCK_CONCURRENCY` (default 2, at most `BROWSER_CONCURRENCY`); a further one waits for
-its turn.
+its turn before its time budget starts. If no turn comes within `BROWSER_QUEUE_WAIT_SECONDS`, it
+is tried again later; at its last try it answers its HTTP result with the warning
+`browser_unavailable` (or `rate_limited`, retryable), never a timeout of the site.
 
 ### What it does not do
 

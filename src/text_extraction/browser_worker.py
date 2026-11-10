@@ -22,6 +22,15 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    with secrets always renders (R8), one with a draft is compared with it (a YouTube video's
    details whose subtitles could not be read try its transcript view instead, P13-S2), one
    without either runs the fast step first;
+2b. takes a turn of the unblock browser before the pipeline runs, when the item will use it
+   (unblock mode applies, not ``mode: fast``, not a transcript-view draft; package 22):
+   ``BROWSER_UNBLOCK_CONCURRENCY`` turns per process (at most ``BROWSER_CONCURRENCY``), each a
+   headful Chrome. The wait comes before the render deadline starts and before the host's turn,
+   and lasts at most ``BROWSER_QUEUE_WAIT_SECONDS``. When no turn comes, the item is deferred
+   (``UnblockBusy``, a short ``OutboundBusy``: the worker gives it back with its secrets and its
+   draft, nothing is charged to the host); at ``JOB_ITEM_MAX_ATTEMPTS`` it answers instead, as an
+   expired queue wait does: its draft with ``browser_unavailable``, without one
+   ``rate_limited``, retryable. The turn is given back when the pipeline ends, however it ends;
 3. runs the pipeline with an ``ArtifactSink`` bound to the job: the screenshot is stored as
    ``job:{<id>}:artifact:<name>`` (``screenshot.png``, ``screenshot.jpg`` or
    ``screenshot.webp``) for ``ARTIFACT_TTL_SECONDS`` and served at
@@ -48,9 +57,8 @@ for unblock mode with a headful Chrome: Patchright reads ``DISPLAY`` when its dr
 and the browser pools: Playwright's Chromium, and with ``BROWSER_UNBLOCK_ENABLED``
 Patchright's Chrome. Both pools share one semaphore, so ``BROWSER_CONCURRENCY`` pages run at
 once in all; the worker runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). Unblock
-pages (each a headful Chrome) also have a limit of their own, ``BROWSER_UNBLOCK_CONCURRENCY``
-(at most ``BROWSER_CONCURRENCY``): a further one waits for it, within its render deadline, without
-holding a slot, so standard pages keep the rest (package 22). The
+items also take a turn of their own first (step 2b), so standard items keep the slots an
+unblock item waits beside. The
 pipeline's deadline is ``BROWSER_TIMEOUT_SECONDS`` (an unblock render has
 ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``). After the loops have stopped, the pools, Xvfb and the
 proxy stop, in that order; the document pool and the media fetcher stop with the process. A
@@ -69,6 +77,7 @@ import sys
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from prometheus_client import REGISTRY, CollectorRegistry
@@ -76,7 +85,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from text_extraction.asr_dispatch import ASR_OUTCOMES, ASR_POOL, AsrMove, asr_queue
-from text_extraction.browser import BrowserPool, ChromiumRenderer, Launcher, PlaywrightLauncher
+from text_extraction.browser import BrowserPool, ChromiumRenderer, PlaywrightLauncher
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets
 from text_extraction.browser_proxy import EgressProxy
 from text_extraction.browser_unblock import PatchrightLauncher, UnblockRenderer, Xvfb
@@ -85,6 +94,11 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
+from text_extraction.escalation import (
+    BROWSER_UNAVAILABLE_WARNING,
+    needs_transcript_panel,
+    unblock_for,
+)
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
@@ -129,6 +143,47 @@ SECRETS_EXPIRED_MESSAGE = (
 )
 # Failures after which an item is given back to run again; it still needs its secrets then.
 _GIVEN_BACK = (OutboundBusy, CircuitOpen, RedisError, OSError)
+# An item that got no turn of the unblock browser is claimable again after this many seconds.
+UNBLOCK_RETRY_SECONDS = 1.0
+UNBLOCK_BUSY_MESSAGE = "The unblock browser was busy; send the request again."
+
+
+class UnblockBusy(OutboundBusy):
+    """No turn of the unblock browser came within ``BROWSER_QUEUE_WAIT_SECONDS``: the worker
+    defers the item as for a busy host, but nothing was asked of the host (package 22)."""
+
+
+def unblock_concurrency(settings: Settings) -> int:
+    """Unblock items at once: ``BROWSER_UNBLOCK_CONCURRENCY``, at most ``BROWSER_CONCURRENCY``."""
+    return min(settings.browser_unblock_concurrency, settings.browser_concurrency)
+
+
+def unblock_turn_seconds(settings: Settings) -> float:
+    """How long an item waits for a turn of the unblock browser: ``BROWSER_QUEUE_WAIT_SECONDS``,
+    at most what its lease leaves beside the render deadline and the shutdown margin."""
+    headroom = (
+        browser_lease_seconds(settings)
+        - settings.browser_unblock_timeout_seconds
+        - _SHUTDOWN_MARGIN_SECONDS
+    )
+    return max(0.0, min(settings.browser_queue_wait_seconds, headroom))
+
+
+def unblock_unavailable(url: str, draft: Envelope[ExtractResult] | None) -> Envelope[ExtractResult]:
+    """The answer of an item at its last attempt that got no turn of the unblock browser: its
+    draft with ``browser_unavailable`` (and without the fingerprint, never compared), as an
+    expired queue wait answers; without one ``rate_limited``, retryable, never ``timeout``,
+    which would count against the host."""
+    _log.info("unblock_turn_unavailable", host=urlsplit(url).hostname)
+    if draft is not None and draft.data is not None:
+        data = draft.data.model_copy(
+            update={
+                "fingerprint": None,
+                "warnings": [*draft.data.warnings, BROWSER_UNAVAILABLE_WARNING],
+            }
+        )
+        return draft.model_copy(update={"data": data})
+    return failed_extract(ErrorCode.RATE_LIMITED, UNBLOCK_BUSY_MESSAGE, retryable=True)
 
 
 def artifact_url(job_id: str, name: str) -> str:
@@ -179,11 +234,14 @@ class BrowserRunner:
         guard: MemoryPressure | None = None,
         asr_queue: FairQueue | None = None,
         registry: CollectorRegistry | None = None,
+        unblock_turns: asyncio.Semaphore | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._store = store
         self._settings = settings
         self._guard = guard
+        # The unblock browser's turns (package 22); None without unblock mode.
+        self._unblock_turns = unblock_turns
         self._asr_queue = asr_queue
         self._asr_outcomes = (
             dispatch_counter_for(registry, ASR_OUTCOMES, pool=ASR_POOL)
@@ -212,16 +270,26 @@ class BrowserRunner:
                 return failed_extract(ErrorCode.TIMEOUT, SECRETS_EXPIRED_MESSAGE, retryable=True)
             draft = await self._store.draft(job.id, item.index)
             request = _request(job, url, secrets)
-            transcription = self._asr_move(job, item, url) if request.transcribe else None
-            envelope = await self._pipeline.run(
-                request,
-                job_principal(job),
-                gate_refusals=gate_refusals,
-                artifacts=JobArtifacts(self._store, job.id, self._guard),
-                draft=draft,
-                asr_handoff=transcription,
-                asr_pages_only=True,  # a request URL's own media is not moved (R7)
-            )
+            turns = self._unblock_turns if self._unblocks(job, request, draft) else None
+            if turns is not None and not await self._turn(turns):
+                if gate_refusals == "raise":
+                    raise UnblockBusy(UNBLOCK_RETRY_SECONDS)  # given back, secrets kept
+                finished = True
+                return unblock_unavailable(url, draft)
+            try:  # from here the turn is given back however the run ends
+                transcription = self._asr_move(job, item, url) if request.transcribe else None
+                envelope = await self._pipeline.run(
+                    request,
+                    job_principal(job),
+                    gate_refusals=gate_refusals,
+                    artifacts=JobArtifacts(self._store, job.id, self._guard),
+                    draft=draft,
+                    asr_handoff=transcription,
+                    asr_pages_only=True,  # a request URL's own media is not moved (R7)
+                )
+            finally:
+                if turns is not None:
+                    turns.release()
             finished = True
             if transcription is not None and transcription.moved:
                 moved = True
@@ -242,6 +310,30 @@ class BrowserRunner:
                 await self._drop_secrets(job.id, keep_asr_key=moved or job.kind == "batch")
                 if not moved:
                     await self._drop_draft(job.id, item.index)
+
+    def _unblocks(
+        self, job: JobRecord, request: ExtractRequest, draft: Envelope[ExtractResult] | None
+    ) -> bool:
+        """Whether the item will use the unblock browser, as the pipeline decides it: unblock
+        mode applies to the job's owner, compliance and ``unblock``, the request may render
+        (not ``fast``), and it is no transcript-view draft (always the standard browser)."""
+        if self._unblock_turns is None or request.mode == "fast":
+            return False
+        if request.mode == "auto" and draft is not None and needs_transcript_panel(draft):
+            return False
+        return unblock_for(
+            job_principal(job), job.options.compliance, self._settings, requested=request.unblock
+        )
+
+    async def _turn(self, turns: asyncio.Semaphore) -> bool:
+        """Take a turn of the unblock browser within `unblock_turn_seconds`; False when none
+        came. A cancelled or timed-out wait holds no turn (``Semaphore.acquire``)."""
+        try:
+            async with asyncio.timeout(unblock_turn_seconds(self._settings)):
+                await turns.acquire()
+        except TimeoutError:
+            return False
+        return True
 
     def _asr_move(self, job: JobRecord, item: QueueItem, url: str) -> AsrMove | None:
         if self._asr_queue is None:
@@ -329,42 +421,17 @@ async def _quietly(stopping: Awaitable[None], part: str) -> None:
         _log.warning("browser_stop_failed", part=part, error_type=type(error).__name__)
 
 
-def unblock_concurrency(settings: Settings) -> int:
-    """Unblock pages at once: ``BROWSER_UNBLOCK_CONCURRENCY``, at most ``BROWSER_CONCURRENCY``."""
-    return min(settings.browser_unblock_concurrency, settings.browser_concurrency)
-
-
-def browser_pools(
-    settings: Settings,
-    proxy: EgressProxy,
-    registry: CollectorRegistry,
-    standard: Launcher,
-    unblock: Launcher,
-) -> tuple[BrowserPool, BrowserPool]:
-    """The standard and the unblock pool: one semaphore of ``BROWSER_CONCURRENCY`` slots for
-    both, and the unblock pool's own limit (`unblock_concurrency`) within it (package 22)."""
-    slots = asyncio.Semaphore(settings.browser_concurrency)
-    return (
-        BrowserPool(settings, proxy, registry, launcher=standard, slots=slots),
-        BrowserPool(
-            settings,
-            proxy,
-            registry,
-            launcher=unblock,
-            slots=slots,
-            limit=asyncio.Semaphore(unblock_concurrency(settings)),
-        ),
-    )
-
-
 def create_browsers(settings: Settings, registry: CollectorRegistry) -> Browsers:
     """The browser parts for ``settings``, not started yet."""
     proxy = EgressProxy(settings, registry=registry)
+    slots = asyncio.Semaphore(settings.browser_concurrency)  # shared by both drivers
+    standard = BrowserPool(
+        settings, proxy, registry, launcher=PlaywrightLauncher(settings), slots=slots
+    )
     if not settings.browser_unblock_enabled:
-        standard = BrowserPool(settings, proxy, registry, launcher=PlaywrightLauncher(settings))
         return Browsers(proxy, None, (standard,), ChromiumRenderer(standard, settings), None)
-    standard, unblock = browser_pools(
-        settings, proxy, registry, PlaywrightLauncher(settings), PatchrightLauncher(settings)
+    unblock = BrowserPool(
+        settings, proxy, registry, launcher=PatchrightLauncher(settings), slots=slots
     )
     return Browsers(
         proxy,
@@ -466,6 +533,7 @@ def build_browser_worker(
             guard=guard,
             asr_queue=asr_queue(valkey, settings) if asr_available(settings) else None,
             registry=registry,
+            unblock_turns=asyncio.Semaphore(unblock_concurrency(settings)) if unblock else None,
         ),
         store,
         FairQueue(valkey, settings, POOL),

@@ -229,7 +229,8 @@ class Settings(BaseSettings):
     browser_unblock_headless: bool = False
     browser_unblock_timeout_seconds: float = Field(default=60, ge=10, le=180)
     # Unblock pages one browser worker pod renders at once (each a headful Chrome of its own),
-    # within BROWSER_CONCURRENCY and capped at it; standard pages keep BROWSER_CONCURRENCY.
+    # within BROWSER_CONCURRENCY and capped at it; a further one waits for a turn before its
+    # render starts (at most BROWSER_QUEUE_WAIT_SECONDS). Standard pages never wait for it.
     browser_unblock_concurrency: int = Field(default=2, ge=1)
     browser_unblock_challenge_wait_seconds: float = Field(default=20, ge=0, le=60)
     # How long the cookies of a cleared challenge are reused for the host; 0: no reuse.

@@ -923,15 +923,27 @@ while `BROWSER_ENABLED` is false, are unchanged.
     and hand-off alike). The result cache keys `unblock: false` apart only where it changed the
     renderer (an admin's `ignore` with `BROWSER_UNBLOCK_ENABLED`, not `mode: fast`); every other
     key stays as it was. The playground shows the box "Unblock browser" (ticked) under the step
-    `ignore` where the offer has unblock; unticked it sends `unblock: false`. The MCP tools take no
-    `compliance`, so no `unblock` either.
+    `ignore` where the offer has unblock; unticked it sends `unblock: false`. The MCP tools have no
+    `compliance` argument; `unblock` goes through `options` like `compliance`. The fingerprint
+    of such a page is compared with the earlier one of the same switch (`|unblock=false`), so an
+    admin alternating the browsers sees no change that only the browser made.
   - Own concurrency (package 22): `BROWSER_UNBLOCK_CONCURRENCY` (default 2, capped at
-    `BROWSER_CONCURRENCY`) unblock pages at once per browser worker; four headful Chromes at once
-    crashed a GitHub runner. The unblock pool takes a turn of its own semaphore first, then a
-    slot of the shared `BROWSER_CONCURRENCY` semaphore, always in that order, inside
-    `BrowserPool.page`'s `async with`, so both are given back on every way out and a waiting
-    unblock page holds no slot a standard page could use. The wait counts against the render
-    deadline, as the wait for a shared slot does.
+    `BROWSER_CONCURRENCY`) unblock items at once per browser worker; four headful Chromes at once
+    crashed a GitHub runner. `BrowserRunner.run` takes a turn of that semaphore before
+    `pipeline.run`, for an item that will use the unblock browser (unblock mode applies to the
+    job's owner, compliance and `unblock`, not `mode: fast`, not a transcript-view draft). The
+    wait therefore comes before the render deadline starts and before the host's turn, and
+    standard items never wait for it. It lasts at most `BROWSER_QUEUE_WAIT_SECONDS` (and never
+    more than the lease leaves beside the render deadline and 10 s). Without a turn the item is
+    deferred (`UnblockBusy`, an `OutboundBusy` of 1 s: given back with its secrets and draft);
+    at `JOB_ITEM_MAX_ATTEMPTS` it answers as an expired queue wait does, its draft with
+    `browser_unavailable` or, without one, `rate_limited` (retryable). It never answers `timeout`
+    and never counts against the host's circuit breaker. The turn is given back in a `finally`
+    around the pipeline, on any result, error or cancellation. A sync request's
+    `BrowserDispatcher.wait` adds `BROWSER_QUEUE_WAIT_SECONDS` to its wait after the claim in
+    unblock mode, capped in all at the queue wait + the render deadline + 5 s, so the API's
+    graceful shutdown bound (R20) is unchanged; an item claimed late and kept waiting for a turn
+    as well can still outlast it, and the request then answers as before without a worker.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or
   third-party solver services (Jan: nothing paid). Partners are advised to add an allowlist rule
   in their bot protection instead: a secret header (sent with `headers`) or our egress IP. No IP

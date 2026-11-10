@@ -2368,7 +2368,8 @@ class Pipeline:
         )
         # Not compared again, so renew the baseline the next real extraction compares with.
         await self._fingerprints.touch(
-            run.cache_url, variant=_fingerprint_variant(run.req, stored.result)
+            run.cache_url,
+            variant=_fingerprint_variant(run.req, stored.result, unblock_off=run.unblock_off),
         )
         fresh = Validators.from_headers(fetched.headers)
         validators = Validators(
@@ -2535,7 +2536,9 @@ class Pipeline:
             return envelope
         if result.fingerprint is not None and not run.private:
             fingerprint = await self._fingerprints.compare_and_save(
-                run.cache_url, result.fingerprint, variant=_fingerprint_variant(run.req, result)
+                run.cache_url,
+                result.fingerprint,
+                variant=_fingerprint_variant(run.req, result, unblock_off=run.unblock_off),
             )
             result = result.model_copy(update={"fingerprint": fingerprint})
             envelope = envelope.model_copy(update={"data": result})
@@ -3520,7 +3523,9 @@ def _with_render(
     return answer.model_copy(update={"data": data.model_copy(update={"attempts": counted})})
 
 
-def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
+def _fingerprint_variant(
+    req: ExtractRequest, result: ExtractResult, *, unblock_off: bool = False
+) -> str:
     """Which previous fingerprint a result is compared with: the one of the same output format,
     and for a document also of the same ``ocr`` option. ``auto``, ``never`` and ``always`` may
     read the same file with different converters (MarkItDown, Docling), so alternating them must
@@ -3528,7 +3533,10 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
     Pages keep the variant of package 4 (the format), so their stored fingerprints stay valid,
     also with HTML5 tracks; a platform video or a media file has ``<format>|media``. A media
     result (a page's players included) of a request with ``languages`` adds them: they choose
-    the track, so switching them must not report a change either."""
+    the track, so switching them must not report a change either. A page rendered with unblock
+    mode switched off by the request (``unblock_off``, package 22) adds ``|unblock=false``, as its
+    cache key does: an admin alternating the standard and the unblock browser sees no change that
+    only the browser made."""
     if result.document is not None:
         return f"{req.format}|ocr={req.ocr}"
     variant: str = req.format
@@ -3537,6 +3545,8 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
             variant += "|media"
         if req.languages:
             variant += f"|languages={','.join(req.languages)}"
+    if unblock_off and req.mode != "fast":
+        variant += "|unblock=false"
     return variant
 
 
