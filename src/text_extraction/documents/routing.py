@@ -1,7 +1,8 @@
 """Which converter a document goes to (ruling F11): the one rule, for every caller.
 
 MarkItDown converts PDFs with a text layer, Office files of the OOXML and old Excel formats,
-EPUB and CSV, in the pod that holds the bytes. Docling (OCR, layout, tables) converts scans,
+EPUB, CSV and SVG (its text, parsed and never rendered), in the pod that holds the bytes.
+Docling (OCR, layout, tables) converts scans,
 broken text layers, images and OpenDocument files, in the Docling worker, and only while that
 worker exists: ``DOCLING_ENABLED``, and ``JOBS_ENABLED`` for the queue it is reached through.
 
@@ -17,7 +18,7 @@ from text_extraction.documents.types import DocumentConversion, DocumentKind, Oc
 from text_extraction.settings import Settings
 
 MARKITDOWN_KINDS: Final[frozenset[DocumentKind]] = frozenset(
-    {"pdf", "docx", "pptx", "xlsx", "xls", "epub", "csv"}
+    {"pdf", "docx", "pptx", "xlsx", "xls", "epub", "csv", "svg"}
 )
 DOCLING_KINDS: Final[frozenset[DocumentKind]] = frozenset(
     {"odt", "ods", "odp", "png", "jpeg", "tiff", "webp", "bmp"}

@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 import pytest
 
+from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceReport
 from text_extraction.documents.types import DocumentInfo
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -15,6 +16,7 @@ from text_extraction.escalation import (
     needs_transcript_panel,
     transcript_panel_applies,
     unblock_applies,
+    unblock_for,
 )
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.media.types import MediaInfo, Platform, TranscriptSource
@@ -400,6 +402,42 @@ def test_unblock_applies_only_with_ignore_and_switch(
     mode: Literal["enforce", "report", "ignore"], enabled: bool, expected: bool
 ) -> None:
     assert unblock_applies(mode, settings(browser_unblock_enabled=enabled)) is expected
+
+
+ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
+USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
+
+
+@pytest.mark.parametrize(
+    ("principal", "mode", "enabled", "requested", "expected"),
+    [
+        (ADMIN, "ignore", True, True, True),
+        # Package 22: an admin may switch unblock mode off for one request.
+        (ADMIN, "ignore", True, False, False),
+        (ADMIN, "ignore", False, True, False),
+        (ADMIN, "report", True, True, False),
+        (ADMIN, "report", True, False, False),
+        # R9: a user's ``unblock: true`` never unlocks the unblock browser.
+        (USER, "ignore", True, True, False),
+        (USER, "ignore", True, False, False),
+        (USER, "report", True, False, False),
+    ],
+)
+def test_unblock_for_honours_the_request(
+    principal: Principal,
+    mode: Literal["enforce", "report", "ignore"],
+    enabled: bool,
+    requested: bool,
+    expected: bool,
+) -> None:
+    on = settings(browser_unblock_enabled=enabled)
+    assert unblock_for(principal, mode, on, requested=requested) is expected
+
+
+def test_unblock_for_is_on_by_default() -> None:
+    on = settings(browser_unblock_enabled=True)
+    assert unblock_for(ADMIN, "ignore", on) is True
+    assert unblock_for(USER, "ignore", on) is False
 
 
 def test_warning_name() -> None:

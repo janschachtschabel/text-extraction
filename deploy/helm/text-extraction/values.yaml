@@ -64,6 +64,16 @@ config:
   # A YouTube video whose subtitles could not be read gets a second try in the browser where
   # YouTube offers its new transcript view (auto requests; nothing happens without browser workers).
   MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"
+  # With transcribe: true, a page with fewer words than this whose only media is one video or
+  # audio gets that media's transcript after its text (0: never).
+  TRANSCRIBE_EMBED_BELOW_WORDS: "300"
+  # A page with fewer than ATTACHMENTS_BELOW_WORDS words gets the text of at most
+  # ATTACHMENTS_MAX of its linked documents appended, each fetched as the page is (0: off; 0-5).
+  ATTACHMENTS_MAX: "2"
+  ATTACHMENTS_BELOW_WORDS: "100"
+  # Unblock pages (each a headful Chrome) one browser worker renders at once, within and capped at
+  # workers.browser.concurrency; only used with workers.browser.unblock.
+  BROWSER_UNBLOCK_CONCURRENCY: "2"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both
@@ -256,9 +266,10 @@ workers:
     # pod env: a config.BROWSER_CONCURRENCY entry is ignored. The resources below are sized for it.
     concurrency: 4
     # No drain wait. On SIGTERM the worker stops claiming and gives renders in flight
-    # max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10) seconds: 40 s, 70 s with unblock
-    # mode (BROWSER_UNBLOCK_TIMEOUT_SECONDS 60). The render fails when that plus a 10 s margin
-    # is above this value.
+    # max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10) seconds: 40 s, 80 s with unblock
+    # mode (BROWSER_UNBLOCK_TIMEOUT_SECONDS 60 plus the unblock turn wait,
+    # BROWSER_QUEUE_WAIT_SECONDS 10). The render fails when that plus a 10 s margin is above this
+    # value.
     terminationGracePeriodSeconds: 150
     # Measured as for the API pods (docs/configuration.md, "Resource baselines"): 100 renders at
     # four pages gave a memory p95 of 1137 MiB, a CPU mean of 0.73 and a peak of 1.49 cores. The

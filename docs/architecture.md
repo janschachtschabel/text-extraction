@@ -120,7 +120,105 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    passes step 2 under its canonical URL and is not fetched: the media children read its
    subtitles and details in the host's turn. A body that sniffs as audio or video is a media
    file (transcribed with `transcribe: true`), and an HTML page's `<track>` text is appended
-   after its conversion. Speech recognition is a job of the ASR worker. See "Audio and video".
+   after its conversion; with `transcribe: true` a thin page's one embedded media gets its
+   transcript after the page's text (step 8b, M22). Speech recognition is a job of the ASR worker. See "Audio and video".
+
+   The two paragraphs below carry the step numbers of `pipeline.py`'s module docstring (7b, 4b,
+   8b); a step number in them without a letter is one of this list (1 to 7).
+
+   **pipeline.py step 7b, attachments of a thin page (package 22, `pipeline_attachments.py`):** a
+   fetched or rendered HTML page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words, and no
+   bot challenge, soft 404 or login wall, gets the text of at most `ATTACHMENTS_MAX` (2) of its
+   attachments appended, then is judged again (step 4) and fingerprinted (step 7): a worksheet
+   overview or a lesson plan often carries its material as a download. A site crawl's pages do
+   not: the crawl lists file links and never fetches them. In `auto` mode the escalation is
+   decided on the page's own verdict first; a page that goes to the browser follows no
+   attachment in the fast phase, the render's step 7b does (a slow attachment host must not cost
+   the render its time, and a script page must not be answered by its download). The candidates
+   (`convert/attachments.py`) are the content's links to files in page order, then the Drupal
+   JSON:API `file--file` entities of its script data (Next.js flight chunks, JSON scripts), at
+   most 20. A link whose only content is an image is no candidate: it is a figure linking to its
+   file's page (a MediaWiki `/wiki/Datei:Foo.svg`). A link to an SVG is one, although
+   `links[].kind` and the document list of the content do not count `.svg` as a file. A candidate
+   whose extension or declared type names a kind MarkItDown does not
+   convert (audio, video, archives, OpenDocument, images but SVG; any declared type but a converted
+   kind's, an alias of one or a generic one such as `application/octet-stream`) is passed over
+   without a request. Each
+   one tried is fetched as the page is (the steps of `fetch_raw`): URL validation, the request's
+   compliance mode for its origin (a block ends it before its request), the host's `DomainGate`
+   turn with every redirect hop checked and a hop to another host in that host's turn, the
+   fetcher's SSRF guard, `DOCUMENT_MAX_BYTES` (a declared size over it is not fetched) and the
+   header checks after the fetch. The body is sniffed; a MarkItDown kind is converted in the
+   document children without an OCR hand-off (a document that needs OCR gives its text layer).
+   Its text follows the page's under a heading with its label (`## label` in Markdown, a line of
+   its own in text, an `<h2>` in HTML), with the warning `attachment_read` (its own
+   `pages_truncated` and `ocr_unavailable` reach the page's warnings once); one that gives no
+   text adds `attachment_failed` and changes nothing else. A failure that may pass (a timeout, a
+   refusal of the outbound gate, a 5xx, 408, 425 or 429) keeps the result out of the cache, so
+   a revalidation cannot renew a page without its material; a permanent one (404, robots.txt) is
+   cached as any. `word_count`, `quality.word_count`
+   and the fingerprint are computed from the joined content; the result's status code, final
+   URL and content type stay the page's, and its compliance report adds the findings of each
+   attachment whose text was appended (`compliance.with_extra_findings`: under `report`, an
+   attachment whose robots.txt disallows it shows as `robots: disallowed`, `decision: reported`;
+   `crawl_delay` stays the page's). The attachments share the request's
+   deadline: at most half of the time left, and they stop 1 s before it at the latest, so the
+   page keeps its answer and a player's tracks their time. The cache key does not change:
+   the settings belong to the deployment. `follow_attachments` also follows a file named
+   elsewhere, whatever the page's words. Known limit: a page with about 25 or more file links is
+   never thin with the defaults, because the converter keeps the file links the text lacks as a
+   list, and their labels count as words.
+
+   **pipeline.py step 4b, edu-sharing render pages through the REST API (package 22,
+   `edusharing.py`, `pipeline_edusharing.py`):** an edu-sharing render URL
+   (`<prefix>/edu-sharing/components/render/<uuid>`, optionally with a version segment or a
+   query) serves a 3 KB Angular shell, which only a render could read. Before its page is
+   fetched, a `fast` or `auto` request (not `browser`, a screenshot, browser options or an `auto`
+   item with a draft, which want the page as a browser shows it, and not a site crawl's page)
+   asks the repository instead:
+   `GET <base>/rest/node/v1/nodes/-home-/<uuid>/metadata?propertyFilter=-all-` with
+   `Accept: application/json`. The render URL gets its compliance check first (step 2 above, as the
+   page would; a block leaves it to today's path, which answers the block); the metadata URL is
+   then fetched as an attachment is (the steps of `fetch_raw`: its own compliance check, the
+   host's turn, every redirect hop checked, the SSRF guard), within `CONVERT_MAX_BYTES` and half
+   of the time left. From the JSON (`{"node": {...}}`, at most `CONVERT_MAX_BYTES`, refused when
+   it is no JSON or nested too deep) `node_page` writes a small HTML page. Its `<head>` has the
+   title, `<meta name="description">`, `<meta name="keywords">`, `<link rel="license">` (the
+   licence URL: `node.license.url`, else `virtual:licenseurl`, else one built from a Creative
+   Commons `ccm:commonlicense_key` and `ccm:commonlicense_cc_version`) and
+   `<link rel="canonical">` (the render URL), so `metadata` reads the node's licence,
+   description, keywords and canonical URL as any page's. Its body has an `<h1>` of
+   `node.title`, else `cclom:title`, else `node.name`; the description; the keywords as a plain
+   comma list; and a table with the licence's display name (`ccm:commonlicense_key_DISPLAYNAME`,
+   linked to the licence), `ccm:wwwurl` and the node's file (`downloadUrl`, `name`) as links.
+   No label of ours, MIME type or size is written, so the content words (and the language
+   detected) are the node's own; the links are table rows because a paragraph of a link alone
+   tips Trafilatura into flattening so short a page. Every value is escaped, and a URL is
+   kept only when it is an absolute `http(s)` URL with a host and without user info. The page
+   is converted and judged as an HTML page (steps 5 and 4 above); a JSON answer of the API is no bot
+   challenge, soft 404 or login wall, so those findings of the page are cleared before its
+   verdict, whatever the node's words. The node's file is followed as an attachment
+   (`follow_attachments`, whatever the page's words: the file is the material, but not while
+   `ATTACHMENTS_MAX` is 0, which lists it as a link only) and its text appended under the file's
+   name, with `attachment_read` or `attachment_failed`, as in step 7b. **Cross-host files are
+   listed, never fetched:** the file is followed only when its
+   URL is on the render URL's host; a `downloadUrl` elsewhere stays a link of the page, since
+   the metadata comes from the remote site and must not send the service to a host the request
+   did not name. A node without the `DownloadContent` right has no file to follow. A file of a
+   kind that is not converted (audio, video, archives) is listed only; the transcription of a
+   node's audio or video file is the single-media hand-off's (Task 6 of package 22). The answer
+   reports the metadata's fetch: its final URL, status and content type (`application/json`), so
+   `escalation.needs_browser` never sends it to the browser, not even under unblock mode;
+   `mode_used` stays `fast`, and its compliance report holds the findings of the render URL, the
+   metadata URL and an appended file. The page's `<html lang>` is the node's
+   `cclom:general_language` when that is a short language tag (`de`, `de_DE` as `de-DE`), so the
+   result's `language` is the node's. It is
+   fingerprinted from the metadata's bytes and the final content, and cached as a page's result,
+   without validators (a stale entry is read through the API again); a file failure that may
+   pass keeps it out of the cache. Any other answer of the API (a block, a refusal of the gate,
+   401, 404, 5xx, HTML, broken JSON, no `node` object, a timeout) sends the request on to
+   today's path unchanged, without an error or a warning of its own (logged as
+   `edusharing_fallback` with the host and the reason).
 6. **Post-process (optional):** DOM metadata, links, screenshot; the DOM stage of `structured`
    (`metadata`, `selectors`, `tables`, and the cleaned HTML for `learn_selectors`) on an HTML
    page's HTML, cached with the extraction; then PII; then the post stage of `structured` and
@@ -191,7 +289,10 @@ add a note of its own):
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none, and null when PII handling was requested: the messages are page
   text that can name a person, and the PII step does not read them), and the playground shows
-  them in a fold.
+  them in a fold. `attachment_read` (the page was thin: the text of one of its attachments was
+  appended under its name; once per attachment; step 7b), `attachment_failed` (an attachment
+  of a thin page was blocked, refused, over `DOCUMENT_MAX_BYTES`, no document MarkItDown
+  converts, without words or out of time: the page as it was; once per attachment).
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
   `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
   `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,
@@ -350,7 +451,8 @@ optional rate limit.
   hold: the caller is an admin, the resolved compliance mode is `ignore`, and the operator set
   `BROWSER_UNBLOCK_ENABLED`. A user key never gets it, not even where the operator's default is
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
-  renders in the standard browser.
+  renders in the standard browser. An admin's request may switch it off with `unblock: false`
+  (package 22, B14); `unblock: true` never unlocks it for anyone else.
 - **Optional features for admin keys only (package 19, P19-D1 b, 2026-11-07):**
   `OCR_ALLOW_USERS`, `ASR_ALLOW_USERS`, `PII_ALLOW_USERS` and `LLM_ALLOW_USERS` (default true) keep
   a feature the service has for admin keys (`feature_access.py`). A user key that asks for it by
@@ -823,6 +925,43 @@ while `BROWSER_ENABLED` is false, are unchanged.
     challenge keeps that answer out of the host's backoff.
   - Escalation: under unblock `auto` also escalates per B5, and on a plain refusal or an
     unfinished HTML result per B16. The result carries `unblocked: true`.
+  - Per request (package 22; Jan, 2026-11-10: "selectable where there is a crash risk; by
+    default it stays on"): the request field `unblock` (default `true`) on `/v1/extract`,
+    `/v1/structured`, `/v1/chunk`, `/v1/screenshot` and `/v1/batch`. `false` switches unblock mode
+    off for that request where it would apply (`escalation.unblock_for(..., requested=False)`): it
+    renders in the standard browser and escalates as without unblock mode. A user's `unblock`,
+    or one under another compliance mode, is accepted and changes nothing. The job options store
+    it only when `false`, the browser and extract workers read it from there (batch, escalation
+    and hand-off alike). The result cache keys `unblock: false` apart only where it changed the
+    renderer (an admin's `ignore` with `BROWSER_UNBLOCK_ENABLED`, not `mode: fast`); every other
+    key stays as it was. The playground shows the box "Unblock browser" (ticked) under the step
+    `ignore` where the offer has unblock; unticked it sends `unblock: false`. The MCP tools have no
+    `compliance` argument; `unblock` goes through `options` like `compliance`. The fingerprint
+    of such a page is compared with the earlier one of the same switch (`|unblock=false`), so an
+    admin alternating the browsers sees no change that only the browser made.
+  - Own concurrency (package 22): `BROWSER_UNBLOCK_CONCURRENCY` (default 2, capped at
+    `BROWSER_CONCURRENCY`) unblock items at once per browser worker; four headful Chromes at once
+    crashed a GitHub runner. `BrowserRunner.run` takes a turn of that semaphore before
+    `pipeline.run`, for an item that will use the unblock browser (unblock mode applies to the
+    job's owner, compliance and `unblock`, not `mode: fast`, not a transcript-view draft). The
+    wait therefore comes before the render deadline starts and before the host's turn, and
+    standard items never wait for it. For an item a caller waits for (a sync request's job) it
+    lasts at most `BROWSER_QUEUE_WAIT_SECONDS` (and never more than the lease leaves beside the
+    render deadline and 10 s); a batch item waits up to that headroom itself (60 s by default,
+    `unblock_turn_seconds(batch=True)`), since each deferral costs it an attempt and renders of
+    20 to 60 s would exhaust `JOB_ITEM_MAX_ATTEMPTS` of a long admin batch at the short wait
+    (final review of package 22). The browser worker's graceful shutdown adds the short wait to
+    the render deadline; a batch item still waiting at its end runs again once its lease
+    expires. Without a turn the item is
+    deferred (`UnblockBusy`, an `OutboundBusy` of 1 s: given back with its secrets and draft);
+    at `JOB_ITEM_MAX_ATTEMPTS` it answers as an expired queue wait does, its draft with
+    `browser_unavailable` or, without one, `rate_limited` (retryable). It never answers `timeout`
+    and never counts against the host's circuit breaker. The turn is given back in a `finally`
+    around the pipeline, on any result, error or cancellation. A sync request's
+    `BrowserDispatcher.wait` adds `BROWSER_QUEUE_WAIT_SECONDS` to its wait after the claim in
+    unblock mode, capped in all at the queue wait + the render deadline + 5 s, so the API's
+    graceful shutdown bound (R20) is unchanged; an item claimed late and kept waiting for a turn
+    as well can still outlast it, and the request then answers as before without a worker.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or
   third-party solver services (Jan: nothing paid). Partners are advised to add an allowlist rule
   in their bot protection instead: a secret header (sent with `headers`) or our egress IP. No IP
@@ -930,6 +1069,7 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | `xls` | OLE2 signature with a `Workbook` or `Book` stream | MarkItDown |
   | `epub` | ZIP whose first entry `mimetype` is `application/epub+zip` | MarkItDown |
   | `csv` | `text/csv` or `.csv`, decodable text | MarkItDown |
+  | `svg` | root `<svg>` after an optional XML declaration, comments and doctype (`vision.images.is_svg`) | MarkItDown child, parsed not converted (package 22): `documents/svg.py`, defusedxml, the text of `<text>`, `<flowRoot>` and `<desc>`; entities and external references are refused (`conversion_failed`) |
   | `odt`, `ods`, `odp` | ZIP `mimetype` `application/vnd.oasis.opendocument.*` | Docling |
   | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
@@ -1260,7 +1400,64 @@ OpenAI-compatible endpoint): always a job, answered 202.
   an S3 store would lift the limit (deferred, not built). Not taken: (b) extracting the audio track in the API pod.
 - **D4, players embedded in a page: listed, not transcribed (a).** `data.media.embeds` names
   them (platform URL or file URL, at most 10), so the caller can extract each with a request of
-  its own; only `<track>` text is added inline.
+  its own; only `<track>` text is added inline. Package 22 adds one exception, for a thin page
+  whose one media is the material (M22).
+- **M22, the one media of a thin page** (package 22: `Pipeline._with_page_media`, step 8b;
+  `pipeline_media.single_embed`, `page_transcribed`). With `transcribe: true`, a fetched or rendered
+  page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words of its own (before step 7b
+  appended its attachments' text: a worksheet does not keep the video from its transcript) whose players and declared media
+  are one media (no track of it read; not a bot challenge, soft 404 or login wall; not a site
+  crawl's page, a file a render ended on, a screenshot or a request with caller secrets) gets that media's
+  transcript after its text, as if the caller had sent the media's URL. One media is one embed, or
+  files that differ in their extension only: the `<source>` formats of one `<video>` (`a.mp4`,
+  `a.webm`), which `media.embeds` still lists one by one, since a result does not keep which element
+  a URL came from; the first of them that sniffs as audio or video is the media. The step runs after
+  the tracks (M8), on the page's final answer: in `auto` mode on the better of the fast result and
+  the render. The media runs in a sub-run of its own until 1 s before the deadline: a file's head is
+  fetched as a media URL is (its origin's compliance checks under the request's mode, its host's
+  turn, the SSRF guard on every hop, `MEDIA_HEAD_BYTES`) and must sniff as audio or video; a
+  platform player (a YouTube iframe) is probed as its canonical URL would be (step 2b: its
+  compliance checks and turn, the media children, the same tiers). Subtitles follow the page's text
+  at once, under the video's title as a `##` (the transcript's headings one level down, so the
+  page's title stays the only top heading); `media.transcript_source` is theirs. Media without
+  subtitles goes to the ASR hand-off as any media URL does (M9): an `AsrNeeded` whose input says
+  `page: true` and whose draft is the page's answer; the stand-in is that answer with
+  `asr_unavailable` and without its fingerprint. The ASR worker downloads the media as for any media
+  URL (`MEDIA_MAX_BYTES`; `MEDIA_UPLOAD_MAX_BYTES` is for uploads, whose bytes travel through
+  Valkey, and does not apply), and `transcribed_result` keeps the page: its title, metadata, final
+  URL, status code, compliance report (with the media URL's findings added, as the stand-in and the
+  draft have them, and as a page with subtitles has them) and `mode_used`, with the transcript after its text as `##
+  Transcript` (as a track's), words, quality verdict and fingerprint of the joined content,
+  `transcript_source: asr` in its `media`. It is stored under the page's cache key, as a platform
+  video's transcription is under its URL's: later requests without `transcribe`, and user keys while
+  `ASR_ALLOW_USERS` is false, are served the page with its transcript. A `page` input whose draft is
+  gone (dropped when its queue write failed) answers the transcript as media of its own, without a
+  fingerprint, and is never stored. No speech (`no_speech`) or a failure of the media's own
+  (`asr_unavailable`, final) answers and stores the page's own answer, so a later `transcribe`
+  request is a hit; any other failure answers it unstored. A stored page whose one media still owes
+  a transcript is no cache hit for a `transcribe` request. Without the service's ASR, for a user key
+  while `ASR_ALLOW_USERS` is false, when the media is blocked, fails or is no audio or video, or
+  when it needs speech recognition and the run has no hand-off, the page answers as without
+  `transcribe`. A page with more than one media, or with `TRANSCRIBE_EMBED_BELOW_WORDS` words or
+  more, keeps D4. The threshold is its own (ruling R6), not `ATTACHMENTS_BELOW_WORDS`: the material
+  of a video page is the video and the caller asked for `transcribe`, so a page of a few short
+  paragraphs around it qualifies, while 300 keeps longer articles that merely contain a video out.
+  The browser worker moves such a render to the `asr` pool (`AsrMove`, its draft kept), and only
+  such a page's media (ruling R7): an `auto` item whose own URL is a platform video or media file
+  answers as before (`asr_unavailable`, or `no_transcript_available` without a draft). A sync
+  request's move counts its job against `ASR_MAX_OPEN_PER_CLIENT` as `AsrDispatcher` does (at the
+  limit the page answers with `asr_unavailable`, counted `open_limit`); a batch's items are bounded
+  by the batch. A finished browser item drops the job's browser secrets but keeps the caller's ASR
+  key when the item moved or the job is a batch, for the ASR worker and the batch's other items. A
+  sync request with `transcribe` waits up to `MAX_WAIT_SECONDS` (60 s) more for the render's job, so
+  the route answers 202 with it instead of abandoning it. An edu-sharing node's audio or video file
+  on the render URL's host (step 4b, R3) is handed on the same way whatever the node's words and
+  `ATTACHMENTS_MAX`: the request asked for the transcription itself, and `ASR_ENABLED`,
+  `ASR_ALLOW_USERS` and `transcribe` decide it; the node lists the file in `media.embeds`. A node's
+  file on another host is listed only, and its stored result is a hit for a `transcribe` request.
+  Known limits: the `X-ASR-Api-Key` of a sync request that renders first is not kept with its
+  browser job (the external backend then needs `ASR_EXTERNAL_API_KEY`); a page whose one media fails
+  for good (no media, blocked) is fetched again by each `transcribe` request.
 - **D5, PyAV and FFmpeg: an LGPL build (a).** The PyPI wheel of PyAV bundles GPL `libx264` and
   `libx265`, which its metadata does not show. The ASR image builds PyAV from its sdist against
   a pinned BtbN `lgpl-shared` FFmpeg (9.0, `--enable-version3`, no `--enable-gpl` or

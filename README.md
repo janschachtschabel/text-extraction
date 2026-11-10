@@ -16,11 +16,13 @@ and a playground in English and German.
   `type`, `scroll`, `accept_cookies`, ...), cookies and headers work in the browser.
 - **Clean text.** Markdown, plain text or HTML without navigation, footers and other boilerplate;
   MathML becomes LaTeX; PHP error output that a site prints into its pages is removed and listed.
+  A thin page also gets its collapsed solutions, up to two attachments, an edu-sharing node's file
+  and, with `transcribe`, its one video.
 - **Metadata.** Title, description, authors, dates, language, images, canonical URL, keywords,
   schema.org and LRMI fields, the licence (Creative Commons and others, with its source and
   confidence), the page type (such as `content`, `listing` or `imprint`) and the links with their
   category.
-- **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, HTML, plain text and Markdown, by URL or
+- **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG (its text), HTML, plain text and Markdown, by URL or
   as an upload (up to 20 MB, PDFs up to 100 pages). With the OCR worker (Docling) also scans,
   images (PNG, JPEG, TIFF, WebP, BMP) and OpenDocument files (ODT, ODS, ODP). The bytes decide the
   type, not the declared `Content-Type`.

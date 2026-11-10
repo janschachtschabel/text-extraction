@@ -24,6 +24,7 @@ DocumentKind = Literal[
     "tiff",
     "webp",
     "bmp",
+    "svg",
 ]
 
 # The `ocr` option of a request: `auto` reads scans, broken text layers and images with OCR,

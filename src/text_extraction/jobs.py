@@ -47,10 +47,10 @@ Jobs that wait for a transcription (package 6, M11) may have:
                           request header ``X-ASR-Api-Key``). Kept ``ASR_INPUT_TTL_SECONDS`` + the
                           ASR lease (``asr_lease_seconds``) at most, never longer than the job;
                           a batch's as long as the job (its items move to pool ``asr`` at any
-                          time). Deleted with the job, by ``shorten`` and ``drop_secrets``, by
-                          the worker of pool ``asr`` once a sync request's item has its outcome,
-                          and with a batch's last result. No read of the job shows it, and it is
-                          never logged.
+                          time). Deleted with the job, by ``shorten`` and ``drop_secrets`` (not
+                          by ``drop_browser_secrets``), by the worker of pool ``asr`` once a
+                          sync request's item has its outcome, and with a batch's last result.
+                          No read of the job shows it, and it is never logged.
 
 Jobs that need LLM work (package 8, ruling S9) may have:
 
@@ -692,6 +692,12 @@ class JobStore:
         """Delete the job's caller secrets, the browser's and the ASR key (the worker has
         finished its item)."""
         await self._valkey.delete(_key(job_id, "secrets"), _key(job_id, "asr_key"))
+
+    async def drop_browser_secrets(self, job_id: str) -> None:
+        """Delete the job's browser secrets only (actions, cookies, headers): the browser worker
+        has finished its item, and the ASR key may still serve it (an item it moved to the
+        ``asr`` pool, M22) or the batch's other items."""
+        await self._valkey.delete(_key(job_id, "secrets"))
 
     async def put_asr_key(self, job_id: str, key: str, *, whole_job: bool = False) -> None:
         """Keep the caller's key of the external transcription endpoint for the job (M11), for

@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     browser_unblock_channel: Literal["chrome", "chromium"] = "chrome"
     browser_unblock_headless: bool = False
     browser_unblock_timeout_seconds: float = Field(default=60, ge=10, le=180)
+    # Unblock pages one browser worker pod renders at once (each a headful Chrome of its own),
+    # within BROWSER_CONCURRENCY and capped at it; a further one waits for a turn before its
+    # render starts (at most BROWSER_QUEUE_WAIT_SECONDS). Standard pages never wait for it.
+    browser_unblock_concurrency: int = Field(default=2, ge=1)
     browser_unblock_challenge_wait_seconds: float = Field(default=20, ge=0, le=60)
     # How long the cookies of a cleared challenge are reused for the host; 0: no reuse.
     browser_unblock_cookie_ttl_seconds: int = Field(default=1800, ge=0)
@@ -240,6 +244,10 @@ class Settings(BaseSettings):
     # the pod that holds the bytes; OCR and ODF go to the Docling worker.
     document_max_bytes: int = Field(default=20_000_000, ge=1024)  # at most FETCH_MAX_BYTES
     document_max_pages: int = Field(default=100, ge=1)  # pages after it are cut
+    # A fetched or rendered page with fewer words than ATTACHMENTS_BELOW_WORDS gets the text of
+    # at most ATTACHMENTS_MAX of its linked documents appended (package 22); 0 switches it off.
+    attachments_max: int = Field(default=2, ge=0, le=5)
+    attachments_below_words: int = Field(default=100, ge=0)
     # Largest total of all entries of a ZIP-based document once unpacked (container bombs).
     document_max_uncompressed_bytes: int = Field(default=200_000_000, ge=1024)
     document_concurrency: int = Field(default=2, ge=1)  # conversion child processes per pod
@@ -282,6 +290,9 @@ class Settings(BaseSettings):
     # YouTube's new transcript view, read in the browser when the subtitles could not be read
     # (auto requests; nothing happens without BROWSER_ENABLED).
     media_transcript_panel_enabled: bool = True
+    # With transcribe: true, a page with fewer words than this whose players and declared media
+    # are one video or audio gets that media's transcript after its text (ruling M22).
+    transcribe_embed_below_words: int = Field(default=300, ge=0)
     # ASR worker (speech recognition). Off by default: the API image has no models.
     asr_enabled: bool = False
     asr_allow_users: bool = True  # may non-admin keys have media transcribed?

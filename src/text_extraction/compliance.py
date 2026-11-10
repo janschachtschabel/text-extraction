@@ -323,6 +323,15 @@ def with_redirect_findings(report: ComplianceReport, hop: ComplianceReport) -> C
     return _decided(report.model_copy(update=update))
 
 
+def with_extra_findings(report: ComplianceReport, extra: ComplianceReport) -> ComplianceReport:
+    """``report`` plus the findings of a further URL whose content went into the same answer:
+    a thin page's appended attachment, an edu-sharing node's file or a page's one media
+    (package 22). They count as a redirect target's do (``with_redirect_findings``), but
+    ``crawl_delay`` stays ``report``'s: the page's host is still the one its own fetches use."""
+    merged = with_redirect_findings(report, extra)
+    return merged.model_copy(update={"crawl_delay": report.crawl_delay})
+
+
 def _decided(report: ComplianceReport) -> ComplianceReport:
     """The report with ``decision`` set from its findings and mode."""
     if report.mode == "ignore":

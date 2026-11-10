@@ -224,8 +224,14 @@ expect_render_fails "browser worker grace period too short" "workers.browser.ter
   --set workers.browser.terminationGracePeriodSeconds=49
 expect_render_succeeds "browser worker grace period just long enough" \
   --set workers.browser.terminationGracePeriodSeconds=50
+# with unblock mode: render deadline 60 + the unblock turn wait 10 + 10, + 10
 expect_render_fails "browser worker grace period too short for unblock" "workers.browser.terminationGracePeriodSeconds" \
-  --set workers.browser.unblock=true --set workers.browser.terminationGracePeriodSeconds=79
+  --set workers.browser.unblock=true --set workers.browser.terminationGracePeriodSeconds=89
+expect_render_succeeds "browser worker grace period just long enough for unblock" \
+  --set workers.browser.unblock=true --set workers.browser.terminationGracePeriodSeconds=90
+expect_render_fails "browser worker grace period follows config.BROWSER_QUEUE_WAIT_SECONDS with unblock" "workers.browser.terminationGracePeriodSeconds" \
+  --set workers.browser.unblock=true --set workers.browser.terminationGracePeriodSeconds=90 \
+  --set-string config.BROWSER_QUEUE_WAIT_SECONDS=11
 expect_render_fails "browser worker grace period follows config.BROWSER_UNBLOCK_TIMEOUT_SECONDS" "workers.browser.terminationGracePeriodSeconds" \
   --set workers.browser.unblock=true --set-string config.BROWSER_UNBLOCK_TIMEOUT_SECONDS=141
 expect_render_fails "extract worker grace period still checked" "workers.extract.terminationGracePeriodSeconds" \

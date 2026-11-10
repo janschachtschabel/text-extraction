@@ -463,8 +463,23 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fix
 the items still running are given back to the queue at once. */}}
 {{- define "text-extraction.llmGracefulSeconds" -}}{{ .Values.workers.llm.gracefulSeconds }}{{- end -}}
 
+{{/* The unblock turn wait of an item a caller waits for (browser_worker.unblock_turn_seconds):
+BROWSER_QUEUE_WAIT_SECONDS, at most what the browser lease (2 x the longest render deadline + 10)
+leaves beside BROWSER_UNBLOCK_TIMEOUT_SECONDS and a 10 s margin. */}}
+{{- define "text-extraction.unblockTurnSeconds" -}}
+{{- $browser := include "text-extraction.configNumber" (list . "BROWSER_TIMEOUT_SECONDS" 30) | float64 -}}
+{{- $unblock := include "text-extraction.configNumber" (list . "BROWSER_UNBLOCK_TIMEOUT_SECONDS" 60) | float64 -}}
+{{- $wait := include "text-extraction.configNumber" (list . "BROWSER_QUEUE_WAIT_SECONDS" 10) | float64 -}}
+{{- $headroom := subf (addf (mulf 2.0 (maxf $browser $unblock)) 10.0) $unblock 10.0 -}}
+{{- maxf 0.0 (minf $wait $headroom) -}}
+{{- end -}}
+
+{{/* Browser worker: the render deadline + 10 s, and with unblock mode the turn wait before it. */}}
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
+{{- if eq (include "text-extraction.browserUnblockEnabled" .) "true" -}}
+{{- $render = addf $render (include "text-extraction.unblockTurnSeconds" . | float64) -}}
+{{- end -}}
 {{- maxf (include "text-extraction.extractionGracefulSeconds" . | float64) (ceil (addf $render 10.0)) -}}
 {{- end -}}
 
@@ -710,7 +725,7 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- end -}}
 {{- $browserGraceful := include "text-extraction.browserGracefulSeconds" . | float64 -}}
 {{- if and .Values.workers.browser.enabled (gt $browserGraceful (subf (float64 .Values.workers.browser.terminationGracePeriodSeconds) 10.0)) -}}
-{{- fail (printf "workers.browser.terminationGracePeriodSeconds (%v) is too short: the browser workers give renders in flight %v s (max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10); the deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS) + a 10 s margin must fit. Raise it or lower the timeouts." .Values.workers.browser.terminationGracePeriodSeconds $browserGraceful) -}}
+{{- fail (printf "workers.browser.terminationGracePeriodSeconds (%v) is too short: the browser workers give renders in flight %v s (max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10); the deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS plus the unblock turn wait, BROWSER_QUEUE_WAIT_SECONDS) + a 10 s margin must fit. Raise it or lower the timeouts." .Values.workers.browser.terminationGracePeriodSeconds $browserGraceful) -}}
 {{- end -}}
 {{- $doclingGraceful := include "text-extraction.doclingGracefulSeconds" . | float64 -}}
 {{- if and $docling.enabled (gt $doclingGraceful (subf (float64 $docling.terminationGracePeriodSeconds) 10.0)) -}}

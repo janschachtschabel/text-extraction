@@ -64,6 +64,29 @@ erlaubt hat.
   (`content_too_short`, `empty_content`). Die Antwort ist das bessere Ergebnis von HTTP und Browser.
 - `data.unblocked` ist true, wenn die Seite auf diese Weise geladen wurde.
 
+### Den Entsperr-Browser für eine Anfrage ausschalten
+
+Die maximale Extraktion ist standardmäßig an, wo ihre drei Bedingungen gelten. Läuft der
+Entsperr-Browser für eine Website instabil (er ist ein vollständiges Chrome mit Fenster, viel
+schwerer als der normale Browser), sendet ein Admin `"unblock": false` zusammen mit
+`compliance: ignore`: Die Prüfungen bleiben aus, aber die Seite lädt im normalen Browser und fällt
+wie ohne Entsperrmodus auf ihn zurück. `data.unblocked` ist dann false. `unblock` wird von jedem
+Schlüssel und mit jedem Wert der Website-Regeln angenommen und ändert dort nichts:
+`"unblock": true` gibt einem Nutzer-Schlüssel nie den Entsperr-Browser. `POST /v1/extract`,
+`/v1/structured`, `/v1/chunk` (für eine URL), `/v1/screenshot` und `/v1/batch` nehmen es an;
+MCP-Tools in `options`.
+
+```json
+{"url": "https://example.org/partner-page", "compliance": "ignore", "unblock": false}
+```
+
+Wie viele Seiten ein Browser-Worker gleichzeitig im Entsperr-Browser lädt, begrenzt der Betreiber
+mit `BROWSER_UNBLOCK_CONCURRENCY` (Standard 2, höchstens `BROWSER_CONCURRENCY`); eine weitere
+wartet, bis sie an der Reihe ist, bevor ihr Zeitbudget beginnt. Kommt sie nicht innerhalb von
+`BROWSER_QUEUE_WAIT_SECONDS` an die Reihe, wird sie später erneut versucht; beim letzten Versuch
+antwortet sie mit ihrem HTTP-Ergebnis und der Warnung `browser_unavailable` (oder
+`rate_limited`, wiederholbar), nie mit einer Zeitüberschreitung der Website.
+
 ### Was sie nicht tut
 
 - Die maximale Extraktion löst keine Bild- oder Puzzle-Captchas: Eine solche Seite schlägt mit
@@ -148,6 +171,8 @@ Prüfungen also für jeden Lauf und nicht nur für die ganze Installation:
   URLs.
 - Ein Website-Lauf: `compliance` im Body von `POST /v1/site-structure`. Es gilt für den ganzen Lauf.
 - MCP: `compliance` gehört in `options` des Tools.
+- `unblock: false` neben `compliance: ignore` lässt die Prüfungen aus, nutzt aber den normalen
+  Browser (siehe [Den Entsperr-Browser für eine Anfrage ausschalten](#den-entsperr-browser-für-eine-anfrage-ausschalten)).
 
 Ein Schlüssel darf nur wählen, was ihm erlaubt ist: Ein Admin wählt alle drei Werte; ein anderer
 Schlüssel wählt `enforce` oder `report`, solange der Betreiber Überschreibungen erlaubt
@@ -187,6 +212,11 @@ Extraktion bei HTTP. Das Ergebnis zeigt den Wert der Website-Regeln (`compliance
 `bot_protection` kommt mit einem Hinweis auf die Wege am Schutz vorbei (nicht nach einem
 entsperrten Abruf), und ein Admin, dessen Server den Browser ohne Entsperrmodus betreibt, liest
 bei „Prüfung aus“, dass `BROWSER_UNBLOCK_ENABLED` aus ist.
+
+Wo „Prüfung aus“ die maximale Extraktion ist, erscheint darunter das Kästchen „Unblock-Browser“,
+solange diese Stufe gewählt ist (nicht bei **Website-Struktur**, die nie den Browser nutzt). Es ist
+standardmäßig angehakt. Ohne Haken lädt die Seite im normalen Browser: Das Formular sendet dann
+`unblock: false`. Bei jeder anderen Stufe ist das Kästchen verborgen und sendet nichts.
 
 Im Website-Baum sind URLs markiert, die die Regeln der Website sperren; siehe
 [Teil einer Website](part-of-a-site.md#in-der-spielwiese).

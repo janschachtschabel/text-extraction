@@ -408,6 +408,19 @@ def test_user_agent_header_sent(httpserver: HTTPServer) -> None:
     assert request.headers["Accept-Language"] == "de,en;q=0.8"
 
 
+def test_accept_replaces_the_accept_header_on_every_hop(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/old").respond_with_data(
+        "", status=302, headers={"Location": "/api"}
+    )
+    httpserver.expect_request("/api").respond_with_json({"node": {}})
+
+    result = fetch(httpserver.url_for("/old"), accept="application/json")
+
+    assert result.status == 200
+    assert [entry[0].headers["Accept"] for entry in httpserver.log] == ["application/json"] * 2
+    assert httpserver.log[0][0].headers["User-Agent"] == USER_AGENT
+
+
 def test_no_client_trace_headers_forwarded(httpserver: HTTPServer) -> None:
     httpserver.expect_request("/t").respond_with_data("x")
 

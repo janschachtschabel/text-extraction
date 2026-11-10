@@ -90,6 +90,7 @@ async def run_screenshot(
         cookies=body.cookies,
         headers=body.headers,
         compliance=body.compliance,
+        unblock=body.unblock,
         wait_seconds=body.wait_seconds,
     )
     answer = await respond(state, req, principal, "screenshot")

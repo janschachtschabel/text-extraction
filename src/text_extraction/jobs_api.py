@@ -367,6 +367,7 @@ async def start_batch(
         metadata=body.metadata,
         links=body.links,
         compliance=resolve_mode(body.compliance, principal, settings),
+        unblock=body.unblock,
         cache=body.cache,
         ocr=body.ocr,
         transcribe=body.transcribe,

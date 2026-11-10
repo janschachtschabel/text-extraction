@@ -228,7 +228,7 @@ that you send with `headers`, or an exemption for the service's egress IP.
 
 ### Documents and uploads
 
-PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
+PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs, CSVs and SVG graphics (their text elements) convert like pages:
 `POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
 `Content-Type` does (a PDF served as `application/octet-stream` or as `text/html`, as a
 `download.php` often does, is still a PDF; binary data declared `text/html` answers
@@ -250,6 +250,30 @@ default: an upload that takes longer answers 202 with a job). PDFs keep their fi
 scans and images (PNG, JPEG, TIFF, WebP, BMP) are read with OCR and OpenDocument files (ODT, ODS,
 ODP) are converted too; without it a scan answers its text layer with the warning
 `ocr_unavailable`, and images and OpenDocument files answer `unsupported_content_type`.
+
+A page with little text of its own (fewer than `ATTACHMENTS_BELOW_WORDS`, 100 words), such as a
+worksheet overview, often offers its material as a download. The service then reads up to
+`ATTACHMENTS_MAX` (2) of the documents it links to (PDF, Word, PowerPoint, Excel, EPUB, CSV, SVG) and
+appends their text under a heading with each one's name, with the warning `attachment_read`. An
+attachment that cannot be read (blocked by robots.txt, refused, too large, out of time) adds the
+warning `attachment_failed` and leaves the page as it was. The attachments are fetched with the
+same checks and limits as the page. With `"compliance": "report"`, what the checks found for an
+appended attachment (or for the one video of a page with `"transcribe": true`) shows in the
+page's `compliance` block. An image that only links to its own file page (a figure in a wiki
+article) is no attachment.
+
+A solution that a page hides behind a button (serlo's "Lösungsvorschlag", a `<details>` element or
+a toggle that controls its panel through `aria-controls`) is part of the text: the content is
+already in the page's HTML, so it is kept instead of dropped as hidden. Only real toggles count;
+other hidden elements stay out.
+
+A page of the edu-sharing repository (`/edu-sharing/components/render/<node id>`) is an Angular
+shell without text of its own. The service reads the node through the repository's public REST
+metadata API instead and follows the node's file on the same host like an attachment (a document,
+an SVG, or, with `"transcribe": true`, an audio or video file). Licence, description, keywords and
+the canonical link of the node go into the metadata. In such an answer `final_url` is the REST
+metadata URL, while `url` and `metadata.canonical_url` name the page you sent. If the repository
+does not answer, the page is read as before.
 
 ### Audio and video
 
@@ -287,6 +311,10 @@ curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/
 # 202 {"status": "success", "data": {"id": "<job id>", "kind": "file", ...,
 #  "status_url": "/v1/jobs/<job id>"}, ...}
 ```
+
+A page with little text of its own (fewer than `TRANSCRIBE_EMBED_BELOW_WORDS`, 300 words) whose only
+media is one video or audio player gets that media's subtitles or transcription after its own
+text with `"transcribe": true`, as if you had sent the media's URL.
 
 A transcription runs at about real time on 4 CPU threads (media up to 2 hours). With
 `ASR_BACKEND=openai` the worker sends the audio to an OpenAI-compatible endpoint instead

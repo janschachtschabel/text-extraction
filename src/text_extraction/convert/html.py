@@ -21,7 +21,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from html import escape, unescape
 from typing import Literal
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import lxml.etree
 import lxml.html
@@ -29,11 +29,11 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString, PageElement, Tag
 from trafilatura import extract
 
+from text_extraction.convert.attachments import link_attachments
 from text_extraction.convert.embedded import Embedded, embedded_content
 from text_extraction.convert.links import (
     absolute_url,
     base_url_of,
-    has_file_extension,
     markdown_link,
     urls_in,
 )
@@ -159,29 +159,6 @@ def _with_heading(text: str, heading: str, fmt: OutputFormat) -> str:
         return f"{heading}\n{text}"
     heading_html = f"<h1>{escape(heading)}</h1>"
     return re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + heading_html, text, count=1)
-
-
-def _document_links(soup: BeautifulSoup) -> list[tuple[str, str]]:
-    """Label and URL of each file the page's content links to, in page order: an http(s) link
-    whose path ends in one of DOWNLOAD_EXTS.
-
-    Expects the prepared document, whose references are already absolute. A link without text
-    is labelled with its aria-label, its title or its file name."""
-    found: dict[str, str] = {}
-    for anchor in soup.find_all("a", href=True):
-        url = attr(anchor, "href").strip()
-        parts = urlsplit(url)
-        if url in found or parts.scheme not in {"http", "https"}:
-            continue
-        if not has_file_extension(parts.path):
-            continue
-        if is_outside_content(anchor) or anchor.find_parent(is_outside_content):
-            continue
-        label = (
-            anchor.get_text(" ", strip=True) or attr(anchor, "aria-label") or attr(anchor, "title")
-        )
-        found[url] = " ".join(label.split()) or unquote(parts.path.rsplit("/", 1)[-1])
-    return [(label, url) for url, label in found.items()]
 
 
 def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputFormat) -> str:
@@ -442,7 +419,7 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     title = _title(soup, heading)
     if not soup.get_text(" ", strip=True):
         return Conversion("", "bs4", title, [*notes, "The page contains no text"], server_errors)
-    documents = _document_links(soup)
+    documents = link_attachments(soup)
     for navigation in soup.select('nav, [role="navigation"]'):
         if not navigation.decomposed:
             navigation.decompose()

@@ -1662,3 +1662,22 @@ def test_fast_mode_unchanged(browser_enabled: bool) -> None:
     assert PARAGRAPH.strip()[:40] in (data_of(article).content or "")
     assert data_of(hit).cache == "hit"
     assert renderer.calls == []
+
+
+def test_a_screenshot_follows_no_attachment() -> None:
+    """Final review of package 22, finding 3: a screenshot render (``POST /v1/screenshot``)
+    answers the image, not the text: a thin page's attachments are not fetched for it."""
+    thin = SHORT_PAGE.replace("</article>", '<p><a href="/files/blatt.pdf">Blatt</a></p></article>')
+    pdf = f"{ORIGIN}/files/blatt.pdf"
+    renderer = FakeRenderer(rendered(thin, screenshot=PNG, screenshot_size=(1920, 3000)))
+    harness = RenderHarness(
+        {pdf: fetched(pdf, b"%PDF-1.4\n", content_type="application/pdf")}, renderer=renderer
+    )
+
+    envelope = harness.run_once(
+        mode="browser", screenshot=True, metadata=False, artifacts=FakeArtifacts()
+    )
+
+    assert envelope.status == "success", envelope.error
+    assert pdf not in [url for url, _ in harness.fetcher.calls]
+    assert not any(code.startswith("attachment_") for code in data_of(envelope).warnings)

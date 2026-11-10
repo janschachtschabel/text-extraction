@@ -8,7 +8,7 @@ come from a fake fetcher or pytest-httpserver.
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
 from typing import Any, cast
@@ -24,12 +24,20 @@ from tests.fakes import (
     ARTICLE,
     PAGE,
     PARAGRAPH,
+    ROBOTS,
     Answer,
     FakeFetcher,
+    FakeRenderer,
     RecordingGate,
     Redirect,
     fetched,
+    rendered,
 )
+from tests.test_edusharing import DOWNLOAD as NODE_DOWNLOAD
+from tests.test_edusharing import METADATA as NODE_METADATA
+from tests.test_edusharing import RENDER as NODE_RENDER
+from tests.test_edusharing import json_answer
+from tests.test_edusharing import metadata as node_metadata
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.documents.pool import ConversionTimeout
@@ -38,11 +46,12 @@ from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher
 from text_extraction.fingerprint import FingerprintStore, _store_key
-from text_extraction.media.captions import CaptionFormat
+from text_extraction.media.captions import CaptionFormat, Cue
 from text_extraction.media.pool import FetchedTrack, MediaFetcher, MediaProbe
 from text_extraction.media.select import TrackRef
 from text_extraction.media.sites import MediaTarget
-from text_extraction.media.transcript import Chapter
+from text_extraction.media.sniff import MEDIA_HEAD_BYTES
+from text_extraction.media.transcript import Chapter, Transcription
 from text_extraction.media.types import MediaEmbed, TranscriptSource
 from text_extraction.netguard import is_public_address
 from text_extraction.outbound import DomainGate
@@ -1641,3 +1650,739 @@ def test_a_short_subtitle_track_is_a_success() -> None:
     assert envelope.error is None
     assert data_of(envelope).word_count < harness.settings.quality_min_words
     assert data_of(envelope).fingerprint is not None
+
+
+# --- the one video of a thin page (package 22, M22) ------------------------------------------
+
+THIN_SENTENCES = (
+    "Watch the short film about how green plants make their food.",
+    "Then answer the questions on the worksheet with your partner.",
+    "The film shows leaves, roots and the light of the sun.",
+    "Write down three new words that you heard in the film.",
+)
+VIDEO = "https://example.org/a.mp4"
+MP4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x02\x00isomiso2" + b"\x00" * 400
+SPOKEN = [
+    "Welcome to this lesson about photosynthesis in green plants.",
+    "Leaves catch the light of the sun with the green pigment chlorophyll.",
+    "Water rises from the roots and carbon dioxide enters through small pores.",
+    "From these the plant builds sugar and it gives off oxygen into the air.",
+]
+
+
+def thin_page(players: str, *, sentences: Sequence[str] = THIN_SENTENCES) -> str:
+    paragraphs = "".join(f"<p>{sentence}</p>" for sentence in sentences)
+    return (
+        '<!doctype html><html lang="en"><head><title>Film lesson</title></head><body>'
+        f"<main><h1>Film lesson</h1>{paragraphs}{players}</main></body></html>"
+    )
+
+
+ONE_VIDEO = '<video controls><source src="/a.mp4" type="video/mp4"></video>'
+
+
+def thin_answers(players: str = ONE_VIDEO, **files: Answer) -> dict[str, Answer]:
+    return {
+        PAGE: fetched(PAGE, thin_page(players)),
+        VIDEO: fetched(VIDEO, MP4, content_type="video/mp4"),
+        **files,
+    }
+
+
+def asr_harness(
+    answers: dict[str, Answer], media: Probe | None = None, **overrides: Any
+) -> Harness:
+    overrides.setdefault("asr_enabled", True)
+    return Harness(answers, media=media if media is not None else probe(), **overrides)
+
+
+def transcription(sentences: Sequence[str] = SPOKEN, **fields: Any) -> Transcription:
+    cues = [
+        Cue(start=index * 4.0, end=index * 4.0 + 3.5, text=sentence)
+        for index, sentence in enumerate(sentences)
+    ]
+    values: dict[str, Any] = {
+        "segments": cues,
+        "language": "en",
+        "duration": 1800.0,
+        "model": "large-v3-turbo",
+        "kind": "mp4",
+        "fetch_ms": 40,
+        "convert_ms": 900,
+        "upstream_status": 200,
+    }
+    values.update(fields)
+    return Transcription(**values)
+
+
+def test_a_thin_page_hands_its_one_video_to_the_transcription() -> None:
+    """With ``transcribe: true``, a page below ``TRANSCRIBE_EMBED_BELOW_WORDS`` whose only media
+    is one video file hands that file on as a media file would be (its head fetched in its
+    host's turn after its compliance checks); the stand-in is the page's own answer."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+    plain = Harness(thin_answers(), media=probe()).run(url=PAGE)
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True)
+
+    (needed,) = handed
+    assert needed.input.source == "file"
+    assert needed.input.platform == "file"
+    assert needed.input.url == VIDEO
+    assert needed.input.kind == "mp4"
+    assert needed.input.page is True
+    assert needed.input.attempts == 2  # the page and the video's head
+    assert needed.input.compliance is not None
+    assert needed.draft is not None
+    draft = data_of(needed.draft)
+    assert draft.content == data_of(plain).content
+    assert draft.title == "Film lesson"
+    assert draft.fingerprint is not None  # the draft keeps it for the final result
+    stand_in = data_of(envelope)
+    assert stand_in.content == data_of(plain).content
+    assert stand_in.fingerprint is None  # a stand-in is never stored
+    assert "asr_unavailable" in stand_in.warnings
+    assert stand_in.media is not None
+    assert stand_in.media.embeds == [MediaEmbed(url=VIDEO, kind="file")]
+    assert page_files(harness.fetched_urls()) == [PAGE, VIDEO]
+    (video_call,) = [options for url, options in harness.fake.calls if url == VIDEO]
+    assert video_call["max_bytes"] == MEDIA_HEAD_BYTES
+    assert harness.keys("res:*") == []
+    assert harness.gate.held() == []
+
+
+def test_the_transcript_follows_the_page_text() -> None:
+    """The ASR worker's result keeps the page: its title, text, metadata and status code, with
+    the transcript appended as ``## Transcript``; words, quality and fingerprint are the joined
+    content's, and the result is stored under the page's key."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+
+    async def scenario() -> tuple[Envelope[ExtractResult], Envelope[ExtractResult]]:
+        await harness.arun(handoff, url=PAGE, transcribe=True)
+        (needed,) = handed
+        final = await harness.pipeline.transcribed_result(
+            ExtractRequest(url=PAGE, transcribe=True),
+            USER,
+            needed.input,
+            needed.draft,
+            transcription(),
+        )
+        later = await harness.arun(url=PAGE)
+        return final, later
+
+    final, later = asyncio.run(scenario())
+
+    data = data_of(final)
+    assert final.status == "success", final.error
+    assert data.title == "Film lesson"
+    assert data.url == PAGE
+    assert data.final_url == PAGE
+    assert data.content_type == "text/html"
+    assert data.upstream_status == 200
+    assert data.mode_used == "fast"
+    assert data.content is not None
+    page_part, transcript = data.content.split("\n\n## Transcript\n\n")
+    assert THIN_SENTENCES[0] in page_part
+    assert SPOKEN[0] in transcript
+    assert data.quality is not None
+    assert data.word_count == data.quality.word_count
+    assert data.word_count > harness.settings.quality_min_words
+    assert data.fingerprint is not None
+    assert "asr_unavailable" not in data.warnings
+    assert data.media is not None
+    assert data.media.platform == "html5"
+    assert data.media.transcript_source == "asr"
+    assert data.media.asr_model == "large-v3-turbo"
+    assert data.media.duration_seconds == 1800.0
+    assert data.media.embeds == [MediaEmbed(url=VIDEO, kind="file")]
+    assert data.attempts == 3  # the page, the video's head and its download
+    assert data_of(later).cache == "hit"
+    assert data_of(later).content == data.content
+
+
+def test_html_format_puts_the_transcript_inside_the_body() -> None:
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+
+    async def scenario() -> Envelope[ExtractResult]:
+        await harness.arun(handoff, url=PAGE, transcribe=True, format="html")
+        (needed,) = handed
+        return await harness.pipeline.transcribed_result(
+            ExtractRequest(url=PAGE, transcribe=True, format="html"),
+            USER,
+            needed.input,
+            needed.draft,
+            transcription(),
+        )
+
+    content = data_of(asyncio.run(scenario())).content or ""
+
+    assert content.index(THIN_SENTENCES[0]) < content.index("<h2>Transcript</h2>")
+    assert content.index("<h2>Transcript</h2>") < content.index(SPOKEN[0])
+    assert content.index(SPOKEN[0]) < content.index("</body>")
+
+
+@pytest.mark.parametrize(
+    ("failure", "warning", "stored"),
+    [
+        (None, "no_speech", True),
+        (
+            ErrorInfo(code=ErrorCode.MEDIA_TOO_LONG, message="Too long.", retryable=False),
+            "asr_unavailable",
+            True,
+        ),
+        (
+            ErrorInfo(code=ErrorCode.TIMEOUT, message="Too slow.", retryable=True),
+            "asr_unavailable",
+            False,
+        ),
+    ],
+    ids=["no_speech", "final_failure", "retryable_failure"],
+)
+def test_a_page_whose_video_gave_no_transcript_answers_its_own_text(
+    failure: ErrorInfo | None, warning: str, stored: bool
+) -> None:
+    """No speech, or a failed transcription: the page's own answer with the warning; stored
+    (so a later ``transcribe`` request does not try again) only when the media is the reason."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+    plain = Harness(thin_answers(), media=probe()).run(url=PAGE)
+
+    async def scenario() -> Envelope[ExtractResult]:
+        await harness.arun(handoff, url=PAGE, transcribe=True)
+        (needed,) = handed
+        answer: Transcription | Envelope[ExtractResult] = (
+            transcription(sentences=[])
+            if failure is None
+            else Envelope[ExtractResult](status="failed", error=failure)
+        )
+        return await harness.pipeline.transcribed_result(
+            ExtractRequest(url=PAGE, transcribe=True),
+            USER,
+            needed.input,
+            needed.draft,
+            answer,
+            final=failure is not None and not failure.retryable,
+        )
+
+    final = asyncio.run(scenario())
+
+    data = data_of(final)
+    assert final.status == plain.status
+    assert final.error == plain.error
+    assert data.content == data_of(plain).content
+    assert warning in data.warnings
+    assert (data.fingerprint is not None) is stored
+    assert (harness.keys("res:*") != []) is stored
+    if stored:  # a later transcribe request is served from it, no second hand-off
+        again = harness.run(handoff, url=PAGE, transcribe=True)
+        assert data_of(again).cache == "hit"
+        assert len(handed) == 1
+
+
+def test_without_transcribe_the_video_is_listed_only() -> None:
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+
+    envelope = harness.run(handoff, url=PAGE)
+
+    assert handed == []
+    media = data_of(envelope).media
+    assert media is not None
+    assert media.embeds == [MediaEmbed(url=VIDEO, kind="file")]
+    assert media.transcript_source is None
+    assert page_files(harness.fetched_urls()) == [PAGE]
+    assert "asr_unavailable" not in data_of(envelope).warnings
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["two_embeds", "long_page", "no_handoff", "users_refused", "robots", "not_media", "private"],
+)
+def test_otherwise_the_page_keeps_todays_answer(case: str) -> None:
+    """Two embeds, a page of 300 words, no hand-off, a user key while transcription is for
+    admins, a video blocked by robots.txt, a ``<video>`` whose URL serves no media, or a request
+    with caller secrets: the page's answer of today, its embeds listed."""
+    handed, handoff = capture_handoff()
+    answers = thin_answers()
+    overrides: dict[str, Any] = {}
+    request: dict[str, Any] = {}
+    if case == "two_embeds":
+        answers[PAGE] = fetched(PAGE, thin_page(ONE_VIDEO + '<audio src="/b.mp3"></audio>'))
+    elif case == "long_page":
+        answers[PAGE] = fetched(
+            PAGE, thin_page(ONE_VIDEO, sentences=[f"Part {n}. {PARAGRAPH}" for n in range(8)])
+        )
+    elif case == "users_refused":
+        overrides["asr_allow_users"] = False
+    elif case == "robots":
+        answers[ROBOTS] = fetched(
+            ROBOTS, "User-agent: *\nDisallow: /a.mp4\n", content_type="text/plain"
+        )
+    elif case == "not_media":
+        answers[VIDEO] = fetched(VIDEO, "<html><body>Not here</body></html>")
+    elif case == "private":
+        request["headers"] = {"X-Session": "secret"}
+    harness = asr_harness(answers, **overrides)
+    plain = Harness(answers, media=probe(), **overrides).run(url=PAGE, **request)
+
+    envelope = harness.run(
+        None if case == "no_handoff" else handoff, url=PAGE, transcribe=True, **request
+    )
+
+    assert handed == []
+    assert comparable(envelope) == comparable(plain)
+    if case in ("two_embeds", "long_page", "no_handoff", "users_refused", "private"):
+        assert VIDEO not in harness.fetched_urls()
+
+
+def test_a_page_of_about_150_words_hands_on_its_one_video_at_the_defaults() -> None:
+    """The embed has its own threshold: a page of about 150 words, above
+    ``ATTACHMENTS_BELOW_WORDS`` but below ``TRANSCRIBE_EMBED_BELOW_WORDS``, hands its one video
+    on at the default settings."""
+    handed, handoff = capture_handoff()
+    answers = thin_answers()
+    answers[PAGE] = fetched(
+        PAGE, thin_page(ONE_VIDEO, sentences=[f"Part {n}. {PARAGRAPH}" for n in range(4)])
+    )
+    harness = asr_harness(answers)
+    plain = Harness(answers, media=probe()).run(url=PAGE)
+    words = data_of(plain).word_count
+    assert harness.settings.attachments_below_words <= words
+    assert 120 <= words < harness.settings.transcribe_embed_below_words == 300
+
+    harness.run(handoff, url=PAGE, transcribe=True)
+
+    (needed,) = handed
+    assert needed.input.url == VIDEO
+    assert needed.input.page is True
+
+
+@pytest.mark.parametrize("first", ["mp4", "webm"])
+def test_the_sources_of_one_video_are_one_media(first: str) -> None:
+    """One ``<video>`` with an MP4 and a WebM source (alike but for the extension) is one media:
+    the first source that is audio or video is handed on, and both stay listed."""
+    handed, handoff = capture_handoff()
+    webm = "https://example.org/a.webm"
+    sources = {
+        "mp4": '<source src="/a.mp4" type="video/mp4">',
+        "webm": '<source src="/a.webm" type="video/webm">',
+    }
+    second = "webm" if first == "mp4" else "mp4"
+    player = f"<video controls>{sources[first]}{sources[second]}</video>"
+    answers = thin_answers(player)
+    # The WebM URL answers a page, not media: only the MP4 is the video.
+    answers[webm] = fetched(webm, "<html><body>Not here</body></html>")
+    harness = asr_harness(answers)
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True)
+
+    (needed,) = handed
+    assert needed.input.url == VIDEO
+    listed = [VIDEO, webm] if first == "mp4" else [webm, VIDEO]
+    assert data_of(envelope).media is not None
+    assert [embed.url for embed in data_of(envelope).media.embeds] == listed  # type: ignore[union-attr]
+    expected = [PAGE, VIDEO] if first == "mp4" else [PAGE, webm, VIDEO]
+    assert page_files(harness.fetched_urls()) == expected
+
+
+def test_a_pages_media_without_its_draft_is_answered_unstored() -> None:
+    """A page's media whose draft is gone (dropped after a failed queue write) cannot keep the
+    page: its transcript answers without a fingerprint, and nothing is stored under the page's
+    key, which holds the page."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+
+    async def scenario() -> Envelope[ExtractResult]:
+        await harness.arun(handoff, url=PAGE, transcribe=True)
+        (needed,) = handed
+        return await harness.pipeline.transcribed_result(
+            ExtractRequest(url=PAGE, transcribe=True), USER, needed.input, None, transcription()
+        )
+
+    envelope = asyncio.run(scenario())
+
+    data = data_of(envelope)
+    assert data.content is not None
+    assert SPOKEN[0] in data.content
+    assert data.fingerprint is None
+    assert harness.keys("res:*") == []
+
+
+def test_a_youtube_iframe_takes_the_platform_path() -> None:
+    """A YouTube player as the page's one embed is read as a YouTube URL would be: its subtitles
+    follow the page's text at once, with the platform's compliance checks and turn."""
+    harness = asr_harness(
+        {
+            PAGE: fetched(
+                PAGE, thin_page(f'<iframe src="https://www.youtube.com/embed/{YT_ID}"></iframe>')
+            )
+        }
+    )
+
+    envelope = harness.run(capture_handoff()[1], url=PAGE, transcribe=True)
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.title == "Film lesson"
+    assert data.content is not None
+    assert data.content.index(THIN_SENTENCES[0]) < data.content.index(SENTENCES[0])
+    assert data.media is not None
+    assert data.media.platform == "html5"
+    assert data.media.transcript_source == "manual_subtitles"
+    assert data.media.embeds == [MediaEmbed(url=YT, kind="platform", platform="youtube")]
+    assert data.fingerprint is not None
+    assert harness.probes() == 1
+    assert harness.media is not None
+    assert harness.media.calls[0][0].canonical_url == YT
+    assert YT_ROBOTS in harness.fetched_urls()  # the platform's compliance checks
+    assert harness.gate.held() == []
+    assert data_of(harness.run(url=PAGE)).cache == "hit"
+
+
+@pytest.mark.parametrize(
+    ("fmt", "title", "video"),
+    [
+        ("markdown", "# Film lesson", "## Photosynthesis for kids"),
+        ("html", "<h1>Film lesson</h1>", "<h2>Photosynthesis for kids</h2>"),
+    ],
+)
+def test_the_subtitles_of_a_pages_video_keep_one_top_heading(
+    fmt: str, title: str, video: str
+) -> None:
+    """The video's title (and any heading of its transcript) moves one level down: the page's
+    title stays the document's only top heading."""
+    harness = asr_harness(
+        {
+            PAGE: fetched(
+                PAGE, thin_page(f'<iframe src="https://www.youtube.com/embed/{YT_ID}"></iframe>')
+            )
+        }
+    )
+
+    envelope = harness.run(capture_handoff()[1], url=PAGE, transcribe=True, format=fmt)
+
+    content = data_of(envelope).content
+    assert content is not None
+    assert content.index(title) < content.index(video)
+    if fmt == "markdown":
+        assert [line for line in content.splitlines() if line.startswith("# ")] == [title]
+    else:
+        assert content.count("<h1>") == 1
+
+
+def test_a_youtube_iframe_without_subtitles_is_handed_on_as_a_platform_video() -> None:
+    handed, handoff = capture_handoff()
+    harness = asr_harness(
+        {
+            PAGE: fetched(
+                PAGE, thin_page(f'<iframe src="https://www.youtube.com/embed/{YT_ID}"></iframe>')
+            )
+        },
+        media=probe(track=None),
+    )
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True)
+
+    (needed,) = handed
+    assert needed.input.source == "platform"
+    assert needed.input.platform == "youtube"
+    assert needed.input.url == YT
+    assert needed.input.extractor == "youtube"
+    assert needed.input.page is True
+    assert needed.draft is not None
+    assert data_of(needed.draft).title == "Film lesson"
+    assert data_of(envelope).title == "Film lesson"
+    assert "asr_unavailable" in data_of(envelope).warnings
+
+
+def test_a_stored_page_without_its_transcript_is_no_hit_for_transcribe() -> None:
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        plain = await harness.arun(url=PAGE)
+        asked = await harness.arun(handoff, url=PAGE, transcribe=True)
+        return [plain, asked]
+
+    plain, asked = asyncio.run(scenario())
+
+    assert data_of(plain).cache == "miss"
+    assert data_of(asked).cache == "miss"
+    assert len(handed) == 1
+
+
+def test_a_rendered_thin_page_hands_its_video_on() -> None:
+    """A page that renders only in the browser (aoe.fi's shape): the render's result is the
+    draft, and the stand-in keeps ``mode_used: browser``."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers(), browser_enabled=True)
+    harness.pipeline._renderer = cast(Any, FakeRenderer(rendered(thin_page(ONE_VIDEO), url=PAGE)))
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True, mode="browser")
+
+    (needed,) = handed
+    assert needed.input.url == VIDEO
+    assert needed.draft is not None
+    assert data_of(needed.draft).mode_used == "browser"
+    assert data_of(envelope).mode_used == "browser"
+
+
+def test_an_escalated_auto_page_hands_its_video_on_after_the_comparison() -> None:
+    shell = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
+    handed, handoff = capture_handoff()
+    answers = thin_answers()
+    answers[PAGE] = fetched(PAGE, shell)
+    harness = asr_harness(answers, browser_enabled=True)
+    harness.pipeline._renderer = cast(Any, FakeRenderer(rendered(thin_page(ONE_VIDEO), url=PAGE)))
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True, mode="auto")
+
+    (needed,) = handed
+    assert needed.draft is not None
+    assert data_of(needed.draft).mode_used == "browser"
+    assert data_of(envelope).mode_used == "browser"
+    assert harness.keys("res:*") == []
+
+
+def test_an_edusharing_audio_node_is_handed_on_with_its_page() -> None:
+    """R3: a node whose file is audio on the render URL's host goes to the transcription with
+    ``transcribe: true``; the node's page is the stand-in and comes first in the result."""
+    meta = node_metadata(
+        title="Podcast Folge 3",
+        name="folge-3.mp3",
+        mimetype="audio/mpeg",
+        mediatype="file-audio",
+        size="17825792",
+    )
+    answers: dict[str, Answer] = {
+        NODE_METADATA: json_answer(meta),
+        NODE_DOWNLOAD: fetched(NODE_DOWNLOAD, MP3, content_type="audio/mpeg"),
+    }
+    handed, handoff = capture_handoff()
+    harness = asr_harness(answers, attachments_max=0)
+
+    async def scenario() -> tuple[Envelope[ExtractResult], Envelope[ExtractResult]]:
+        stand_in = await harness.arun(handoff, url=NODE_RENDER, transcribe=True)
+        (needed,) = handed
+        final = await harness.pipeline.transcribed_result(
+            ExtractRequest(url=NODE_RENDER, transcribe=True),
+            USER,
+            needed.input,
+            needed.draft,
+            transcription(kind="mp3"),
+        )
+        return stand_in, final
+
+    stand_in, final = asyncio.run(scenario())
+
+    (needed,) = handed
+    assert needed.input.url == NODE_DOWNLOAD
+    assert needed.input.kind == "mp3"
+    assert needed.input.page is True
+    assert data_of(stand_in).title == "Podcast Folge 3"
+    assert "asr_unavailable" in data_of(stand_in).warnings
+    data = data_of(final)
+    assert data.content is not None
+    assert data.content.startswith("# Podcast Folge 3")
+    assert data.content.index("folge-3.mp3") < data.content.index("## Transcript")
+    assert SPOKEN[0] in data.content
+    assert data.content_type == "application/json"  # the node answer's own fetch
+    assert data.media is not None
+    assert data.media.transcript_source == "asr"
+
+
+def test_a_node_whose_file_is_on_another_host_is_a_hit_for_transcribe() -> None:
+    """Such a node's file is listed, never transcribed: its stored result owes no transcript,
+    so a second ``transcribe`` request is a cache hit and reads no metadata again."""
+    elsewhere = "https://cdn.example/folge-3.mp3"
+    meta = node_metadata(
+        name="folge-3.mp3", mimetype="audio/mpeg", mediatype="file-audio", downloadUrl=elsewhere
+    )
+    harness = asr_harness({NODE_METADATA: json_answer(meta)})
+    handed, handoff = capture_handoff()
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        first = await harness.arun(handoff, url=NODE_RENDER, transcribe=True)
+        second = await harness.arun(handoff, url=NODE_RENDER, transcribe=True)
+        return [first, second]
+
+    first, second = asyncio.run(scenario())
+
+    assert handed == []
+    assert data_of(first).media is not None
+    assert data_of(first).media.embeds == [MediaEmbed(url=elsewhere, kind="file")]  # type: ignore[union-attr]
+    assert data_of(second).cache == "hit"
+    assert harness.fetched_urls().count(NODE_METADATA) == 1
+
+
+def test_an_edusharing_audio_node_without_transcribe_lists_its_file_as_media() -> None:
+    meta = node_metadata(name="folge-3.mp3", mimetype="audio/mpeg", mediatype="file-audio")
+    harness = asr_harness({NODE_METADATA: json_answer(meta)})
+
+    data = data_of(harness.run(capture_handoff()[1], url=NODE_RENDER))
+
+    assert data.media is not None
+    assert data.media.embeds == [MediaEmbed(url=NODE_DOWNLOAD, kind="file")]
+    assert NODE_DOWNLOAD not in harness.fetched_urls()
+
+
+# --- compliance: report keeps the findings of a page's media (final review, finding 1) -----
+
+ELSEWHERE_VIDEO = "https://media.example.net/a.mp4"
+DISALLOW_ALL = "User-agent: *\nDisallow: /"
+
+
+def test_report_mode_reports_the_findings_of_a_pages_handed_on_video() -> None:
+    """The video is fetched under ``compliance: report`` although its host's robots.txt says
+    no: the stand-in, the item's draft and the final transcribed result report it."""
+    handed, handoff = capture_handoff()
+    answers: dict[str, Answer] = {
+        PAGE: fetched(PAGE, thin_page(f'<video controls src="{ELSEWHERE_VIDEO}"></video>')),
+        ELSEWHERE_VIDEO: fetched(ELSEWHERE_VIDEO, MP4, content_type="video/mp4"),
+        "https://media.example.net/robots.txt": fetched(
+            "https://media.example.net/robots.txt", DISALLOW_ALL
+        ),
+    }
+    harness = asr_harness(answers)
+
+    async def scenario() -> tuple[Envelope[ExtractResult], Envelope[ExtractResult]]:
+        stand_in = await harness.arun(handoff, url=PAGE, transcribe=True, compliance="report")
+        (needed,) = handed
+        final = await harness.pipeline.transcribed_result(
+            ExtractRequest(url=PAGE, transcribe=True, compliance="report"),
+            USER,
+            needed.input,
+            needed.draft,
+            transcription(),
+        )
+        return stand_in, final
+
+    stand_in, final = asyncio.run(scenario())
+
+    (needed,) = handed
+    assert ELSEWHERE_VIDEO in harness.fetched_urls()
+    assert needed.draft is not None
+    for data in (data_of(stand_in), data_of(needed.draft), data_of(final)):
+        assert data.compliance.robots == "disallowed"
+        assert data.compliance.decision == "reported"
+        assert data.compliance.reasons
+    assert data_of(final).media is not None
+    assert data_of(final).media.transcript_source == "asr"  # type: ignore[union-attr]
+
+
+def test_report_mode_reports_the_findings_of_a_pages_subtitled_video() -> None:
+    harness = asr_harness(
+        {
+            PAGE: fetched(
+                PAGE, thin_page(f'<iframe src="https://www.youtube.com/embed/{YT_ID}"></iframe>')
+            ),
+            "https://www.youtube.com/robots.txt": fetched(
+                "https://www.youtube.com/robots.txt", DISALLOW_ALL
+            ),
+        }
+    )
+
+    data = data_of(
+        harness.run(capture_handoff()[1], url=PAGE, transcribe=True, compliance="report")
+    )
+
+    assert data.media is not None
+    assert data.media.transcript_source is not None  # the subtitles were appended
+    assert data.compliance.robots == "disallowed"
+    assert data.compliance.decision == "reported"
+
+
+def test_a_screenshot_render_hands_no_video_on() -> None:
+    """Final review of package 22, finding 3: a screenshot's answer is its image; step 8b
+    does not run for it (its players are not read: ``tracks`` is skipped, so it has no media)."""
+    from tests.fakes import FakeArtifacts, fake_png
+    from text_extraction.render import ArtifactSink
+
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers(), browser_enabled=True)
+    shot = fake_png(1920, 1080)
+    renderer = FakeRenderer(
+        rendered(thin_page(ONE_VIDEO), url=PAGE, screenshot=shot, screenshot_size=(1920, 1080))
+    )
+    harness.pipeline._renderer = cast(Any, renderer)
+
+    envelope = asyncio.run(
+        harness.pipeline.run(
+            ExtractRequest(url=PAGE, transcribe=True, mode="browser", screenshot=True),
+            USER,
+            asr_handoff=handoff,
+            artifacts=cast(ArtifactSink, FakeArtifacts()),
+        )
+    )
+
+    assert envelope.status == "success", envelope.error
+    assert handed == []
+    assert VIDEO not in harness.fetched_urls()
+
+
+def test_a_transcription_under_unblock_false_is_stored_under_its_own_key() -> None:
+    """Final review of package 22, finding 4: an admin's ``unblock: false`` under ``compliance:
+    ignore`` keys the result apart (``unblock: false``); the ASR worker's result is stored under
+    that key, so the next such request is a hit and starts no second transcription."""
+    admin = Principal(name="root", role="admin", rate_limit_per_minute=None)
+    handed, handoff = capture_handoff()
+    harness = Harness(media=probe(track=None), asr_enabled=True, browser_unblock_enabled=True)
+    options: dict[str, Any] = {
+        "url": YT,
+        "transcribe": True,
+        "compliance": "ignore",
+        "unblock": False,
+    }
+
+    async def scenario() -> tuple[Envelope[ExtractResult], Envelope[ExtractResult]]:
+        await harness.pipeline.run(ExtractRequest(**options), admin, asr_handoff=handoff)
+        (needed,) = handed
+        final = await harness.pipeline.transcribed_result(
+            ExtractRequest(**options), admin, needed.input, needed.draft, transcription()
+        )
+        later = await harness.pipeline.run(ExtractRequest(**options), admin, asr_handoff=handoff)
+        return final, later
+
+    final, later = asyncio.run(scenario())
+
+    assert final.status == "success", final.error
+    assert data_of(later).cache == "hit"
+    assert len(handed) == 1
+    assert harness.probes() == 1
+
+
+def test_appended_attachments_do_not_keep_a_thin_pages_video_from_its_transcript() -> None:
+    """Final review of package 22, minor 8: ``TRANSCRIBE_EMBED_BELOW_WORDS`` is judged on the
+    page's own words, before step 7b appended a worksheet's text: a thin page with a worksheet
+    and a video still hands the video on."""
+    handed, handoff = capture_handoff()
+    harness = asr_harness(thin_answers())
+    steps = harness.pipeline._attachments
+    worksheet = " ".join(["Arbeitsblatt"] * 400)
+
+    async def appended(
+        run: Any, result: ExtractResult, html: str, *, raw_sha256: str
+    ) -> ExtractResult:
+        content = f"{result.content}\n\n## Blatt\n\n{worksheet}"
+        assert result.quality is not None
+        quality = result.quality.model_copy(update={"word_count": result.word_count + 400})
+        return result.model_copy(
+            update={
+                "content": content,
+                "word_count": quality.word_count,
+                "quality": quality,
+                "warnings": [*result.warnings, "attachment_read"],
+            }
+        )
+
+    steps.append_attachments = appended  # type: ignore[method-assign]
+
+    envelope = harness.run(handoff, url=PAGE, transcribe=True)
+
+    assert data_of(envelope).word_count >= harness.settings.transcribe_embed_below_words
+    (needed,) = handed
+    assert needed.input.url == VIDEO
+    assert needed.draft is not None
+    assert "Arbeitsblatt" in (data_of(needed.draft).content or "")

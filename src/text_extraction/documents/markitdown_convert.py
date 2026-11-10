@@ -40,6 +40,7 @@ from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.meta import document_metadata
 from text_extraction.documents.pdf import broken_text, probe_pdf, scan_verdict, truncate_pdf
 from text_extraction.documents.sniff import DocumentUnreadable, check_container, media_type
+from text_extraction.documents.svg import svg_text
 from text_extraction.documents.types import DocumentKind
 
 _CONVERTERS: dict[str, tuple[type[DocumentConverter], str]] = {
@@ -61,11 +62,13 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     """The ``"markitdown"`` function of the child. ``payload``: ``body`` (bytes), ``kind``,
     ``format``, ``metadata`` (bool: put the document's metadata in the reply), ``base`` (its
     URL, None for an upload), ``content_language`` (the header), ``max_pages``,
-    ``max_uncompressed``, and optionally ``charset`` (of the ``Content-Type`` header; CSV only,
-    default None)."""
+    ``max_uncompressed``, ``max_chars`` (an SVG's text), and optionally ``charset`` (of the
+    ``Content-Type`` header; CSV only, default None)."""
     body: bytes = payload["body"]
     kind: DocumentKind = payload["kind"]
     fmt: OutputFormat = payload["format"]
+    if kind == "svg":  # parsed, not converted by MarkItDown, but in the same child (limits)
+        return _svg(payload)
     if kind not in _CONVERTERS:
         raise ValueError(f"no MarkItDown converter for kind {kind!r}")
     if fmt not in _FORMATS:
@@ -102,6 +105,27 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
         "pages": pages,
         "pages_converted": pages_converted,
         "needs_ocr": needs_ocr,
+        "metadata": metadata.model_dump(mode="json") if payload["metadata"] else None,
+    }
+
+
+def _svg(payload: dict[str, Any]) -> dict[str, Any]:
+    """The reply for an SVG: its title and text (``documents/svg.py``), at most ``max_chars``
+    characters, with the metadata's language guess. ``SvgUnreadable`` is a refused document."""
+    body: bytes = payload["body"]
+    fmt: OutputFormat = payload["format"]
+    title, text = svg_text(body, payload["max_chars"])
+    markdown = from_markdown(text, "markdown")
+    metadata = document_metadata(
+        body, "svg", payload["base"], payload["content_language"], markdown
+    )
+    return {
+        "content": markdown if fmt == "markdown" else from_markdown(markdown, fmt),
+        "title": title or first_heading(markdown),
+        "warnings": [],
+        "pages": None,
+        "pages_converted": None,
+        "needs_ocr": False,
         "metadata": metadata.model_dump(mode="json") if payload["metadata"] else None,
     }
 

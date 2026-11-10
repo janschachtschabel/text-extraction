@@ -122,6 +122,7 @@ _DOCUMENT_ERRORS: Final[dict[str, tuple[ErrorCode, str]]] = {
     ),
     "DocumentUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
     "PdfUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
+    "SvgUnreadable": (ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE),
     "PasswordProtected": (ErrorCode.CONVERSION_FAILED, "The PDF is password-protected."),
 }
 
@@ -541,6 +542,7 @@ class DocumentSteps:
             "charset": meta.charset,
             "max_pages": self._settings.document_max_pages,
             "max_uncompressed": self._settings.document_max_uncompressed_bytes,
+            "max_chars": self._settings.convert_max_bytes,  # an SVG's text
         }
         started = time.perf_counter()
         outcome: DocumentConversion | Envelope[ExtractResult]

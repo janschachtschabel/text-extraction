@@ -1689,7 +1689,17 @@ def test_handover_during_fast_phase_then_escalation_writes_into_p1_job() -> None
         assert seen.job.id == job_id
         assert seen.draft is not None
         assert seen.draft.status == "partial"
-        assert seen.job.lease_until is None  # cleared: the browser has its own time
+        # The handover queues the item and clears the lease right after; the worker's snapshot
+        # may predate that, so the stored record is what counts: poll until it is cleared.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = case.record(job_id)
+            assert current is not None
+            if current.lease_until is None:  # cleared: the browser has its own time
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("the P1 lease was not cleared after the handover")
 
         case.wait_for_idle()  # the extraction stored nothing: the worker writes item 0
         view = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["data"]
@@ -1757,6 +1767,72 @@ def test_bot_wall_escalates_only_for_admin_ignore_with_unblock(
             assert BROWSER_UNAVAILABLE_WARNING not in data["warnings"]
             assert worker.seen == []
             assert case.keys("job*") == []
+
+
+def test_an_admins_unblock_false_keeps_the_bot_wall_out_of_the_browser() -> None:
+    """Package 22: ``unblock: false`` switches unblock mode off for one request, so a bot wall
+    is answered as without it."""
+    case = BrowserCase(
+        {PAGE: fetched(body=CHALLENGE_PAGE, status=403)}, browser_unblock_enabled=True
+    )
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "compliance": "ignore", "unblock": False},
+            headers=ADMIN_AUTH,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == "bot_protection"
+        assert response.json()["data"]["mode_used"] == "fast"
+        assert worker.seen == []
+
+
+@pytest.mark.parametrize(
+    ("auth", "compliance", "unblock"),
+    [
+        (AUTH, None, False),
+        (AUTH, "report", False),
+        (AUTH, "report", True),
+        (ADMIN_AUTH, "report", False),
+    ],
+)
+def test_unblock_outside_unblock_mode_is_accepted_and_changes_nothing(
+    auth: dict[str, str], compliance: str | None, unblock: bool
+) -> None:
+    """Review Focus 5: a user's ``unblock`` (either value), or one with ``compliance: report``,
+    is accepted and answers as the same request without it."""
+    answers = {PAGE: fetched(body=CHALLENGE_PAGE, status=403)}
+    body: dict[str, Any] = {"url": PAGE}
+    if compliance is not None:
+        body["compliance"] = compliance
+    case = BrowserCase(answers, browser_unblock_enabled=True)
+    with TestClient(case.app) as client, case.worker() as worker:
+        plain = client.post("/v1/extract", json={**body, "cache": False}, headers=auth)
+        switched = client.post(
+            "/v1/extract", json={**body, "cache": False, "unblock": unblock}, headers=auth
+        )
+
+        assert plain.status_code == switched.status_code == 200
+        assert switched.json()["status"] == plain.json()["status"]
+        assert switched.json()["error"] == plain.json()["error"]
+        assert switched.json()["data"]["mode_used"] == "fast"
+        assert worker.seen == []
+
+
+@pytest.mark.parametrize(("sent", "stored"), [({}, True), ({"unblock": False}, False)])
+def test_unblock_reaches_the_browser_job_of_an_escalation(
+    sent: dict[str, Any], stored: bool
+) -> None:
+    """Package 22: the escalated job (fast, then browser) carries the request's ``unblock``."""
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_unblock_enabled=True)
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "compliance": "ignore", **sent}, headers=ADMIN_AUTH
+        )
+
+        assert response.json()["data"]["mode_used"] == "browser"
+        assert worker.seen[0].job.options.unblock is stored
 
 
 def test_secrets_never_in_job_view_or_logs() -> None:
@@ -1861,6 +1937,34 @@ def test_a_cancelled_request_still_abandons_its_job(wait_error: Exception | None
     asyncio.run(scenario())
 
     assert dispatcher.abandoned
+
+
+@pytest.mark.parametrize("transcribe", [False, True])
+def test_a_transcribe_request_waits_for_its_render_as_the_asr_pool_may_take_it(
+    transcribe: bool,
+) -> None:
+    """M22: the render of a ``transcribe`` request may move on to the ``asr`` pool, so its wait
+    lasts until the route answers 202 with the job, never abandoning it before."""
+    dispatcher = AbandoningDispatcher(None)
+    seen: list[dict[str, Any]] = []
+
+    async def wait(*args: Any, **kwargs: Any) -> Envelope[ExtractResult] | None:
+        seen.append(kwargs)
+        return None
+
+    dispatcher.wait = wait  # type: ignore[method-assign]
+    state = SimpleNamespace(browser_dispatcher=dispatcher, settings=browser_settings())
+    body = ExtractRequest(url=PAGE, mode="browser", transcribe=transcribe)
+
+    async def scenario() -> None:
+        await _in_browser(
+            state, body, USER, "enforce", BrowserHandover(), "extract", None, time.perf_counter()
+        )
+
+    asyncio.run(scenario())
+
+    (kwargs,) = seen
+    assert kwargs["asr"] is transcribe
 
 
 def test_a_cookie_chromium_would_refuse_is_422_without_its_value() -> None:

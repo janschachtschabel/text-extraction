@@ -1626,6 +1626,27 @@ async def test_bot_wall_moves_only_for_admin_ignore_jobs_with_unblock(
 
 
 @scenario
+async def test_an_admins_unblock_false_batch_keeps_the_bot_wall() -> None:
+    """Package 22: a batch item of ``unblock: false`` answers a bot wall as without unblock
+    mode; it does not move to the browser pool."""
+    wall = page("example.org", 2)
+    harness = Harness(
+        {wall: fetched(wall, CHALLENGE_PAGE, status=403)},
+        browser_enabled=True,
+        browser_unblock_enabled=True,
+    )
+    options = JobOptions(mode="auto", compliance="ignore", unblock=False)
+    job_id = await harness.store.create("batch", ADMIN, options, [wall])
+    await harness.queue.enqueue(job_id, ADMIN.name, [wall])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await harness.browser_queue.counts()).pending == 0
+    [item] = await harness.items(job_id)
+    assert error_of(item)[0] == ErrorCode.BOT_PROTECTION
+
+
+@scenario
 async def test_move_of_an_expired_job_drops_the_item() -> None:
     harness = Harness(browser_enabled=True)
     shell = page("example.org", 1)

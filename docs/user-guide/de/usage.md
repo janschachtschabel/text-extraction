@@ -240,7 +240,7 @@ unter [Website-Regeln](site-rules.md).
 
 ### Dokumente und Uploads
 
-PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs und CSVs werden wie
+PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs, CSVs und SVG-Grafiken (ihre Textelemente) werden wie
 Seiten umgewandelt: `POST /v1/extract` mit ihrer URL oder `POST /v1/batch`. Die Bytes entscheiden
 vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` oder, wie
 oft bei einem `download.php`, als `text/html` ausgeliefert wird, bleibt ein PDF; als `text/html`
@@ -262,6 +262,32 @@ Docling-Worker werden Scans und Bilder (PNG, JPEG, TIFF, WebP, BMP) mit OCR gele
 OpenDocument-Dateien (ODT, ODS, ODP) ebenfalls umgewandelt; ohne ihn liefert ein Scan nur seine
 Textebene, mit der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateien ergeben
 `unsupported_content_type`.
+
+Eine Seite mit wenig eigenem Text (weniger als `ATTACHMENTS_BELOW_WORDS`, 100 Wörter), etwa die
+Übersicht eines Arbeitsblatts, bietet ihr Material oft als Download an. Der Dienst liest dann bis
+zu `ATTACHMENTS_MAX` (2) der verlinkten Dokumente (PDF, Word, PowerPoint, Excel, EPUB, CSV, SVG) und
+hängt ihren Text jeweils unter einer Überschrift mit ihrem Namen an, mit der Warnung
+`attachment_read`. Ein Anhang, der sich nicht lesen lässt (durch robots.txt gesperrt, abgelehnt,
+zu groß, keine Zeit mehr), ergibt die Warnung `attachment_failed` und lässt die Seite, wie sie
+war. Die Anhänge werden mit denselben Prüfungen und Grenzen geholt wie die Seite. Mit
+`"compliance": "report"` steht, was die Prüfungen bei einem angehängten Anhang (oder beim einen
+Video einer Seite mit `"transcribe": true`) gefunden haben, im `compliance`-Block der Seite. Ein
+Bild, das nur auf seine eigene Dateiseite verlinkt (eine Abbildung in einem Wiki-Artikel), ist
+kein Anhang.
+
+Eine Lösung, die eine Seite hinter einer Schaltfläche versteckt (der „Lösungsvorschlag“ von
+serlo, ein `<details>`-Element oder ein Schalter, der sein Panel über `aria-controls` steuert),
+gehört zum Text: Der Inhalt steht schon im HTML der Seite und bleibt erhalten, statt als versteckt
+verworfen zu werden. Nur echte Schalter zählen; andere versteckte Elemente bleiben draußen.
+
+Eine Seite des edu-sharing-Repositories (`/edu-sharing/components/render/<Knoten-ID>`) ist eine
+Angular-Hülle ohne eigenen Text. Der Dienst liest den Knoten stattdessen über die öffentliche
+REST-Metadaten-API des Repositories und folgt der Datei des Knotens auf demselben Host wie einem
+Anhang (ein Dokument, eine SVG oder, mit `"transcribe": true`, eine Audio- oder Videodatei).
+Lizenz, Beschreibung, Schlagwörter und der kanonische Link des Knotens kommen in die Metadaten. In
+einer solchen Antwort ist `final_url` die URL der REST-Metadaten, während `url` und
+`metadata.canonical_url` die gesendete Seite nennen. Antwortet das Repository nicht, wird die Seite
+wie bisher gelesen.
 
 ### Audio und Video
 
@@ -301,6 +327,10 @@ curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/
 # 202 {"status": "success", "data": {"id": "<job id>", "kind": "file", ...,
 #  "status_url": "/v1/jobs/<job id>"}, ...}
 ```
+
+Eine Seite mit wenig eigenem Text (weniger als `TRANSCRIBE_EMBED_BELOW_WORDS`, 300 Wörter), deren einziges
+Medium ein Video- oder Audio-Player ist, bekommt mit `"transcribe": true` die Untertitel oder die
+Transkription dieses Mediums hinter ihren eigenen Text, als hätten Sie die URL des Mediums gesendet.
 
 Eine Transkription läuft auf 4 CPU-Threads etwa in Echtzeit (Medien bis 2 Stunden). Mit
 `ASR_BACKEND=openai` sendet der Worker das Audio stattdessen an einen OpenAI-kompatiblen Endpunkt

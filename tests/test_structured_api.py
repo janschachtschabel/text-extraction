@@ -299,6 +299,7 @@ def test_chunk_text_with_url_only_options_422() -> None:
         "transcribe": True,
         "languages": ["en"],
         "ocr": "never",
+        "unblock": False,
     }
     with TestClient(service.app) as client:
         responses = [

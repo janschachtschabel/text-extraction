@@ -177,6 +177,10 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.SITE_SITEMAP_MAX_BYTES` | `"52428800"` | Largest sitemap file, as fetched and after a gzip inflate (the protocol's 50 MiB). |
 | `config.SITE_MAX_LINKS_PER_PAGE` | `"1000"` | Most links kept of one crawled page. |
 | `config.MEDIA_TRANSCRIPT_PANEL_ENABLED` | `"true"` | Use YouTube's new transcript view in the browser when the subtitles could not be read (`auto` requests, needs browser workers). |
+| `config.TRANSCRIBE_EMBED_BELOW_WORDS` | `"300"` | With `transcribe: true`, a page with fewer words of its own than this whose only media is one video or audio gets that media's transcript after its text (0: never). |
+| `config.ATTACHMENTS_MAX` | `"2"` | Linked documents (PDF, Office, EPUB, CSV, SVG) whose text is appended to a page with fewer than `ATTACHMENTS_BELOW_WORDS` words, at most; each is fetched as the page is (0: off; 0-5). |
+| `config.ATTACHMENTS_BELOW_WORDS` | `"100"` | Words below which a page's attachments are followed (0: never). |
+| `config.BROWSER_UNBLOCK_CONCURRENCY` | `"2"` | Unblock pages (each a headful Chrome) one browser worker renders at once, within and capped at `workers.browser.concurrency`; only used with `workers.browser.unblock`. A further unblock item waits for a turn: a sync request's up to `BROWSER_QUEUE_WAIT_SECONDS`, a batch item's up to 60 s. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
@@ -225,7 +229,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
 | `workers.browser.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
-| `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
+| `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds, with unblock mode the render deadline plus the unblock turn wait (`BROWSER_QUEUE_WAIT_SECONDS`) (40, 80 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
 | `workers.browser.resources` | requests 750m / 1152Mi, limits 2250m / 4608Mi | Measured with 4 pages (docs/configuration.md, "Resource baselines"); the memory limit holds the browser, the selector child and the conversions. |
 | `workers.browser.documentParentReserveMiB` | `3072` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages and the selector child, so each document conversion child gets `(4608 - 3072) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |

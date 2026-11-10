@@ -160,6 +160,7 @@ def test_document_kinds() -> None:
         "tiff",
         "webp",
         "bmp",
+        "svg",
     )
 
 

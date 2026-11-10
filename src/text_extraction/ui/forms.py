@@ -10,7 +10,9 @@ validates the merged body as for any client.
 "Site rules" (``access``, rulings P12-S3, package 16) is a form field that is no body field: the
 radio of a step (``enforce``, ``report`` or ``ignore``) sends that ``compliance`` as set by the
 user; the deployment's default step (radio value ``default``) sends nothing. The steps a caller
-sees come from `access_offer`; REST refuses what a key may not choose (``ignore`` for a user)."""
+sees come from `access_offer`; REST refuses what a key may not choose (``ignore`` for a user).
+Under ``ignore`` an admin with the unblock browser also has the box "Unblock browser" (package
+22): ticked by default; unticked it sends ``unblock: false``."""
 
 import json
 import math
@@ -38,6 +40,10 @@ CHECKED: Final = "on"
 # The "Site rules" choice: its form field and the radio value of the deployment's default step.
 ACCESS_FIELD: Final = "access"
 ACCESS_DEFAULT: Final = "default"
+# The "Unblock browser" box under the step ``ignore`` (package 22) and the hidden field that comes
+# with it: the mode of the deployment's default step, so a form without the box sends nothing.
+UNBLOCK_FIELD: Final = "unblock"
+UNBLOCK_OFFERED_FIELD: Final = "unblock_offered"
 _ACCESS_ORDER: Final[tuple[ComplianceMode, ...]] = ("enforce", "report", "ignore")
 # The choices of the optional features (package 19, P19-R3), each with the value that sends
 # nothing (the API's default): OCR, personal data, the structured strategy, the chunking method.
@@ -321,10 +327,22 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
 def _access(fields: Fields, form: Mapping[str, str]) -> None:
     """The "Site rules" choice: ``enforce``, ``report`` or ``ignore`` sends that ``compliance``
     as set by the user (so Options cannot give ``compliance`` too); ``default``, empty or any
-    other value sends nothing."""
+    other value sends nothing.
+
+    The "Unblock browser" box (package 22) is on the form only where the caller may use the
+    unblock browser (``AccessOffer.unblock``), with ``unblock_offered`` naming the mode of the
+    default step. Unticked under ``ignore`` (chosen, or the default step where that is
+    ``ignore``) it sends ``unblock: false``; ticked, under another step or without the box it
+    sends nothing (the API's default, ``true``)."""
     value = _text(form, ACCESS_FIELD)
     if value in _ACCESS_ORDER:
         fields["compliance"] = _Field(value, set_by_user=True)
+    offered = _text(form, UNBLOCK_OFFERED_FIELD)
+    if not offered:
+        return
+    mode = value if value in _ACCESS_ORDER else offered
+    if mode == "ignore" and _text(form, UNBLOCK_FIELD) != CHECKED:
+        fields[UNBLOCK_FIELD] = _Field(False, set_by_user=True)
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,46 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- More text from thin pages (package 22). A solution behind a button (serlo "Lösungsvorschlag",
+  `<details>`, a toggle with `aria-controls`) stays in the text. A page under
+  `ATTACHMENTS_BELOW_WORDS` (100) words follows up to `ATTACHMENTS_MAX` (2) attachments, taken
+  from its content links and from Drupal JSON:API `file--file` entities in Next.js payloads and
+  JSON scripts, through the normal fetch, compliance and document steps, and appends their text
+  (warnings `attachment_read`, `attachment_failed`). An edu-sharing render page
+  (`/edu-sharing/components/render/<uuid>`) is read through the repository's public REST
+  metadata API and the node's same-host file is followed; licence, description, keywords and the
+  canonical link go into the metadata. SVG is a document kind (its `<text>`, `<flowRoot>` and
+  `<desc>` text, parsed with defusedxml in the document child). With `transcribe: true`, a page
+  under `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words with exactly one embedded video or audio file
+  hands it to transcription, and so does an edu-sharing node's audio or video file; the
+  transcript follows the page text.
+- The request field `unblock` (default true): an admin with `compliance: ignore` on a service
+  with `BROWSER_UNBLOCK_ENABLED` can switch the unblock browser off for one request. The
+  playground has the checkbox "Unblock browser" (German: "Unblock-Browser").
+- `BROWSER_UNBLOCK_CONCURRENCY` (default 2): how many unblock pages one browser worker renders at
+  once; a further one waits for a turn before its render deadline starts.
+
+### Changed
+
+- In an edu-sharing node's answer `final_url` is the REST metadata URL; `url` and
+  `metadata.canonical_url` name the page.
+- With unblock mode, a batch item waits up to 60 s (what its lease leaves beside the render
+  deadline) for an unblock turn instead of `BROWSER_QUEUE_WAIT_SECONDS`, and the browser worker's
+  graceful shutdown adds the turn wait of a sync request's item: 80 s instead of 70 s by default,
+  within the chart's 150 s and compose's 90 s.
+- The live workflow's manual run with `site_rules: off` passes `BROWSER_UNBLOCK_CONCURRENCY: "2"`
+  and waits 180 s per request instead of 150 s.
+
+### Upgrade
+
+- New settings and their defaults: `ATTACHMENTS_BELOW_WORDS=100`, `ATTACHMENTS_MAX=2`,
+  `TRANSCRIBE_EMBED_BELOW_WORDS=300`, `BROWSER_UNBLOCK_CONCURRENCY=2`. Set
+  `ATTACHMENTS_MAX=0` to switch attachment reading off.
+- On a rolling deploy, roll the workers before the API: an older worker rejects job options that
+  carry the new `unblock` field. This matters only for admin jobs that send `unblock: false`.
+
 ## [0.1.11] - 2026-11-09
 
 ### Changed

@@ -158,8 +158,12 @@ def unblock_applies(mode: ComplianceMode, settings: Settings) -> bool:
     return mode == "ignore" and settings.browser_unblock_enabled
 
 
-def unblock_for(principal: Principal, mode: ComplianceMode, settings: Settings) -> bool:
+def unblock_for(
+    principal: Principal, mode: ComplianceMode, settings: Settings, *, requested: bool = True
+) -> bool:
     """Whether unblock mode applies to a request of ``principal`` under the resolved ``mode``:
     ``unblock_applies``, and for admins only, even where the operator's default is ``ignore``
-    (R9). A job's items run with its owner as the principal."""
-    return principal.role == "admin" and unblock_applies(mode, settings)
+    (R9). A job's items run with its owner as the principal. ``requested`` is the request's
+    ``unblock``: false switches unblock mode off for it (package 22); true never unlocks it
+    where it does not apply."""
+    return requested and principal.role == "admin" and unblock_applies(mode, settings)

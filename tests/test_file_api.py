@@ -119,6 +119,34 @@ def metric(registry: CollectorRegistry, name: str, **labels: str) -> float:
 # --- the route ---
 
 
+def test_upload_svg_gives_its_text(client: TestClient) -> None:
+    svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg"><title>Schema</title><text>'
+        + (b"Das Wasser verdunstet und steigt auf. " * 20)
+        + b"</text></svg>"
+    )
+
+    response = upload(client, svg, "schema.svg", "image/svg+xml")
+
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    assert body["data"]["content_type"] == "image/svg+xml"
+    assert body["data"]["document"]["kind"] == "svg"
+    assert "Das Wasser verdunstet" in body["data"]["content"]
+
+
+def test_upload_malicious_svg_is_conversion_failed(client: TestClient) -> None:
+    svg = (
+        b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&x;</text></svg>'
+    )
+
+    body = upload(client, svg, "bad.svg", "image/svg+xml").json()
+
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "conversion_failed"
+
+
 def test_upload_pdf(client: TestClient, registry: CollectorRegistry) -> None:
     before = metric(registry, "text_extraction_extract_total", mode="upload", outcome="success")
 

@@ -19,6 +19,7 @@ MAX_ACTIONS = 20
 MAX_COOKIES = 50
 MAX_HEADERS = 20
 MAX_HEADER_VALUE_LENGTH = 4096
+MAX_WAIT_SECONDS = 60  # the longest ``wait_seconds`` of a sync request
 
 Selector = Annotated[str, Field(min_length=1, max_length=500)]
 
@@ -241,7 +242,7 @@ def check_cookie_domains(url: str, cookies: list[BrowserCookie]) -> None:
 # ``repr=False`` and its own description.
 ActionList = Annotated[list[Action], Field(max_length=MAX_ACTIONS)]
 CookieList = Annotated[list[BrowserCookie], Field(max_length=MAX_COOKIES)]
-WaitSeconds = Annotated[float | None, Field(ge=0, le=60)]
+WaitSeconds = Annotated[float | None, Field(ge=0, le=MAX_WAIT_SECONDS)]
 
 ACTIONS_DESCRIPTION = (
     "Page actions to run in the browser after the page has loaded, in order, at most 20. The "

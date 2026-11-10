@@ -114,6 +114,11 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True, st
         "`ignore` also allows unblock mode where the operator enabled it: a browser that gets "
         "past bot protection, for sites that allowed extraction by contract.",
     )
+    unblock: bool = Field(
+        default=True,
+        description="With `compliance: ignore` (admins) and `BROWSER_UNBLOCK_ENABLED`: `false` "
+        "captures with the standard browser instead of the unblock browser. Ignored otherwise.",
+    )
     wait_seconds: WaitSeconds = Field(
         default=None,
         description="As for `/v1/extract`: after this many seconds a running capture becomes a "

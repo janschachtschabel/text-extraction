@@ -278,3 +278,12 @@ def test_the_gate_keeps_its_cancel_behaviour() -> None:
     assert other == "live-refs/pull/25/merge-other-label-7"
     assert _group("schedule") == _dispatch("wlo_200") == "live-refs/heads/main"
     assert _dispatch("wlo_200", service_ref="v0.1.0") == "live-refs/heads/main-service-v0.1.0"
+
+
+def test_site_rules_off_gives_unblock_renders_room() -> None:
+    # Unblock pages wait up to 30 s for a turn (BROWSER_UNBLOCK_CONCURRENCY) before the render's
+    # own 60 s, so the client waits 180 s instead of 150 s (package 22).
+    timeout = _job()["env"]["CLIENT_TIMEOUT"]
+    assert timeout == "${{ inputs.site_rules == 'off' && '180' || '120' }}"
+    start = next(s for s in _steps() if s.get("name") == "Start the service and the browser worker")
+    assert start["env"]["BROWSER_UNBLOCK_CONCURRENCY"] == "2"

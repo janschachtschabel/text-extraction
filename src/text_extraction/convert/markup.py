@@ -14,9 +14,10 @@ from typing import Final
 
 from bs4 import BeautifulSoup, Tag
 
+from text_extraction.convert.dom import HIDDEN_STYLE as HIDDEN_STYLE
+from text_extraction.convert.dom import attr as attr
 from text_extraction.convert.mathml import to_latex
-
-HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
+from text_extraction.convert.panels import reveal_solution_panels
 
 # Marks an element that holds an equation's ``$$source$$``.
 _MATH_MARK = "data-extracted-math"
@@ -44,14 +45,6 @@ BLOCK_TAGS: Final = frozenset(
         *("tbody", "td", "tfoot", "th", "thead", "title", "tr", "ul", "xmp"),
     }
 )
-
-
-def attr(tag: Tag, name: str) -> str:
-    """An attribute as one string; empty when absent (a multi-valued one is joined by spaces)."""
-    value = tag.get(name)
-    if value is None:
-        return ""
-    return value if isinstance(value, str) else " ".join(value)
 
 
 def has_hidden_class(tag: Tag) -> bool:
@@ -136,6 +129,7 @@ def parse_html(html: str) -> BeautifulSoup:
 def prepare_html(html: str) -> BeautifulSoup:
     """Parse the page and put every equation's source in the text as ``$$source$$``."""
     soup = parse_html(html)
+    reveal_solution_panels(soup)
     for equation in soup.select('script[type^="math/tex"], math, mjx-container'):
         if not equation.parent:
             continue
