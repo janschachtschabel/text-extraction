@@ -310,7 +310,7 @@ curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/
 #  "status_url": "/v1/jobs/<job id>"}, ...}
 ```
 
-Eine Seite mit wenig eigenem Text (weniger als `ATTACHMENTS_BELOW_WORDS` Wörter), deren einziges
+Eine Seite mit wenig eigenem Text (weniger als `TRANSCRIBE_EMBED_BELOW_WORDS`, 300 Wörter), deren einziges
 Medium ein Video- oder Audio-Player ist, bekommt mit `"transcribe": true` die Untertitel oder die
 Transkription dieses Mediums hinter ihren eigenen Text, als hätten Sie die URL des Mediums gesendet.
 

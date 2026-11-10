@@ -1354,8 +1354,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
   whose one media is the material (M22).
 - **M22, the one media of a thin page** (package 22: `Pipeline._with_page_media`, step 8b;
   `pipeline_media.single_embed`, `page_transcribed`). With `transcribe: true`, a fetched or
-  rendered page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words whose players and declared
-  media are exactly one embed (no track of it read; not a bot challenge, soft 404 or login wall;
+  rendered page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words whose players and
+  declared media are exactly one embed (no track of it read; not a bot challenge, soft 404 or login wall;
   not a site crawl's page, a file a render ended on or a request with caller secrets) gets that
   media's transcript after its text, as if the caller had sent the media's URL. The step runs
   after the tracks (M8), on the page's final answer: in `auto` mode on the better of the fast
@@ -1379,7 +1379,10 @@ OpenAI-compatible endpoint): always a job, answered 202.
   a `transcribe` request. Without the service's ASR, for a user key while `ASR_ALLOW_USERS` is
   false, when the media is blocked, fails or is no audio or video, or when it needs speech
   recognition and the run has no hand-off, the page answers as without `transcribe`. A page with
-  more than one embed, or with `ATTACHMENTS_BELOW_WORDS` words or more, keeps D4. The browser
+  more than one embed, or with `TRANSCRIBE_EMBED_BELOW_WORDS` words or more, keeps D4. The
+  threshold is its own (ruling R6), not `ATTACHMENTS_BELOW_WORDS`: the material of a video page
+  is the video and the caller asked for `transcribe`, so a page of a few short paragraphs around
+  it qualifies, while 300 keeps longer articles that merely contain a video out. The browser
   worker moves such a render to the `asr` pool (`AsrMove`, its draft kept), and a sync request
   with `transcribe` waits up to 60 s more for the render's job, so the route answers 202 with it
   instead of abandoning it. An edu-sharing node's audio or video file on the render URL's host

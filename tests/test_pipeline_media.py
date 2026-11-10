@@ -1716,9 +1716,9 @@ def transcription(sentences: Sequence[str] = SPOKEN, **fields: Any) -> Transcrip
 
 
 def test_a_thin_page_hands_its_one_video_to_the_transcription() -> None:
-    """With ``transcribe: true``, a page below ``ATTACHMENTS_BELOW_WORDS`` whose only media is one
-    video file hands that file on as a media file would be (its head fetched in its host's turn
-    after its compliance checks); the stand-in is the page's own answer."""
+    """With ``transcribe: true``, a page below ``TRANSCRIBE_EMBED_BELOW_WORDS`` whose only media
+    is one video file hands that file on as a media file would be (its head fetched in its
+    host's turn after its compliance checks); the stand-in is the page's own answer."""
     handed, handoff = capture_handoff()
     harness = asr_harness(thin_answers())
     plain = Harness(thin_answers(), media=probe()).run(url=PAGE)
@@ -1935,6 +1935,28 @@ def test_otherwise_the_page_keeps_todays_answer(case: str) -> None:
     assert comparable(envelope) == comparable(plain)
     if case in ("two_embeds", "long_page", "no_handoff", "users_refused", "private"):
         assert VIDEO not in harness.fetched_urls()
+
+
+def test_a_page_of_about_150_words_hands_on_its_one_video_at_the_defaults() -> None:
+    """The embed has its own threshold: a page of about 150 words, above
+    ``ATTACHMENTS_BELOW_WORDS`` but below ``TRANSCRIBE_EMBED_BELOW_WORDS``, hands its one video
+    on at the default settings."""
+    handed, handoff = capture_handoff()
+    answers = thin_answers()
+    answers[PAGE] = fetched(
+        PAGE, thin_page(ONE_VIDEO, sentences=[f"Part {n}. {PARAGRAPH}" for n in range(4)])
+    )
+    harness = asr_harness(answers)
+    plain = Harness(answers, media=probe()).run(url=PAGE)
+    words = data_of(plain).word_count
+    assert harness.settings.attachments_below_words <= words
+    assert 120 <= words < harness.settings.transcribe_embed_below_words == 300
+
+    harness.run(handoff, url=PAGE, transcribe=True)
+
+    (needed,) = handed
+    assert needed.input.url == VIDEO
+    assert needed.input.page is True
 
 
 def test_a_youtube_iframe_takes_the_platform_path() -> None:

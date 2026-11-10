@@ -64,7 +64,7 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    the transcripts of its players' ``<track>`` elements appended and its embeds listed
    (``MediaSteps.tracks``), before its verdict.
 8b. With ``transcribe: true``, such a page (in ``auto`` mode the better of the fast result and
-   the render) with fewer than ``ATTACHMENTS_BELOW_WORDS`` words whose players and declared
+   the render) with fewer than ``TRANSCRIBE_EMBED_BELOW_WORDS`` words whose players and declared
    media are one embed (``single_embed``) runs that media through the media steps of its URL in
    a sub-run (``_page_media``, M22): a file's head as a media URL's (step 4, 5, sniffed as
    audio or video), a platform player as step 2b. Subtitles follow the page's text; media that
@@ -1736,15 +1736,16 @@ class Pipeline:
         )
 
     def _below_words(self) -> int:
-        return self._settings.attachments_below_words
+        return self._settings.transcribe_embed_below_words
 
     async def _with_page_media(
         self, run: _Run, envelope: Envelope[ExtractResult]
     ) -> Envelope[ExtractResult]:
-        """Step 8b (M22): the answer of a page with fewer than ``ATTACHMENTS_BELOW_WORDS`` words
-        whose players and declared media are one embed (``single_embed``), for a ``transcribe``
-        request: with that video's subtitles after its text, or the stand-in of its hand-off to
-        the transcription (``_page_media``). Any other answer is returned as it is."""
+        """Step 8b (M22): the answer of a page with fewer than
+        ``TRANSCRIBE_EMBED_BELOW_WORDS`` words whose players and declared media are one embed
+        (``single_embed``), for a ``transcribe`` request: with that video's subtitles after its
+        text, or the stand-in of its hand-off to the transcription (``_page_media``). Any other
+        answer is returned as it is."""
         data = envelope.data
         if data is None or not self._transcribes(run):
             return envelope

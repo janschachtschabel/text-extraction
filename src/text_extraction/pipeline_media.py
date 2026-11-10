@@ -438,9 +438,9 @@ def without_asr(
 def single_embed(result: ExtractResult, below_words: int | None) -> MediaEmbed | None:
     """The one media of ``result``'s page that a ``transcribe`` request transcribes (M22): the
     page's players and declared media are exactly one embed, no track of it was read, and the
-    page has fewer than ``below_words`` words (``ATTACHMENTS_BELOW_WORDS``; None: any number, for
-    an edu-sharing node's file). None for any other result, a bot challenge, a soft 404 or a
-    login wall among them."""
+    page has fewer than ``below_words`` words (``TRANSCRIBE_EMBED_BELOW_WORDS``; None: any
+    number, for an edu-sharing node's file). None for any other result, a bot challenge, a
+    soft 404 or a login wall among them."""
     media, quality = result.media, result.quality
     if media is None or media.platform != "html5" or media.transcript_source is not None:
         return None

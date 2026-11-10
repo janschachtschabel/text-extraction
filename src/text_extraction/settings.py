@@ -286,6 +286,9 @@ class Settings(BaseSettings):
     # YouTube's new transcript view, read in the browser when the subtitles could not be read
     # (auto requests; nothing happens without BROWSER_ENABLED).
     media_transcript_panel_enabled: bool = True
+    # With transcribe: true, a page with fewer words than this whose players and declared media
+    # are one video or audio gets that media's transcript after its text (ruling M22).
+    transcribe_embed_below_words: int = Field(default=300, ge=0)
     # ASR worker (speech recognition). Off by default: the API image has no models.
     asr_enabled: bool = False
     asr_allow_users: bool = True  # may non-admin keys have media transcribed?

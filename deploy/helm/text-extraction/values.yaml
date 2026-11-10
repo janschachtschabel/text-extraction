@@ -64,6 +64,9 @@ config:
   # A YouTube video whose subtitles could not be read gets a second try in the browser where
   # YouTube offers its new transcript view (auto requests; nothing happens without browser workers).
   MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"
+  # With transcribe: true, a page with fewer words than this whose only media is one video or
+  # audio gets that media's transcript after its text (0: never).
+  TRANSCRIBE_EMBED_BELOW_WORDS: "300"
   # A page with fewer than ATTACHMENTS_BELOW_WORDS words gets the text of at most
   # ATTACHMENTS_MAX of its linked documents appended, each fetched as the page is (0: off; 0-5).
   ATTACHMENTS_MAX: "2"
