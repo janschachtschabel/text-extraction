@@ -642,3 +642,21 @@ def test_wrap_inline_runs_takes_linear_time_in_a_wide_container() -> None:
     assert [child.name for child in div.find_all(recursive=False)] == ["p", "hr"] * 1_000
     # The quadratic version (bs4 finding each moved node's position) grew about 15-fold.
     assert growth(_wrapping(_runs), 1_000) < GROWTH_LIMIT
+
+
+# Final review of package 22, finding 2: a MediaWiki figure links its image to the file's
+# description page (``/wiki/Datei:Foo.svg``); it is no document of the article.
+WIKI_URL = "https://de.wikipedia.org/wiki/Wasserkreislauf"
+WIKI_ARTICLE = f"""<html lang="de"><head><title>Wasserkreislauf</title></head><body>
+<main><h1>Wasserkreislauf</h1><p>{LONG}</p>
+<figure typeof="mw:File/Thumb"><a href="/wiki/Datei:Foo.svg" class="mw-file-description"><img
+src="//upload.wikimedia.org/wikipedia/commons/thumb/a/a1/Foo.svg/220px-Foo.svg.png" alt=""
+width="220" height="165"></a><figcaption>Der Kreislauf des Wassers</figcaption></figure>
+<p>{LONG}</p></main></body></html>"""
+
+
+def test_a_wiki_figure_link_to_an_svg_is_no_linked_document() -> None:
+    content = convert_html(WIKI_ARTICLE, WIKI_URL, "markdown").content
+
+    assert "Datei:Foo.svg" not in content
+    assert "\n---\n" not in content

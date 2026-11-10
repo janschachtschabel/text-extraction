@@ -269,7 +269,11 @@ zu `ATTACHMENTS_MAX` (2) der verlinkten Dokumente (PDF, Word, PowerPoint, Excel,
 hängt ihren Text jeweils unter einer Überschrift mit ihrem Namen an, mit der Warnung
 `attachment_read`. Ein Anhang, der sich nicht lesen lässt (durch robots.txt gesperrt, abgelehnt,
 zu groß, keine Zeit mehr), ergibt die Warnung `attachment_failed` und lässt die Seite, wie sie
-war. Die Anhänge werden mit denselben Prüfungen und Grenzen geholt wie die Seite.
+war. Die Anhänge werden mit denselben Prüfungen und Grenzen geholt wie die Seite. Mit
+`"compliance": "report"` steht, was die Prüfungen bei einem angehängten Anhang (oder beim einen
+Video einer Seite mit `"transcribe": true`) gefunden haben, im `compliance`-Block der Seite. Ein
+Bild, das nur auf seine eigene Dateiseite verlinkt (eine Abbildung in einem Wiki-Artikel), ist
+kein Anhang.
 
 Eine Lösung, die eine Seite hinter einer Schaltfläche versteckt (der „Lösungsvorschlag“ von
 serlo, ein `<details>`-Element oder ein Schalter, der sein Panel über `aria-controls` steuert),

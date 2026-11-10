@@ -810,3 +810,53 @@ def test_node_page_keeps_its_shape_in_the_converter(drop: str) -> None:
 
     assert content.startswith(f"# {SVG_NAME}\n\n")
     assert f"[{SVG_NAME}]({DOWNLOAD})" in content
+
+
+def test_report_mode_reports_the_findings_of_the_nodes_file() -> None:
+    """Final review, finding 1: the file is fetched under ``compliance: report`` although
+    robots.txt disallows its path; the node's answer reports it."""
+    robots = fetched(f"{RLP}/robots.txt", "User-agent: *\nDisallow: /edu-sharing/eduservlet/")
+    harness = browser_harness({**svg_node(), f"{RLP}/robots.txt": robots})
+
+    data = data_of(run(harness, compliance="report"))
+
+    assert DOWNLOAD in fetched_urls(harness)
+    assert data.warnings.count("attachment_read") == 1
+    assert data.compliance.robots == "disallowed"
+    assert data.compliance.decision == "reported"
+    assert data.compliance.reasons
+
+
+@pytest.mark.parametrize(
+    ("languages", "lang"),
+    [
+        (["de"], "de"),
+        (["de_DE"], "de-DE"),
+        (["en-GB", "de"], "en-GB"),
+        (['de" onload="x'], None),
+        (["deutsch"], None),
+        ([7], None),
+        ("de", None),
+    ],
+)
+def test_node_page_declares_the_nodes_language(languages: object, lang: str | None) -> None:
+    """Final review of package 22 (T4): ``cclom:general_language`` becomes ``<html lang>`` when
+    it is a short language tag; anything else is left out."""
+    node = metadata()
+    node["node"]["properties"]["cclom:general_language"] = languages
+
+    page, _ = node_page(node, base=RENDER)
+
+    if lang is None:
+        assert "<html>" in page
+        assert "onload" not in page
+    else:
+        assert f'<html lang="{lang}">' in page
+
+
+def test_node_answer_has_the_nodes_language() -> None:
+    node = metadata()
+    node["node"]["properties"]["cclom:general_language"] = ["de"]
+    harness = browser_harness({METADATA: json_answer(node), DOWNLOAD: fetched(DOWNLOAD, SVG)})
+
+    assert data_of(run(harness)).language == "de"

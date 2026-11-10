@@ -19,8 +19,9 @@ decides) and is not a site crawl's page asks the repository for the node's metad
 3. ``edusharing.node_page`` writes the node's page (title, description, keywords, licence, web
    link, file), which is converted and judged as an HTML page (step 7, 8). The result is the
    metadata answer's: its final URL, status and content type (``application/json``), with the
-   compliance findings of both URLs. Since it is no HTML answer, ``escalation.needs_browser``
-   never sends it to the browser (B5), not even in unblock mode. A JSON answer of the API is no
+   compliance findings of both URLs (and of the node's file once its text is appended). Since
+   it is no HTML answer, ``escalation.needs_browser`` never sends it to the browser (B5), not
+   even in unblock mode. A JSON answer of the API is no
    bot challenge, soft 404 or login wall, whatever the node's words: those findings of the page
    are cleared before it is judged.
 4. The node's file is followed as an attachment (``AttachmentSteps.follow_attachments``,

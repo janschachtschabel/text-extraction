@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from text_extraction.convert.dom import attr
 from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
@@ -21,6 +21,8 @@ from text_extraction.convert.markup import is_outside_content
 
 MAX_ATTACHMENT_CANDIDATES = 20
 _SVG_TYPE = "image/svg+xml"
+# An SVG is no download a page's links list (``links[].kind``), but a thin page's SVG has text.
+_CANDIDATE_SUFFIXES = (".svg",)
 _MAX_SCRIPT_CHARS = 2_000_000  # a larger script is skipped unread
 _MAX_ENTITY_MARKERS = 100  # "file--file" occurrences examined per script
 _MAX_OPENERS = 8  # enclosing "{" tried per marker
@@ -38,13 +40,18 @@ class Attachment:
     size: int | None = None
 
 
-def link_attachments(soup: BeautifulSoup, base: str | None = None) -> list[tuple[str, str]]:
+def link_attachments(
+    soup: BeautifulSoup, base: str | None = None, *, candidates: bool = False
+) -> list[tuple[str, str]]:
     """Label and URL of each file the page's content links to, in page order: an http(s) link
     whose path ends in one of DOWNLOAD_EXTS.
 
     Without ``base`` the document is expected to be prepared, its references already absolute;
     with it, each href is resolved against it. A link without text is labelled with its
-    aria-label, its title or its file name."""
+    aria-label, its title or its file name. With ``candidates`` (the attachments of a thin page)
+    a link to an SVG counts too, and a link whose only content is an image does not: that is a
+    figure linking to its file's page (a MediaWiki ``/wiki/Datei:Foo.svg``)."""
+    suffixes = _CANDIDATE_SUFFIXES if candidates else ()
     found: dict[str, str] = {}
     for anchor in soup.find_all("a", href=True):
         url = attr(anchor, "href").strip()
@@ -53,7 +60,9 @@ def link_attachments(soup: BeautifulSoup, base: str | None = None) -> list[tuple
         parts = urlsplit(url)
         if url in found or parts.scheme not in {"http", "https"}:
             continue
-        if not has_file_extension(parts.path):
+        if not (has_file_extension(parts.path) or parts.path.lower().endswith(suffixes)):
+            continue
+        if candidates and _is_figure_link(anchor):
             continue
         if is_outside_content(anchor) or anchor.find_parent(is_outside_content):
             continue
@@ -62,6 +71,11 @@ def link_attachments(soup: BeautifulSoup, base: str | None = None) -> list[tuple
         )
         found[url] = " ".join(label.split()) or unquote(parts.path.rsplit("/", 1)[-1])
     return [(label, url) for url, label in found.items()]
+
+
+def _is_figure_link(anchor: Tag) -> bool:
+    """Whether the link's only content is an image: no text, at least one ``<img>``."""
+    return not anchor.get_text(strip=True) and anchor.find("img") is not None
 
 
 def _safe_url(base: str, href: object) -> str | None:
@@ -160,7 +174,7 @@ def attachment_candidates(html: str, url: str) -> list[Attachment]:
     soup = BeautifulSoup(html, "lxml")
     base = base_url_of(soup, url)
     candidates: dict[str, Attachment] = {}
-    for label, link in link_attachments(soup, base):
+    for label, link in link_attachments(soup, base, candidates=True):
         safe = _safe_url(base, link)
         if safe:
             candidates.setdefault(safe, Attachment(safe, label))

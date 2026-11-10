@@ -1167,6 +1167,26 @@ def test_redirect_findings_keep_the_worst_answer_of_the_chain() -> None:
     assert compliance.with_redirect_findings(hop, first).tdm_reserved is True
 
 
+def test_extra_findings_keep_the_pages_crawl_delay() -> None:
+    page = compliance.ComplianceReport(
+        mode="report", decision="allowed", robots="allowed", crawl_delay=1.0
+    )
+    attachment = compliance.ComplianceReport(
+        mode="report",
+        decision="reported",
+        robots="disallowed",
+        crawl_delay=9.0,
+        reasons=["robots.txt disallows this URL for text-extraction."],
+    )
+
+    merged = compliance.with_extra_findings(page, attachment)
+
+    assert merged.robots == "disallowed"
+    assert merged.decision == "reported"
+    assert merged.reasons == attachment.reasons
+    assert merged.crawl_delay == 1.0  # the page's host is still fetched by the page's turns
+
+
 def test_origin_files_are_fetched_one_after_another() -> None:
     checker, fetcher, _ = make_checker({})
     answer_fetch = fetcher.fetch

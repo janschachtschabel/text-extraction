@@ -32,9 +32,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Changed
 
-- `.svg` links count as `file` in `links[].kind` and are no longer crawled as pages.
 - In an edu-sharing node's answer `final_url` is the REST metadata URL; `url` and
   `metadata.canonical_url` name the page.
+- With unblock mode, a batch item waits up to 60 s (what its lease leaves beside the render
+  deadline) for an unblock turn instead of `BROWSER_QUEUE_WAIT_SECONDS`, and the browser worker's
+  graceful shutdown adds the turn wait of a sync request's item: 80 s instead of 70 s by default,
+  within the chart's 150 s and compose's 90 s.
 - The live workflow's manual run with `site_rules: off` passes `BROWSER_UNBLOCK_CONCURRENCY: "2"`
   and waits 180 s per request instead of 150 s.
 
@@ -45,8 +48,6 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `ATTACHMENTS_MAX=0` to switch attachment reading off.
 - On a rolling deploy, roll the workers before the API: an older worker rejects job options that
   carry the new `unblock` field. This matters only for admin jobs that send `unblock: false`.
-- `.svg` links are now `file` links in `links[].kind` and are no longer crawled as pages; a
-  client that filtered on the old kind sees them under `file`.
 
 ## [0.1.11] - 2026-11-09
 

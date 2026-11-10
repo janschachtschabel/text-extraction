@@ -257,7 +257,10 @@ worksheet overview, often offers its material as a download. The service then re
 appends their text under a heading with each one's name, with the warning `attachment_read`. An
 attachment that cannot be read (blocked by robots.txt, refused, too large, out of time) adds the
 warning `attachment_failed` and leaves the page as it was. The attachments are fetched with the
-same checks and limits as the page.
+same checks and limits as the page. With `"compliance": "report"`, what the checks found for an
+appended attachment (or for the one video of a page with `"transcribe": true`) shows in the
+page's `compliance` block. An image that only links to its own file page (a figure in a wiki
+article) is no attachment.
 
 A solution that a page hides behind a button (serlo's "Lösungsvorschlag", a `<details>` element or
 a toggle that controls its panel through `aria-controls`) is part of the text: the content is

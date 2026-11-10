@@ -26,7 +26,9 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    (unblock mode applies, not ``mode: fast``, not a transcript-view draft; package 22):
    ``BROWSER_UNBLOCK_CONCURRENCY`` turns per process (at most ``BROWSER_CONCURRENCY``), each a
    headful Chrome. The wait comes before the render deadline starts and before the host's turn,
-   and lasts at most ``BROWSER_QUEUE_WAIT_SECONDS``. When no turn comes, the item is deferred
+   and lasts at most ``BROWSER_QUEUE_WAIT_SECONDS`` for an item a caller waits for; a batch
+   item waits up to what its lease leaves beside the render deadline (60 s by default:
+   ``unblock_turn_seconds``). When no turn comes, the item is deferred
    (``UnblockBusy``, a short ``OutboundBusy``: the worker gives it back with its secrets and its
    draft, nothing is charged to the host); at ``JOB_ITEM_MAX_ATTEMPTS`` it answers instead, as an
    expired queue wait does: its draft with ``browser_unavailable``, without one
@@ -158,15 +160,20 @@ def unblock_concurrency(settings: Settings) -> int:
     return min(settings.browser_unblock_concurrency, settings.browser_concurrency)
 
 
-def unblock_turn_seconds(settings: Settings) -> float:
-    """How long an item waits for a turn of the unblock browser: ``BROWSER_QUEUE_WAIT_SECONDS``,
-    at most what its lease leaves beside the render deadline and the shutdown margin."""
+def unblock_turn_seconds(settings: Settings, *, batch: bool = False) -> float:
+    """How long an item waits for a turn of the unblock browser: what its lease leaves beside
+    the render deadline and the shutdown margin (60 s by default), and for an item a caller
+    waits for (not a ``batch`` item) at most ``BROWSER_QUEUE_WAIT_SECONDS``, since the API's
+    wait for it is bounded by that. A batch item waits the longer time: each deferral costs
+    it an attempt, and renders of 20 to 60 s would exhaust ``JOB_ITEM_MAX_ATTEMPTS`` of a long
+    admin batch of unblock items at the short wait (final review of package 22)."""
     headroom = (
         browser_lease_seconds(settings)
         - settings.browser_unblock_timeout_seconds
         - _SHUTDOWN_MARGIN_SECONDS
     )
-    return max(0.0, min(settings.browser_queue_wait_seconds, headroom))
+    wait = headroom if batch else min(settings.browser_queue_wait_seconds, headroom)
+    return max(0.0, wait)
 
 
 def unblock_unavailable(url: str, draft: Envelope[ExtractResult] | None) -> Envelope[ExtractResult]:
@@ -271,7 +278,7 @@ class BrowserRunner:
             draft = await self._store.draft(job.id, item.index)
             request = _request(job, url, secrets)
             turns = self._unblock_turns if self._unblocks(job, request, draft) else None
-            if turns is not None and not await self._turn(turns):
+            if turns is not None and not await self._turn(turns, batch=job.kind == "batch"):
                 if gate_refusals == "raise":
                     raise UnblockBusy(UNBLOCK_RETRY_SECONDS)  # given back, secrets kept
                 finished = True
@@ -325,11 +332,11 @@ class BrowserRunner:
             job_principal(job), job.options.compliance, self._settings, requested=request.unblock
         )
 
-    async def _turn(self, turns: asyncio.Semaphore) -> bool:
+    async def _turn(self, turns: asyncio.Semaphore, *, batch: bool) -> bool:
         """Take a turn of the unblock browser within `unblock_turn_seconds`; False when none
         came. A cancelled or timed-out wait holds no turn (``Semaphore.acquire``)."""
         try:
-            async with asyncio.timeout(unblock_turn_seconds(self._settings)):
+            async with asyncio.timeout(unblock_turn_seconds(self._settings, batch=batch)):
                 await turns.acquire()
         except TimeoutError:
             return False
@@ -456,8 +463,13 @@ def browser_deadline_seconds(settings: Settings) -> float:
 
 
 def browser_graceful_seconds(settings: Settings) -> int:
-    """How long the items in flight may finish after SIGTERM: the longest render deadline."""
+    """How long the items in flight may finish after SIGTERM: the longest render deadline, and
+    with unblock mode the turn wait of an item a caller waits for before it
+    (``unblock_turn_seconds``). A batch item still waiting for its turn when the time is up is
+    cancelled and runs again once its lease has expired."""
     deadline = browser_deadline_seconds(settings)
+    if settings.browser_unblock_enabled:
+        deadline += unblock_turn_seconds(settings)
     return max(
         extraction_graceful_seconds(settings), math.ceil(deadline + _SHUTDOWN_MARGIN_SECONDS)
     )

@@ -20,7 +20,8 @@ under the request's mode (a block ends it before its request), the fetch in the 
 ``DomainGate`` turn with every redirect hop checked and a hop to another host in that host's turn,
 the fetcher's SSRF guard on every connection, ``DOCUMENT_MAX_BYTES`` as the byte limit and the
 header checks after the fetch (``X-Robots-Tag``, ``tdm-reservation``). The body is sniffed; only
-kinds MarkItDown converts are converted (not images or OpenDocument files, which need Docling),
+kinds MarkItDown converts are converted, and SVG for its text (not other images or OpenDocument
+files, which need Docling),
 in the pipeline's document children, without an OCR hand-off: a document that needs OCR gives
 its text layer. A candidate whose file extension or declared type names a kind that is not
 converted (audio, video, archives, OpenDocument, images, any declared type but a converted
@@ -37,8 +38,11 @@ OCR gives its text layer) reach the page's warnings once; each one tried that ga
 ``attachment_failed``. A failure that may pass (a timeout, a refusal of the outbound gate, a
 5xx, 408, 425 or 429) sets ``attachments_retry`` on the run: the pipeline does not cache that
 result, so the next request tries again; a permanent one (404, robots.txt) is cached as any. The
-result stays the page's: its status code, final URL, content type and compliance report. The
-result cache key does not change: the two settings belong to the deployment.
+result stays the page's: its status code, final URL and content type. Its compliance report (and
+the run's) adds the findings of each attachment whose text was appended
+(``with_extra_findings``): under ``report`` an attachment that robots.txt disallows is fetched,
+and the answer says so (rule 6). The result cache key does not change: the two settings belong to
+the deployment.
 """
 
 import asyncio
@@ -53,7 +57,7 @@ from urllib.parse import urlsplit
 
 import structlog
 
-from text_extraction.compliance import ComplianceReport
+from text_extraction.compliance import ComplianceReport, with_extra_findings
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert.attachments import Attachment, attachment_candidates
 from text_extraction.convert.links import DOWNLOAD_EXTS
@@ -197,15 +201,22 @@ class AttachmentSteps[R: AttachmentRun]:
         if not followed:
             return result.model_copy(update={"warnings": [*result.warnings, *warnings]})
         content = result.content or ""
+        report = result.compliance
         for attachment, converted in followed:
             content = _joined(content, attachment.label, converted.content or "", result.format)
             kept = [code for code in _KEPT_WARNINGS if code in converted.warnings]
             warnings.extend(code for code in kept if code not in [*result.warnings, *warnings])
+            # Its text is part of the answer: so are its compliance findings (rule 6).
+            report = with_extra_findings(report, converted.compliance)
+            run.report = with_extra_findings(run.report, converted.compliance)
         started = time.perf_counter()
         try:
-            return await self._threads.run(self._rejudged, result, content, raw_sha256, warnings)
+            rejudged = await self._threads.run(
+                self._rejudged, result, content, raw_sha256, warnings
+            )
         finally:
             run.convert_ms += _ms(started)
+        return rejudged.model_copy(update={"compliance": report})
 
     async def follow_attachments(
         self, run: R, candidates: list[Attachment], limit: int
@@ -307,7 +318,8 @@ class AttachmentSteps[R: AttachmentRun]:
         if isinstance(outcome, OcrNeeded) and OCR_UNAVAILABLE_WARNING not in data.warnings:
             # No OCR hand-off for an attachment: its text layer, as MarkItDown read it.
             data = data.model_copy(update={"warnings": [*data.warnings, OCR_UNAVAILABLE_WARNING]})
-        return data
+        # The checks of the attachment's own URL, its redirect hops and its headers.
+        return data.model_copy(update={"compliance": sub.report})
 
     def _rejudged(
         self, result: ExtractResult, content: str, raw_sha256: str, warnings: list[str]

@@ -693,3 +693,40 @@ def test_svg_with_a_doctype_entity_is_not_appended(loop: Loop) -> None:
     assert "passwd" not in (data.content or "")
     assert data.warnings.count("attachment_failed") == 1
     assert data.content == without_attachments(answers).content
+
+
+# --- compliance: report (final review, finding 1) ---
+
+
+def test_report_mode_reports_the_findings_of_an_appended_attachment() -> None:
+    target = f"{OTHER}/files/blatt-1.pdf"
+    answers: dict[str, Any] = {
+        PAGE: fetched(PAGE, page(links=link(target, "Blatt 1"))),
+        target: pdf_answer(target),
+        f"{OTHER}/robots.txt": fetched(f"{OTHER}/robots.txt", "User-agent: *\nDisallow: /"),
+    }
+    harness = fake_harness(answers)
+
+    data = data_of(run(harness, compliance="report"))
+
+    assert target in fetched_urls(harness)  # report mode fetches it
+    assert data.warnings.count("attachment_read") == 1
+    assert data.compliance.mode == "report"
+    assert data.compliance.robots == "disallowed"
+    assert data.compliance.decision == "reported"
+    assert data.compliance.reasons
+    assert data.final_url == PAGE  # still the page's answer
+
+
+def test_attachment_that_gives_no_text_leaves_the_pages_report() -> None:
+    target = f"{OTHER}/files/blatt-1.pdf"
+    answers: dict[str, Any] = {
+        PAGE: fetched(PAGE, page(links=link(target, "Blatt 1"))),
+        target: fetched(target, "Not found", status=404),
+        f"{OTHER}/robots.txt": fetched(f"{OTHER}/robots.txt", "User-agent: *\nDisallow: /"),
+    }
+
+    data = data_of(run(fake_harness(answers), compliance="report"))
+
+    assert data.warnings.count("attachment_failed") == 1
+    assert data.compliance.decision == "allowed"

@@ -266,9 +266,10 @@ workers:
     # pod env: a config.BROWSER_CONCURRENCY entry is ignored. The resources below are sized for it.
     concurrency: 4
     # No drain wait. On SIGTERM the worker stops claiming and gives renders in flight
-    # max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10) seconds: 40 s, 70 s with unblock
-    # mode (BROWSER_UNBLOCK_TIMEOUT_SECONDS 60). The render fails when that plus a 10 s margin
-    # is above this value.
+    # max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10) seconds: 40 s, 80 s with unblock
+    # mode (BROWSER_UNBLOCK_TIMEOUT_SECONDS 60 plus the unblock turn wait,
+    # BROWSER_QUEUE_WAIT_SECONDS 10). The render fails when that plus a 10 s margin is above this
+    # value.
     terminationGracePeriodSeconds: 150
     # Measured as for the API pods (docs/configuration.md, "Resource baselines"): 100 renders at
     # four pages gave a memory p95 of 1137 MiB, a CPU mean of 0.73 and a peak of 1.49 cores. The

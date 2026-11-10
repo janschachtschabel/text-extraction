@@ -123,9 +123,12 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    after its conversion; with `transcribe: true` a thin page's one embedded media gets its
    transcript after the page's text (step 8b, M22). Speech recognition is a job of the ASR worker. See "Audio and video".
 
-   **Step 7b, attachments of a thin page (package 22, `pipeline_attachments.py`):** a fetched or
-   rendered HTML page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words, and no bot
-   challenge, soft 404 or login wall, gets the text of at most `ATTACHMENTS_MAX` (2) of its
+   The two paragraphs below carry the step numbers of `pipeline.py`'s module docstring (7b, 4b,
+   8b); a step number in them without a letter is one of this list (1 to 7).
+
+   **pipeline.py step 7b, attachments of a thin page (package 22, `pipeline_attachments.py`):** a
+   fetched or rendered HTML page with fewer than `ATTACHMENTS_BELOW_WORDS` (100) words, and no
+   bot challenge, soft 404 or login wall, gets the text of at most `ATTACHMENTS_MAX` (2) of its
    attachments appended, then is judged again (step 4) and fingerprinted (step 7): a worksheet
    overview or a lesson plan often carries its material as a download. A site crawl's pages do
    not: the crawl lists file links and never fetches them. In `auto` mode the escalation is
@@ -134,8 +137,11 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    the render its time, and a script page must not be answered by its download). The candidates
    (`convert/attachments.py`) are the content's links to files in page order, then the Drupal
    JSON:API `file--file` entities of its script data (Next.js flight chunks, JSON scripts), at
-   most 20; a candidate whose extension or declared type names a kind MarkItDown does not
-   convert (audio, video, archives, OpenDocument, images; any declared type but a converted
+   most 20. A link whose only content is an image is no candidate: it is a figure linking to its
+   file's page (a MediaWiki `/wiki/Datei:Foo.svg`). A link to an SVG is one, although
+   `links[].kind` and the document list of the content do not count `.svg` as a file. A candidate
+   whose extension or declared type names a kind MarkItDown does not
+   convert (audio, video, archives, OpenDocument, images but SVG; any declared type but a converted
    kind's, an alias of one or a generic one such as `application/octet-stream`) is passed over
    without a request. Each
    one tried is fetched as the page is (the steps of `fetch_raw`): URL validation, the request's
@@ -152,7 +158,10 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    a revalidation cannot renew a page without its material; a permanent one (404, robots.txt) is
    cached as any. `word_count`, `quality.word_count`
    and the fingerprint are computed from the joined content; the result's status code, final
-   URL, content type and compliance report stay the page's. The attachments share the request's
+   URL and content type stay the page's, and its compliance report adds the findings of each
+   attachment whose text was appended (`compliance.with_extra_findings`: under `report`, an
+   attachment whose robots.txt disallows it shows as `robots: disallowed`, `decision: reported`;
+   `crawl_delay` stays the page's). The attachments share the request's
    deadline: at most half of the time left, and they stop 1 s before it at the latest, so the
    page keeps its answer and a player's tracks their time. The cache key does not change:
    the settings belong to the deployment. `follow_attachments` also follows a file named
@@ -160,7 +169,7 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    never thin with the defaults, because the converter keeps the file links the text lacks as a
    list, and their labels count as words.
 
-   **Step 4b, edu-sharing render pages through the REST API (package 22,
+   **pipeline.py step 4b, edu-sharing render pages through the REST API (package 22,
    `edusharing.py`, `pipeline_edusharing.py`):** an edu-sharing render URL
    (`<prefix>/edu-sharing/components/render/<uuid>`, optionally with a version segment or a
    query) serves a 3 KB Angular shell, which only a render could read. Before its page is
@@ -168,7 +177,7 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    item with a draft, which want the page as a browser shows it, and not a site crawl's page)
    asks the repository instead:
    `GET <base>/rest/node/v1/nodes/-home-/<uuid>/metadata?propertyFilter=-all-` with
-   `Accept: application/json`. The render URL gets its compliance check first (step 2, as the
+   `Accept: application/json`. The render URL gets its compliance check first (step 2 above, as the
    page would; a block leaves it to today's path, which answers the block); the metadata URL is
    then fetched as an attachment is (the steps of `fetch_raw`: its own compliance check, the
    host's turn, every redirect hop checked, the SSRF guard), within `CONVERT_MAX_BYTES` and half
@@ -186,7 +195,7 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    detected) are the node's own; the links are table rows because a paragraph of a link alone
    tips Trafilatura into flattening so short a page. Every value is escaped, and a URL is
    kept only when it is an absolute `http(s)` URL with a host and without user info. The page
-   is converted and judged as an HTML page (steps 4 and 5); a JSON answer of the API is no bot
+   is converted and judged as an HTML page (steps 5 and 4 above); a JSON answer of the API is no bot
    challenge, soft 404 or login wall, so those findings of the page are cleared before its
    verdict, whatever the node's words. The node's file is followed as an attachment
    (`follow_attachments`, whatever the page's words: the file is the material, but not while
@@ -200,7 +209,10 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    node's audio or video file is the single-media hand-off's (Task 6 of package 22). The answer
    reports the metadata's fetch: its final URL, status and content type (`application/json`), so
    `escalation.needs_browser` never sends it to the browser, not even under unblock mode;
-   `mode_used` stays `fast`, and its compliance report holds the findings of both URLs. It is
+   `mode_used` stays `fast`, and its compliance report holds the findings of the render URL, the
+   metadata URL and an appended file. The page's `<html lang>` is the node's
+   `cclom:general_language` when that is a short language tag (`de`, `de_DE` as `de-DE`), so the
+   result's `language` is the node's. It is
    fingerprinted from the metadata's bytes and the final content, and cached as a page's result,
    without validators (a stale entry is read through the API again); a file failure that may
    pass keeps it out of the cache. Any other answer of the API (a block, a refusal of the gate,
@@ -933,8 +945,14 @@ while `BROWSER_ENABLED` is false, are unchanged.
     `pipeline.run`, for an item that will use the unblock browser (unblock mode applies to the
     job's owner, compliance and `unblock`, not `mode: fast`, not a transcript-view draft). The
     wait therefore comes before the render deadline starts and before the host's turn, and
-    standard items never wait for it. It lasts at most `BROWSER_QUEUE_WAIT_SECONDS` (and never
-    more than the lease leaves beside the render deadline and 10 s). Without a turn the item is
+    standard items never wait for it. For an item a caller waits for (a sync request's job) it
+    lasts at most `BROWSER_QUEUE_WAIT_SECONDS` (and never more than the lease leaves beside the
+    render deadline and 10 s); a batch item waits up to that headroom itself (60 s by default,
+    `unblock_turn_seconds(batch=True)`), since each deferral costs it an attempt and renders of
+    20 to 60 s would exhaust `JOB_ITEM_MAX_ATTEMPTS` of a long admin batch at the short wait
+    (final review of package 22). The browser worker's graceful shutdown adds the short wait to
+    the render deadline; a batch item still waiting at its end runs again once its lease
+    expires. Without a turn the item is
     deferred (`UnblockBusy`, an `OutboundBusy` of 1 s: given back with its secrets and draft);
     at `JOB_ITEM_MAX_ATTEMPTS` it answers as an expired queue wait does, its draft with
     `browser_unavailable` or, without one, `rate_limited` (retryable). It never answers `timeout`
@@ -1386,9 +1404,10 @@ OpenAI-compatible endpoint): always a job, answered 202.
   whose one media is the material (M22).
 - **M22, the one media of a thin page** (package 22: `Pipeline._with_page_media`, step 8b;
   `pipeline_media.single_embed`, `page_transcribed`). With `transcribe: true`, a fetched or rendered
-  page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words whose players and declared media
+  page with fewer than `TRANSCRIBE_EMBED_BELOW_WORDS` (300) words of its own (before step 7b
+  appended its attachments' text: a worksheet does not keep the video from its transcript) whose players and declared media
   are one media (no track of it read; not a bot challenge, soft 404 or login wall; not a site
-  crawl's page, a file a render ended on or a request with caller secrets) gets that media's
+  crawl's page, a file a render ended on, a screenshot or a request with caller secrets) gets that media's
   transcript after its text, as if the caller had sent the media's URL. One media is one embed, or
   files that differ in their extension only: the `<source>` formats of one `<video>` (`a.mp4`,
   `a.webm`), which `media.embeds` still lists one by one, since a result does not keep which element
@@ -1406,7 +1425,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
   `asr_unavailable` and without its fingerprint. The ASR worker downloads the media as for any media
   URL (`MEDIA_MAX_BYTES`; `MEDIA_UPLOAD_MAX_BYTES` is for uploads, whose bytes travel through
   Valkey, and does not apply), and `transcribed_result` keeps the page: its title, metadata, final
-  URL, status code, compliance report and `mode_used`, with the transcript after its text as `##
+  URL, status code, compliance report (with the media URL's findings added, as the stand-in and the
+  draft have them, and as a page with subtitles has them) and `mode_used`, with the transcript after its text as `##
   Transcript` (as a track's), words, quality verdict and fingerprint of the joined content,
   `transcript_source: asr` in its `media`. It is stored under the page's cache key, as a platform
   video's transcription is under its URL's: later requests without `transcribe`, and user keys while

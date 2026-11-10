@@ -101,3 +101,18 @@ def test_pretty_printed_entity_found() -> None:
     pretty = json.dumps(json.loads(_entity()), indent=2).replace('"type":', '"type" :')
     html = f'<script type="application/json">{pretty}</script>'
     assert [a.label for a in attachment_candidates(html, PAGE_URL)] == ["wasserkreislauf.docx"]
+
+
+def test_a_wiki_figure_link_to_an_svg_is_no_candidate() -> None:
+    """Final review of package 22, finding 2: a link whose only content is its image (a
+    MediaWiki figure, ``/wiki/Datei:Foo.svg``) is no attachment; a text link to an SVG is."""
+    html = (
+        '<main><p>Text</p><figure><a href="/wiki/Datei:Foo.svg" class="mw-file-description">'
+        '<img src="//upload.example/Foo.svg.png" alt=""></a><figcaption>Kreislauf</figcaption>'
+        '</figure><p><a href="/files/schema.svg">Schema</a></p>'
+        '<p><a href="/files/blatt.pdf"><img src="/icons/pdf.png" alt=""></a></p></main>'
+    )
+
+    assert attachment_candidates(html, "https://de.wikipedia.org/wiki/Wasser") == [
+        Attachment("https://de.wikipedia.org/files/schema.svg", "Schema")
+    ]

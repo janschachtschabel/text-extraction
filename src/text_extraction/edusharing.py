@@ -36,6 +36,7 @@ _FIXED_LICENCES: Final = {
 }
 _CC_KEY: Final = re.compile(r"CC_BY(?:_NC)?(?:_SA|_ND)?")
 _CC_VERSION: Final = re.compile(r"[1-4]\.0")
+_LANGUAGE_TAG: Final = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?")
 
 
 def render_node(url: str) -> tuple[str, str] | None:
@@ -77,9 +78,10 @@ def parse_metadata(body: bytes) -> dict[str, Any] | None:
 def node_page(meta: dict[str, Any], *, base: str | None = None) -> tuple[str, Attachment | None]:
     """A small HTML page of the metadata answer ``meta`` and the node's file.
 
-    The page's ``<head>`` has the ``<title>``, the description and the keywords as ``<meta>``,
-    the licence as ``<link rel="license">`` (``licence_url``) and ``base`` (the render URL) as
-    ``<link rel="canonical">``, so the page's metadata reads as any page's. Its body has the
+    The page's ``<html lang>`` is the node's ``cclom:general_language`` when that is a short
+    language tag. Its ``<head>`` has the ``<title>``, the description and the keywords as
+    ``<meta>``, the licence as ``<link rel="license">`` (``licence_url``) and ``base`` (the render
+    URL) as ``<link rel="canonical">``, so the page's metadata reads as any page's. Its body has the
     ``<h1>`` of ``node.title``, else ``cclom:title``, else ``node.name``; the description; the
     keywords as a plain comma list; then a table with the licence's display name (linked to the
     licence), the web link (``ccm:wwwurl``) and the file (a link with its name when its URL is
@@ -143,8 +145,10 @@ def node_page(meta: dict[str, Any], *, base: str | None = None) -> tuple[str, At
         rows.append(_escaped(name))
     if rows:
         parts.append("<table>" + "".join(f"<tr><td>{row}</td></tr>" for row in rows) + "</table>")
+    language = _language_tag(_first(properties, "cclom:general_language"))
+    opening = f'<html lang="{_escaped(language)}">' if language else "<html>"
     page = (
-        f"<!doctype html><html><head>{''.join(head)}</head>"
+        f"<!doctype html>{opening}<head>{''.join(head)}</head>"
         f"<body><main><article>{''.join(parts)}</article></main></body></html>"
     )
     attachment = (
@@ -223,6 +227,16 @@ def _size(value: object) -> int | None:
     if isinstance(value, str) and value.isascii() and value.isdigit():
         return int(value)
     return None
+
+
+def _language_tag(value: str | None) -> str | None:
+    """``value`` (``de``, ``de_DE``, ``en-GB``) as a language tag for ``<html lang>``, its
+    ``_`` a ``-``; None for anything that is not a two- or three-letter language with an
+    optional region or script."""
+    if value is None:
+        return None
+    tag = value.strip().replace("_", "-")
+    return tag if _LANGUAGE_TAG.fullmatch(tag) else None
 
 
 def _escaped(value: str) -> str:

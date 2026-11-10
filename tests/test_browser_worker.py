@@ -820,6 +820,57 @@ def test_unblock_turns_are_capped_at_browser_concurrency() -> None:
     assert browser_worker.unblock_turn_seconds(make_settings()) == 10
 
 
+@scenario
+async def test_a_batch_item_waits_for_a_turn_beyond_the_queue_wait() -> None:
+    """Final review of package 22, finding 5: a batch item has no caller waiting, so it waits
+    for a turn up to its lease's headroom instead of ``BROWSER_QUEUE_WAIT_SECONDS``; a long
+    admin batch then does not spend its attempts on deferrals while renders of 20 to 60 s run.
+    A sync item keeps the short wait."""
+    harness, _, unblock = turn_harness(browser_queue_wait_seconds=0.05)
+    unblock.release.set()
+    turns = harness.runner._unblock_turns
+    assert turns is not None
+    await turns.acquire()
+    await turns.acquire()
+    batch = await harness.submit(IGNORE_BROWSER, kind="batch", owner=ADMIN)
+
+    async def free_a_turn() -> None:
+        await asyncio.sleep(0.3)  # six times the sync wait
+        turns.release()
+
+    freeing = asyncio.create_task(free_a_turn())
+    await harness.process_next()
+    await freeing
+
+    assert harness.outcome("deferred") == 0
+    assert (await harness.result(batch)).status == "success"
+    assert len(unblock.calls) == 1
+
+    sync = await harness.submit(IGNORE_BROWSER, owner=ADMIN)
+    await turns.acquire()  # both taken again
+    await harness.process_next()
+    assert harness.outcome("deferred") == 1
+    assert (await harness.item(sync)).state == "pending"
+
+
+def test_the_turn_wait_of_a_batch_item_is_the_leases_headroom() -> None:
+    settings = make_settings(browser_unblock_enabled=True)
+    headroom = browser_lease_seconds(settings) - settings.browser_unblock_timeout_seconds - 10
+    assert headroom == 60  # the defaults: a 130 s lease, a 60 s unblock render
+    assert browser_worker.unblock_turn_seconds(settings, batch=True) == headroom
+    assert browser_worker.unblock_turn_seconds(settings) == 10
+
+
+def test_the_graceful_shutdown_covers_a_sync_items_turn_wait() -> None:
+    """Final review of package 22, T7 B: an unblock item a sync caller waits for may wait for
+    its turn first, then render; the shutdown gives it both. A batch item still waiting at
+    the end is cancelled and runs again after its lease (no result is lost)."""
+    on = make_settings(browser_unblock_enabled=True)
+    off = make_settings()
+    assert browser_worker.browser_graceful_seconds(on) == 60 + 10 + 10
+    assert browser_worker.browser_graceful_seconds(off) == 40  # 30 s render + 10, no turns
+
+
 # --- the shared worker behaviour on pool ``browser`` ------------------------------------------
 
 
@@ -1107,6 +1158,33 @@ async def test_a_youtube_url_in_the_browser_pool_is_not_moved() -> None:
     assert result.data.title == "Photosynthesis for kids"
     assert "asr_unavailable" in result.data.warnings
     assert await harness.store.get_input(job_id, 0, MediaInputMeta) is None
+
+
+@scenario
+async def test_a_media_file_url_in_the_browser_pool_is_not_moved() -> None:
+    """R7 (final review of package 22): a direct media file URL (read by an ``auto`` item's
+    fast step here) is no page's one media: it is not moved to the ``asr`` pool and answers
+    ``TRANSCRIPTION_NOT_HANDED``."""
+    from tests.test_pipeline_media import MP4, VIDEO, FakeMediaFetcher, probe
+    from text_extraction.pipeline_media import TRANSCRIPTION_NOT_HANDED_MESSAGE
+
+    harness = Harness(
+        answers={VIDEO: fetched(VIDEO, MP4, content_type="video/mp4")},
+        media=FakeMediaFetcher(probe()),
+        asr_enabled=True,
+    )
+    options = JobOptions(mode="auto", compliance="enforce", transcribe=True)
+    job_id = await harness.submit(options, urls=[VIDEO])
+
+    await harness.process_next()
+
+    assert (await harness.asr_queue.counts()).pending == 0
+    assert await harness.store.get_input(job_id, 0, MediaInputMeta) is None
+    result = await harness.result(job_id)
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code.value == "no_transcript_available"
+    assert result.error.message == TRANSCRIPTION_NOT_HANDED_MESSAGE
 
 
 # --- the process ------------------------------------------------------------------------------

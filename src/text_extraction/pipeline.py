@@ -55,8 +55,10 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    text of at most ``ATTACHMENTS_MAX`` of its attachments appended, each fetched through these
    steps 2 to 7 (``fetch_raw``'s steps, ``DOCUMENT_MAX_BYTES``, half of the time left) and
    converted by MarkItDown (``pipeline_attachments``, package 22). A fast ``auto`` result that
-   escalates on its own verdict follows none: the render's step 7b does. A result whose
-   attachment failed for a reason that may pass is not cached (``attachments_retry``).
+   escalates on its own verdict follows none: the render's step 7b does, and a screenshot's
+   render none at all. The compliance findings of each appended attachment's URL join the
+   result's report. A result whose attachment failed for a reason that may pass is not cached
+   (``attachments_retry``).
 8. Quality verdict, language, metadata, links (each with its category), the page type of a
    fetched or rendered HTML page (``page_types.page_type``), fingerprint and cache. A
    document's result is final: it never goes to the browser, and a cached one is served even
@@ -64,13 +66,15 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    the transcripts of its players' ``<track>`` elements appended and its embeds listed
    (``MediaSteps.tracks``), before its verdict.
 8b. With ``transcribe: true``, such a page (in ``auto`` mode the better of the fast result and
-   the render) with fewer than ``TRANSCRIBE_EMBED_BELOW_WORDS`` words whose players and declared
+   the render) with fewer than ``TRANSCRIBE_EMBED_BELOW_WORDS`` words of its own (before step 7b
+   appended its attachments' text) whose players and declared
    media are one embed (``single_embed``) runs that media through the media steps of its URL in
    a sub-run (``_page_media``, M22): a file's head as a media URL's (step 4, 5, sniffed as
    audio or video), a platform player as step 2b. Subtitles follow the page's text; media that
    needs speech recognition becomes an ``AsrNeeded`` with the page's answer as its draft. An
    edu-sharing node's audio or video file on its host (step 4b) takes the same step, whatever
-   its words. Anything else leaves the page's answer as it is.
+   its words. The media URL's compliance findings join the page's report (the stand-in's, the
+   draft's and the transcribed result's). Anything else leaves the page's answer as it is.
 
 Media that needs speech recognition (``transcribe: true``) becomes an ``AsrNeeded`` for
 ``asr_handoff``, which ``run`` calls once the deadline's steps are done, with the answer without
@@ -189,6 +193,7 @@ from text_extraction.compliance import (
     compliance_block,
     origin_of,
     resolve_mode,
+    with_extra_findings,
     with_page_findings,
     with_redirect_findings,
 )
@@ -548,6 +553,9 @@ class _Run:
     site_links: bool = False  # the page's typed links go into ``data.site`` (P9-S10)
     # An attachment failed for a reason that may pass (step 7b): the result is not cached.
     attachments_retry: bool = False
+    # The words of the page this run fetched or rendered before step 7b appended its attachments'
+    # text: step 8b judges TRANSCRIBE_EMBED_BELOW_WORDS on them.
+    page_words: int | None = None
 
     @property
     def cache_url(self) -> str:
@@ -1319,10 +1327,17 @@ class Pipeline:
         quality verdict deciding the status. Without speech the page's answer with
         ``no_speech``, kept; after a failed transcription with ``asr_unavailable``, kept only
         when the failure is the media's own (``final``, not retryable). Compared and stored under
-        the page's key, with the page's compliance report and final URL."""
+        the page's key, with the page's compliance report (the media URL's findings added) and
+        final URL."""
         run = self._media_run(req, principal, meta)
         run.media = None  # filed under the page's URL, as the page is
-        run.report = page.compliance
+        # The page's report with the findings of its media's URL (already in a draft of this
+        # version; added here for one written before them).
+        run.report = (
+            with_extra_findings(page.compliance, meta.compliance)
+            if meta.compliance is not None
+            else page.compliance
+        )
         run.final_url = page.final_url
         await self._load_learned(run)
         result: ExtractResult
@@ -1341,7 +1356,12 @@ class Pipeline:
                 result = await self._pool.run(page_transcribed, page, transcription, self._settings)
                 run.convert_ms += _ms(started)
         result = result.model_copy(
-            update={"attempts": run.attempts, "timings": run.timings(), "cache": run.cache}
+            update={
+                "attempts": run.attempts,
+                "timings": run.timings(),
+                "cache": run.cache,
+                "compliance": run.report,
+            }
         )
         envelope = await self._finish(run, self._envelope(result), Validators())
         envelope.trace_id = current_trace_id()
@@ -1350,10 +1370,10 @@ class Pipeline:
     def _media_run(self, req: ExtractRequest, principal: Principal, meta: MediaInputMeta) -> _Run:
         """The run state of a URL's transcribed media, from what its extraction learned: the
         compliance report, the final (or canonical) URL and the fetches so far. A platform
-        video's result is filed under its canonical URL with ``media`` (step 2b)."""
-        report = meta.compliance or ComplianceReport(
-            mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
-        )
+        video's result is filed under its canonical URL with ``media`` (step 2b). An admin's
+        ``unblock: false`` keys it apart as ``run`` does (package 22)."""
+        mode = resolve_mode(req.compliance, principal, self._settings)
+        report = meta.compliance or ComplianceReport(mode=mode, decision="skipped")
         private = not req.secrets().empty()
         cacheable = _cacheable(req, private)
         return _Run(
@@ -1369,6 +1389,7 @@ class Pipeline:
             target=req.url,
             media=media_target(req.url) if meta.source == "platform" else None,
             owner=principal.name,
+            unblock_off=not req.unblock and unblock_for(principal, mode, self._settings),
         )
 
     def _ocr_kept(self, principal: Principal) -> bool:
@@ -1766,17 +1787,21 @@ class Pipeline:
         return self._settings.transcribe_embed_below_words
 
     async def _with_page_media(
-        self, run: _Run, envelope: Envelope[ExtractResult]
+        self, run: _Run, envelope: Envelope[ExtractResult], own_words: int | None = None
     ) -> Envelope[ExtractResult]:
         """Step 8b (M22): the answer of a page with fewer than
         ``TRANSCRIBE_EMBED_BELOW_WORDS`` words whose players and declared media are one embed
         (``single_embed``), for a ``transcribe`` request: with that video's subtitles after its
         text, or the stand-in of its hand-off to the transcription (``_page_media``). Any other
-        answer is returned as it is."""
+        answer is returned as it is. ``own_words`` are the page's words before step 7b
+        appended its attachments' text (None: the answer's own count): a worksheet does not keep
+        a thin page's video from its transcript."""
         data = envelope.data
         if data is None or not self._transcribes(run):
             return envelope
-        sources = single_embed(data, self._below_words())
+        if own_words is not None and own_words >= self._below_words():
+            return envelope
+        sources = single_embed(data, None if own_words is not None else self._below_words())
         if sources is None:
             return envelope
         found = await self._page_media(run, data, sources, envelope)
@@ -1843,23 +1868,28 @@ class Pipeline:
                 run.convert_ms += sub.convert_ms
         # The page's fetches (a draft's included, in ``auto``) and the media's.
         attempts = page.attempts + sum(sub.attempts for sub in subs)
+        if found is None or (isinstance(found, AsrNeeded) and run.asr_handoff is None):
+            return None  # nothing found, or a platform video without subtitles and no hand-off
+        # The media is part of the answer: so are the findings of its URL (rule 6).
+        report = with_extra_findings(page.compliance, subs[-1].report)
+        run.report = with_extra_findings(run.report, subs[-1].report)
         if isinstance(found, AsrNeeded):
-            if run.asr_handoff is None:
-                return None  # a platform video without subtitles: nothing to hand it to
+            if judged.data is not None:
+                judged = judged.model_copy(
+                    update={"data": judged.data.model_copy(update={"compliance": report})}
+                )
             needed = page_media_handoff(found, judged, attempts)
             run.asr_needed = needed  # `run` hands it over once the deadline is off
             stand_in = without_asr(needed, run).data
             if stand_in is None:  # pragma: no cover - a page's draft has data
                 return None
             return stand_in.model_copy(update={"attempts": attempts})
-        if found is None:
-            return None
         started = time.perf_counter()
         try:
             merged = await self._pool.run(page_with_subtitles, page, found, self._settings)
         finally:
             run.convert_ms += _ms(started)
-        return merged.model_copy(update={"attempts": attempts})
+        return merged.model_copy(update={"attempts": attempts, "compliance": report})
 
     async def _embedded_file(self, sub: _Run) -> AsrNeeded | None:
         """The ``AsrNeeded`` of the media file at ``sub``'s URL, its head fetched as a media URL
@@ -2407,6 +2437,7 @@ class Pipeline:
             # The page's own verdict decides; the render's step 7b follows the attachments.
             return envelope
         if kind == "html":  # step 7b, then the verdict again
+            run.page_words = result.word_count
             appended = await self._attachments.append_attachments(
                 run, result, text, raw_sha256=fetched.raw_sha256
             )
@@ -2416,7 +2447,7 @@ class Pipeline:
             tracked = await self._media.tracks(run, text, result, raw_sha256=fetched.raw_sha256)
             if tracked is not result:
                 envelope = self._envelope(tracked)
-            envelope = await self._with_page_media(run, envelope)  # step 8b
+            envelope = await self._with_page_media(run, envelope, run.page_words)  # step 8b
         return await self._finish(run, envelope, run.validators)
 
     def _page_result(self, run: _Run, processed: _Processed) -> ExtractResult:
@@ -2786,6 +2817,9 @@ class Pipeline:
         if earlier is None:
             return rendered
         winner = better(earlier, rendered)
+        # Only the render took step 7b: the earlier result is a draft or a fast result that
+        # escalated, which follow no attachments.
+        own_words = run.page_words if winner is rendered else None
         if winner.data is not None:
             # Every fetch of the target for this item counts, the draft's too.
             drafted = run.draft.data.attempts if run.draft and run.draft.data else 0
@@ -2794,7 +2828,7 @@ class Pipeline:
         # This run's fast result keeps its validators; a draft (fetched elsewhere) or a render
         # has none, and a run that took no fast step has none either.
         fast = winner.data is not None and winner.data.mode_used == "fast"
-        winner = await self._with_page_media(run, winner)  # step 8b, on the better result
+        winner = await self._with_page_media(run, winner, own_words)  # step 8b, the better one
         return await self._finish(run, winner, run.validators if fast else Validators())
 
     async def _render_and_extract(self, run: _Run) -> Envelope[ExtractResult]:
@@ -3092,9 +3126,11 @@ class Pipeline:
             site=processed.site,
             page_type=processed.page_type,
         )
-        result = await self._attachments.append_attachments(  # step 7b, before the verdict
-            run, result, rendered.html, raw_sha256=fetched.raw_sha256
-        )
+        if screenshot is None:  # step 7b, before the verdict; a screenshot answers its image
+            run.page_words = result.word_count
+            result = await self._attachments.append_attachments(
+                run, result, rendered.html, raw_sha256=fetched.raw_sha256
+            )
         if self._media is not None and screenshot is None:
             result = await self._media.tracks(
                 run, rendered.html, result, raw_sha256=fetched.raw_sha256
@@ -3113,7 +3149,7 @@ class Pipeline:
             await self._clearance.put(run.host or "", list(rendered.cookies))
         if run.comparing:
             return envelope  # `_rendered` takes step 8b once the better result is known
-        envelope = await self._with_page_media(run, envelope)  # step 8b
+        envelope = await self._with_page_media(run, envelope, run.page_words)  # step 8b
         return await self._finish(run, envelope, Validators())  # B10: never revalidated
 
     def _file_of(self, run: _Run, rendered: Rendered) -> str | None:
