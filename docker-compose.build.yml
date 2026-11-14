@@ -326,7 +326,7 @@ services:
     stop_grace_period: 45s
 
   valkey:
-    image: valkey/valkey:8.1-alpine
+    image: valkey/valkey:9.1-alpine
     # Jobs, the queue and counters are state: refuse writes when full, never evict.
     command:
       - --requirepass
