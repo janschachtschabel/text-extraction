@@ -58,7 +58,7 @@ services:
       - secrets:/secrets
 
   valkey:
-    image: valkey/valkey:8.1-alpine
+    image: valkey/valkey:9.1-alpine
     restart: unless-stopped
     networks:
       - backend
