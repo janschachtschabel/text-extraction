@@ -30,7 +30,8 @@ site run, or the progress view's detail area), so no refresh brings the tree bac
   </div>
   {%- if job_state %}
   <p class="tree-progress">
-    {%- if cancel %}{{ t("tree.progress_running", done=progress.done, total=progress.total, elapsed=progress.elapsed) }}
+    {%- if job_state == "queued" %}{{ t("tree.progress_queued", elapsed=progress.elapsed) }}
+    {%- elif cancel %}{{ t("tree.progress_running", done=progress.done, total=progress.total, elapsed=progress.elapsed) }}
     {%- elif duration is not none %}{{ t("tree.duration", seconds=duration) }}{% endif %}
     {%- if progress.failed %} · <span class="fetches-failed">{{ tn("tree.fetches_failed", progress.failed) }}</span>{% endif %}</p>
   {%- endif %}

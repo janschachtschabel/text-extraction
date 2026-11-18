@@ -754,6 +754,31 @@
     }
   });
 
+  // The tree's fold of single fetches (package 23) refreshes only while it is open: a refresh
+  // of a closed fold is skipped and asked for again when the fold opens.
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var live = event.detail.elt;
+    var fold = live instanceof Element ? live.closest("details.tree-fetches") : null;
+    if (fold && !fold.open && live.hasAttribute("data-refresh")) {
+      event.preventDefault();
+      live.setAttribute("data-skipped", "");
+    }
+  });
+
+  document.addEventListener("toggle", function (event) {
+    var fold = event.target;
+    if (!(fold instanceof HTMLDetailsElement) || !fold.open || !fold.matches(".tree-fetches")) {
+      return;
+    }
+    var live = fold.querySelector(".progress-live[data-skipped]");
+    if (live && window.htmx) {
+      live.removeAttribute("data-skipped");
+      window.htmx.ajax("GET", live.getAttribute("hx-get"), {
+        source: live, target: live, swap: "outerHTML"
+      });
+    }
+  }, true);
+
   // The answer arrived while the user started typing: it is dropped (afterRequest asks again).
   document.addEventListener("htmx:beforeSwap", function (event) {
     var wrapper = event.detail.elt;
@@ -977,11 +1002,17 @@
     return element instanceof Element && element.hasAttribute("data-refresh");
   }
 
-  // The data-announce texts of "root" and the elements in it, joined.
-  function announcement(root) {
+  // The data-announce texts of "root" and the elements in it, joined. "own": not those in an
+  // hx-preserve element inside root (package 23): a refresh carries that over unchanged, and what
+  // is in it announces through its own requests.
+  function announcement(root, own) {
     var found = root.matches("[data-announce]") ? [root] : root.querySelectorAll("[data-announce]");
-    return Array.prototype.map
+    return Array.prototype.filter
       .call(found, function (element) {
+        var kept = own && element.parentElement ? element.parentElement.closest("[hx-preserve]") : null;
+        return !kept || kept === root || !root.contains(kept);
+      })
+      .map(function (element) {
         return element.getAttribute("data-announce").trim();
       })
       .filter(Boolean)
@@ -1112,8 +1143,9 @@
     var message = announcement(root);
     if (isRefresh(event.detail.elt)) {
       // The view before the refresh said its states already.
-      if (message && message !== announcement(event.detail.elt)) {
-        announce(message);
+      var own = announcement(root, true);
+      if (own && own !== announcement(event.detail.elt, true)) {
+        announce(own);
       }
       return;
     }

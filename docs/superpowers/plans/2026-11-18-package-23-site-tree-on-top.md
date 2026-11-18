@@ -77,3 +77,17 @@
 
 **Files:** `docs/user-guide/{en,de}/whole-site-and-metadata.md`, `usage.md`, `part-of-a-site.md`; `CHANGELOG.md` (Unreleased, Changed); `docs/packages.md` (row 23 in both tables).
 - [ ] Texts describe the tree on top, status in its head, the fold; no "Show tree now" for the site form. Docs tests and translation check pass; commit.
+
+## Rulings during execution
+
+- R1: The fold of single fetches sits under the tree's head, not after the tree box: an item's
+  result in it holds a form, so the fold cannot be inside the tree's form, and after the form it
+  would come below "Extract selected". It is closed by default, so the tree stays on top.
+- R2: A closed fold polls no more; opening it again refreshes it at once (ui.js).
+- R3: A refresh announces only the state of its own job: `data-announce` texts inside an
+  `hx-preserve` element (the fold, the batch view) are left out of the comparison (review
+  finding 1).
+- R4: A queued job's head says "waiting to start for …"; the site run's placeholder takes the
+  state of the 202 answer; the site run has no label of its own (the tree inside names itself).
+- R5: The progress view keeps a plain tree button for a site job (no auto-load); the site form no
+  longer leads there.

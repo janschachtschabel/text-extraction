@@ -85,6 +85,17 @@ def test_a_finished_trees_head_has_the_duration_and_no_cancel(
     assert view.xpath(".//*[@class='fetches-failed']") == []
 
 
+def test_a_queued_crawl_waits_and_does_not_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waiting = JobProgress(total=1, done=0, success=0, partial=0, failed=0)
+    root = site_tree(client, monkeypatch, state="queued", items=0, job_progress=waiting)
+
+    [line] = texts(root, "//p[@class='tree-progress']")
+    assert line.startswith("waiting to start for ")
+    assert root.xpath("//form[contains(@class, 'cancel')]")
+
+
 def test_a_crawl_without_pages_yet_is_starting(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,6 +137,7 @@ def test_the_site_form_opens_the_site_run(client: TestClient) -> None:
     assert root.xpath("//section[@class='job']") == []
     [view] = root.xpath("//section[contains(@class, 'site-run')]")
     assert view.get("tabindex") == "-1"
+    assert view.get("aria-label") is None  # the tree inside names itself (no second region)
     [wrapper] = view.xpath("./div[@data-tree-live]")
     job_id = wrapper.get("hx-get").split("id=")[1].split("&")[0]
     assert len(job_id) == 32

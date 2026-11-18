@@ -649,6 +649,7 @@ async def site_structure_view(request: Request) -> Response:
         job = JobAccepted.model_validate(data)
         context = {
             "job_id": job.id,
+            "job_state": job.state,
             "refresh_url": f"{RUN_PREFIX}/site-tree?{urlencode({'id': job.id, 'live': 1})}",
             "refresh_seconds": TREE_REFRESH_SECONDS,
         }

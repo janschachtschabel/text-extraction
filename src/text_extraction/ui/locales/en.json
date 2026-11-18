@@ -255,6 +255,7 @@
   "tree.found_changed": "{found}, changed {date}",
   "tree.summary": "{urls} · {crawled} crawled · {sitemap} from the sitemap · {linked} only linked",
   "tree.duration": "finished in {seconds} s",
+  "tree.progress_queued": "waiting to start for {elapsed}",
   "tree.progress_running": "{done} of {total} fetches done so far · running for {elapsed}",
   "tree.fetches_failed.one": "{count} fetch failed",
   "tree.fetches_failed.other": "{count} fetches failed",

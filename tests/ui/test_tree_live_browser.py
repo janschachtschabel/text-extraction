@@ -100,6 +100,12 @@ def _more_than(page: Page, count: int) -> None:
     )
 
 
+def _mixed(texts: list[str]) -> list[str]:
+    """Status texts in which a job's state comes with more text: a tree refresh that announced
+    what its preserved parts (the fold, the batch view) said already."""
+    return [text for text in texts if re.match(r"^Job \w+: [^.]+\. \S", text)]
+
+
 def _box(view: Locator, word: str) -> Locator:
     return view.locator(f"input[name=url][value$='/docs/{word}']")
 
@@ -218,6 +224,7 @@ def test_the_batch_view_of_the_tree_survives_a_refresh(ui: tuple[str, str]) -> N
     url, origin = ui
     with browsing(url) as (page, console):
         view = _start(page, origin)
+        page.evaluate(_RECORD_STATUS)
         _more_than(page, FAST)
         view.locator("input[name=url][value$='/p3.html']").check()
         view.locator(".tree-actions button[type=submit]").click()
@@ -232,6 +239,12 @@ def test_the_batch_view_of_the_tree_survives_a_refresh(ui: tuple[str, str]) -> N
         expect(job.locator(".state")).to_have_attribute(
             "data-value", "completed"
         )  # it kept polling
+        _wrapper_mark(page)
+        _refreshed(page)
+        page.wait_for_timeout(300)
+        texts: list[str] = page.evaluate("window.uiStatusTexts")
+        assert _mixed(texts) == []
+        assert f"Job {job.get_attribute('data-job')}: completed." in texts  # its own refresh
     assert console == []
 
 
@@ -357,9 +370,10 @@ def test_the_single_fetches_fold_lists_the_fetches_and_stays_open(ui: tuple[str,
     url, origin = ui
     with browsing(url) as (page, console):
         view = _start(page, origin)
+        page.evaluate(_RECORD_STATUS)
         fold = view.locator("details.tree-fetches")
         expect(fold).not_to_have_attribute("open", "")
-        fold.locator("summary").click()
+        fold.locator(":scope > summary").click()
         rows = fold.locator("table.items tbody tr")
         expect(rows.first).to_be_visible()
         expect(fold.locator("h3")).to_have_count(0)  # no second job card in the fold
@@ -373,5 +387,21 @@ def test_the_single_fetches_fold_lists_the_fetches_and_stays_open(ui: tuple[str,
         assert page.evaluate("window.__fold === document.querySelector('details.tree-fetches')")
         expect(fold).to_have_attribute("open", "")
         expect(detail.locator(".result-view")).to_be_visible()
+        page.wait_for_timeout(300)
+        assert _mixed(page.evaluate("window.uiStatusTexts")) == []  # the refresh said nothing new
         assert _axe(page, "single fetches open") == []
+
+        # A closed fold polls no more; opening it again refreshes it.
+        fold.locator(":scope > summary").click()
+        expect(fold).not_to_have_attribute("open", "")
+        polls: list[str] = []
+        page.on(
+            "request",
+            lambda request: polls.append(request.url) if "items=1" in request.url else None,
+        )
+        page.wait_for_timeout(7_000)  # past two refresh intervals of the list
+        assert polls == []
+        fold.locator(":scope > summary").click()
+        page.wait_for_timeout(1_000)
+        assert len(polls) == 1, polls
     assert console == []

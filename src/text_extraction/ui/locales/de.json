@@ -255,6 +255,7 @@
   "tree.found_changed": "{found}, geändert {date}",
   "tree.summary": "{urls} · {crawled} gecrawlt · {sitemap} aus der Sitemap · {linked} nur verlinkt",
   "tree.duration": "fertig in {seconds} s",
+  "tree.progress_queued": "wartet seit {elapsed} auf den Start",
   "tree.progress_running": "{done} von bisher {total} Abrufen erledigt · läuft seit {elapsed}",
   "tree.fetches_failed.one": "{count} Abruf fehlgeschlagen",
   "tree.fetches_failed.other": "{count} Abrufe fehlgeschlagen",
