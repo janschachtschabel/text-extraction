@@ -8,7 +8,8 @@
 # the first start in the volume `secrets` and keeps them afterwards: the Valkey password and an
 # admin API key. The key appears once in its log (`docker compose logs init`); later
 # `docker compose run --rm -T init text-extraction-init --show-admin-key` prints it. Own keys go
-# into API_KEYS in .env as before (merged with the generated one).
+# into API_KEYS in .env as before (merged with the generated one);
+# `docker compose run --rm -T init text-extraction-init --new-key <name>` prints a key and that line.
 #
 # The images follow the newest 0.1.x release on their own: the default tag is `0.1`, and
 # pull_policy always pulls it on every `docker compose up` (a Docker panel's redeploy included).

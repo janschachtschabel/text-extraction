@@ -138,7 +138,10 @@ needs no encoding. This applies to the generated password (alphanumeric) and to
 or the variable on its own) carries the real password, and there reserved characters must be
 percent-encoded. In `.env` also avoid `$`, which compose treats as a variable.
 
-Generate a key with `openssl rand -hex 32` and compute its hash with
+`text-extraction-init --new-key <name> [--role user|admin]` prints a new key and the `API_KEYS`
+value for it (in the root compose file:
+`docker compose run --rm -T init text-extraction-init --new-key <name>`); it reads and writes no
+secret. By hand: generate a key with `openssl rand -hex 32` and compute its hash with
 `printf %s "$KEY" | sha256sum | cut -d' ' -f1`. Clients send the key as
 `Authorization: Bearer <key>`. Key names and hashes must be unique.
 

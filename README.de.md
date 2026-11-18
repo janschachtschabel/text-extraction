@@ -128,13 +128,20 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 ```
 
 Die Spielwiese liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter
-http://localhost:8080/mcp; Sie melden sich mit dem Schlüssel an. Der Docker Manager von Hostinger
-stellt dieselbe Datei über die URL dieses Repositorys bereit: siehe
+http://localhost:8080/mcp; Sie melden sich mit dem Schlüssel an. Dieselben Schritte für die
+Windows-PowerShell stehen unter
+[Veröffentlichte Images](docs/user-guide/de/installation.md#veröffentlichte-images). Der Docker
+Manager von Hostinger stellt dieselbe Datei über die URL dieses Repositorys bereit: siehe
 [Hostinger-VPS](docs/user-guide/de/installation.md#hostinger-vps).
-[Installation](docs/user-guide/de/installation.md) beschreibt HTTPS mit `DOMAIN`, eigene
-Schlüssel ([API-Schlüssel](docs/user-guide/de/usage.md#api-schlüssel)), das Bauen der Images mit
-`docker-compose.build.yml`, die lokale Einrichtung mit uv, die optionalen Worker (OCR,
-personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die wichtigsten Einstellungen.
+
+`--new-key <name>` statt `--show-admin-key` erzeugt einen weiteren Schlüssel (für eine andere
+Person oder mit der Rolle `user`) und gibt die Zeile für `API_KEYS` aus;
+[API-Schlüssel: anzeigen, erzeugen, eintragen](docs/user-guide/de/installation.md#api-schlüssel-anzeigen-erzeugen-eintragen)
+zeigt, wohin sie mit Docker, bei Hostinger und ohne Docker gehört.
+[Installation](docs/user-guide/de/installation.md) beschreibt außerdem HTTPS mit `DOMAIN`, das
+Bauen der Images mit `docker-compose.build.yml`, die lokale Einrichtung mit uv, die optionalen
+Worker (OCR, personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die wichtigsten
+Einstellungen.
 
 ## Aktualisieren
 

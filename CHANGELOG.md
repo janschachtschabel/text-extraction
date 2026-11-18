@@ -9,7 +9,21 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- `text-extraction-init --new-key NAME [--role user|admin]` prints a new API key and the matching
+  `API_KEYS` value, as a `.env` line and as a Docker panel value, so nobody computes a SHA-256 or
+  writes the JSON by hand. It reads and writes no secret and runs wherever the image or the package
+  runs (`docker compose run --rm -T init text-extraction-init --new-key anna`, Windows included).
+  The name `admin` is refused: the root compose file's generated key has it.
+
 ### Changed
+
+- Install guides (English and German): a section "API keys: show, create, enter" for docker
+  compose, Hostinger and other Docker panels (name and value fields), the setup without Docker and
+  Kubernetes, with Windows PowerShell commands, a key check and a troubleshooting table. The guide
+  says that `uv run` does not read `.env` and that the setup without Docker images needs Linux or
+  macOS (WSL 2 on Windows).
 
 - Valkey 8.1 → 9.1 everywhere: both compose files, the Helm chart default
   (`valkey.image.tag: 9.1-alpine`), the e2e and live workflows and the install guides

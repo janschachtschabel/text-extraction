@@ -179,3 +179,66 @@ def test_main_refuses_a_url_as_domain(
 
     assert exited.value.code == 1
     assert "DOMAIN" in capsys.readouterr().out
+
+
+def _new_key_output(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
+    with pytest.raises(SystemExit) as exited:
+        init_secrets.main(argv)
+    captured = capsys.readouterr()
+    return int(exited.value.code or 0), captured.out, captured.err
+
+
+def _value_after(label: str, out: str) -> str:
+    """The indented line that follows the line starting with ``label``."""
+    lines = out.splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith(label))
+    return lines[index + 1].strip()
+
+
+def test_new_key_prints_the_key_and_matching_api_keys_lines(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _new_key_output(["--secrets-dir", str(tmp_path), "--new-key", "jan"], capsys)
+
+    assert code == 0
+    key = _value_after("Key", out)
+    assert len(key) == 64
+    assert int(key, 16) >= 0
+    entry = {"name": "jan", "role": "user", "sha256": hashlib.sha256(key.encode()).hexdigest()}
+    env_line = _value_after(".env", out)
+    assert env_line.startswith("API_KEYS=[")
+    assert json.loads(env_line.removeprefix("API_KEYS=")) == [entry]
+    panel_value = _value_after("Docker panel", out)
+    assert panel_value.startswith("[")
+    keys = [ApiKey.model_validate(item) for item in json.loads(panel_value)]
+    assert [item.model_dump(exclude_none=True) for item in keys] == [entry]
+    assert list(tmp_path.iterdir()) == []  # touches no secret
+
+
+def test_new_key_admin_role(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = _new_key_output(["--new-key", "ops", "--role", "admin"], capsys)
+
+    assert code == 0
+    assert json.loads(_value_after("Docker panel", out))[0]["role"] == "admin"
+
+
+def test_two_new_keys_differ(capsys: pytest.CaptureFixture[str]) -> None:
+    _, first, _ = _new_key_output(["--new-key", "a"], capsys)
+    _, second, _ = _new_key_output(["--new-key", "b"], capsys)
+
+    assert _value_after("Key", first) != _value_after("Key", second)
+
+
+@pytest.mark.parametrize("name", ["admin", "", "two words", "x" * 65, 'quo"te'])
+def test_new_key_refuses_a_name(name: str, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, err = _new_key_output(["--new-key", name], capsys)
+
+    assert code == 2
+    assert out == ""
+    assert "name" in err
+
+
+def test_new_key_and_show_admin_key_exclude_each_other(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, _ = _new_key_output(["--new-key", "jan", "--show-admin-key"], capsys)
+
+    assert code == 2

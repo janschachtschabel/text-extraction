@@ -118,12 +118,18 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 ```
 
 The playground is at http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp;
-log in with the key. Hostinger's Docker Manager deploys the same file from this repository's URL:
-see [Hostinger VPS](docs/user-guide/en/installation.md#hostinger-vps).
-[Installation](docs/user-guide/en/installation.md) covers HTTPS with `DOMAIN`, your own keys
-([API keys](docs/user-guide/en/usage.md#api-keys)), building the images with
-`docker-compose.build.yml`, the local setup with uv, the optional workers (OCR, personal data,
-LLM, speech recognition), Kubernetes and the key settings.
+log in with the key. The same steps for Windows PowerShell are under
+[Published images](docs/user-guide/en/installation.md#published-images). Hostinger's Docker
+Manager deploys the same file from this repository's URL: see
+[Hostinger VPS](docs/user-guide/en/installation.md#hostinger-vps).
+
+`--new-key <name>` instead of `--show-admin-key` makes one more key (for another person, or with
+the role `user`) and prints the line for `API_KEYS`;
+[API keys: show, create, enter](docs/user-guide/en/installation.md#api-keys-show-create-enter)
+shows where it goes with Docker, on Hostinger and without Docker.
+[Installation](docs/user-guide/en/installation.md) also covers HTTPS with `DOMAIN`, building the
+images with `docker-compose.build.yml`, the local setup with uv, the optional workers (OCR,
+personal data, LLM, speech recognition), Kubernetes and the key settings.
 
 ## Updating
 

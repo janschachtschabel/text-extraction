@@ -12,7 +12,15 @@ covers files, audio and video, personal data and image descriptions, and the pla
 
 Every request sends an API key of the service as `Authorization: Bearer <key>`. The operator
 lists the keys in `API_KEYS` (or `API_KEYS_FILE`), each with a name, a role and the SHA-256 of the
-key, never the key itself:
+key, never the key itself. One command prints a new key with its entry, ready to paste;
+[API keys: show, create, enter](installation.md#api-keys-show-create-enter) shows where the entry
+goes:
+
+```bash
+docker compose run --rm -T init text-extraction-init --new-key anna --role user
+```
+
+By hand, with `openssl` and `sha256sum` (Linux, macOS, Git Bash on Windows):
 
 ```bash
 KEY=$(openssl rand -hex 32)                       # the key you send

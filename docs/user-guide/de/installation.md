@@ -2,10 +2,20 @@
 
 English: [Installation](../en/installation.md)
 
-Der Dienst läuft auf drei Arten: lokal mit uv (für die Entwicklung), mit Docker Compose (ein
-Rechner) und auf Kubernetes mit dem Helm-Chart. Jede Art braucht ein Valkey (oder Redis 7) für den
-gemeinsamen Zustand: Jobs, Ergebnisse, den Cache und die Ratenlimits. Der Dienst selbst speichert
-keinen Zustand.
+Der Dienst läuft auf drei Arten: mit Docker Compose (ein Rechner, der einfachste Weg), lokal mit
+uv (ohne Docker-Images, für die Entwicklung) und auf Kubernetes mit dem Helm-Chart. Jede Art braucht
+ein Valkey (oder Redis 7) für den gemeinsamen Zustand: Jobs, Ergebnisse, den Cache und die
+Ratenlimits. Der Dienst selbst speichert keinen Zustand.
+
+Jede Anfrage braucht einen API-Schlüssel des Dienstes (außer Sie schalten Schlüssel mit
+`AUTH_MODE=none` ab). Docker Compose legt den ersten für Sie an;
+[API-Schlüssel: anzeigen, erzeugen, eintragen](#api-schlüssel-anzeigen-erzeugen-eintragen) erklärt, wie Sie ihn sehen, weitere
+erzeugen und wo sie hingehören, für jeden Weg und unter Windows.
+
+Unter Windows läuft Docker Compose in [Docker Desktop](https://docs.docker.com/desktop/), in der
+PowerShell oder der Eingabeaufforderung. Der lokale Weg ohne Docker-Images braucht Linux oder
+macOS; unter Windows führen Sie ihn in [WSL 2](https://learn.microsoft.com/windows/wsl/install)
+(Ubuntu) aus, weil die Dokument-Worker Prozessgrenzen von Linux nutzen.
 
 ## Lokal mit uv
 
@@ -20,7 +30,9 @@ UI_ENABLED=true uv run text-extraction                      # terminal 1: API on
 INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extract worker (jobs)
 ```
 
-`AUTH_MODE=none` lässt jeden, der den Port erreicht, den Dienst nutzen: Verwenden Sie es nur auf
+`uv run` liest keine `.env`: Jedes Terminal nimmt seine Einstellungen aus der Shell, setzen Sie
+sie dort also mit `export` (oder schreiben Sie sie in eine Datei und führen Sie in jedem Terminal
+`set -a; . ./my.env; set +a` aus). `AUTH_MODE=none` lässt jeden, der den Port erreicht, den Dienst nutzen: Verwenden Sie es nur auf
 Ihrem eigenen Rechner und nur, solange Sie es brauchen. Er antwortet nur den Hostnamen aus
 `ALLOWED_HOSTS` (`localhost`, `127.0.0.1`, `[::1]` und `api`), sodass eine Webseite, die ihre
 eigene Domain auf Ihren Rechner zeigen lässt (DNS-Rebinding), abgewiesen wird. Jeder Prozess liest
@@ -30,6 +42,17 @@ eigenen `INTERNAL_PORT`. Der Browser-Worker braucht das Extra `browser` und Chro
 (`uv sync --extra browser`, dann `uv run playwright install chromium`); starten Sie ihn mit
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` und setzen Sie `BROWSER_ENABLED=true`
 für die API, den Extract-Worker und den Browser-Worker.
+
+Mit einem API-Schlüssel statt `AUTH_MODE=none` (etwa wenn andere Rechner den Port erreichen):
+
+```bash
+uv run text-extraction-init --new-key me --role admin   # prints a key and its API_KEYS line
+export API_KEYS='[{"name":"me","role":"admin","sha256":"<the sha256 it printed>"}]'  # in each terminal
+UI_ENABLED=true uv run text-extraction                  # log in to http://localhost:8080/ui with the key
+```
+
+Lassen Sie die einfachen Anführungszeichen um den Wert stehen: Sie bewahren die doppelten
+Anführungszeichen des JSON vor der Shell.
 
 Für die Entwicklung:
 
@@ -68,8 +91,22 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 Beim ersten Start legt der einmalige Dienst `init` die Geheimnisse im Volume `secrets` an und
 behält sie danach: das Valkey-Passwort und einen Admin-API-Schlüssel. Der Schlüssel steht einmal
-im Log von `init`; der Befehl mit `--show-admin-key` oben gibt ihn jederzeit aus. Eigene Schlüssel
-gehören wie bisher in `API_KEYS` in `.env` (siehe unten); sie gelten zusammen mit dem erzeugten.
+im Log von `init`; der Befehl mit `--show-admin-key` oben gibt ihn jederzeit aus. Weitere Schlüssel
+(für andere Personen oder mit der Rolle `user`) gehören in `API_KEYS` in `.env`; sie gelten
+zusammen mit dem erzeugten: siehe [API-Schlüssel: anzeigen, erzeugen, eintragen](#api-schlüssel-anzeigen-erzeugen-eintragen).
+
+In der Windows-PowerShell lauten dieselben Schritte:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --wait
+$KEY = docker compose run --rm -T init text-extraction-init --show-admin-key
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $KEY" } http://localhost:8080/v1/info
+Invoke-RestMethod -Method Post -Headers @{ Authorization = "Bearer $KEY" } `
+  -ContentType "application/json" -Body '{"url": "https://example.org/"}' `
+  http://localhost:8080/v1/extract
+```
+
 Der interne Port 9090 (`/health`, `/ready`, `/metrics`) wird nicht veröffentlicht. Die Spielwiese
 liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
 
@@ -96,14 +133,19 @@ braucht der Stack im Leerlauf etwa 6 GiB.
 1. Docker Manager, Compose, „Compose from URL“: `https://github.com/janschachtschabel/text-extraction`
    eintragen, den vorgeschlagenen Namen (`text-extraction`) übernehmen und bereitstellen. Die erste
    Bereitstellung lädt die Images und die Modelle (etwa 3 GB Modelle) und dauert einige Minuten.
-2. Die Logs des Projekts oder die Webkonsole öffnen und den Admin-Schlüssel aus dem Dienst `init`
-   nehmen (Ereignis `init_admin_key_created`).
+2. Den Admin-Schlüssel holen: in der Webkonsole (siehe unten)
+   `cd /docker/text-extraction && docker compose run --rm -T init text-extraction-init --show-admin-key`
+   ausführen, oder ihn in den Logs des Projekts beim Dienst `init` finden (Ereignis
+   `init_admin_key_created`, Feld `admin_key`).
 3. Das Projekt bearbeiten: `DOMAIN` in `.env` setzen (etwa den VPS-Hostnamen
    `srvNNNNNN.hstgr.cloud` oder Ihre eigene Domain mit einem A-Eintrag auf den VPS), wahlweise
    `API_PORT=127.0.0.1:8080`, dann erneut bereitstellen. Das Zertifikat holt Traefik selbst.
    Solange `DOMAIN` leer ist, zeigt das Traefik-Log einen Fehler zu einer leeren `Host()`-Regel:
    Der ist harmlos.
 4. `https://<DOMAIN>/ui` öffnen und mit dem Schlüssel anmelden.
+5. Wahlweise weitere Schlüssel: in der Webkonsole mit `--new-key` erzeugen und in den
+   Umgebungsvariablen des Projekts eintragen, wie [Hostinger und andere Docker-Oberflächen](#hostinger-und-andere-docker-oberflächen)
+   zeigt.
 
 Eine fehlgeschlagene Bereitstellung zeigt nur „Bereitstellung fehlgeschlagen“ oder „Projekt nicht
 gefunden“; die Webkonsole (eine Root-Shell) zeigt die eigentliche Meldung:
@@ -112,22 +154,26 @@ gefunden“; die Webkonsole (eine Root-Shell) zeigt die eigentliche Meldung:
 cat /docker/text-extraction/.build.log                 # the real error of a failed deploy
 cd /docker/text-extraction && docker compose logs init  # the admin key
 docker compose run --rm -T init text-extraction-init --show-admin-key
+docker compose logs api | tail -n 20                   # why the API does not start
 ```
 
 ### Aus dem Checkout bauen
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-KEY=$(openssl rand -hex 32)                    # your API key: keep it
-printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
+uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
 openssl rand -hex 24                           # a VALKEY_PASSWORD
 docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
-`API_KEYS` enthält den SHA-256 jedes Schlüssels, nie den Schlüssel selbst. `.env.example` hat einen
-Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; [API-Schlüssel](usage.md#api-schlüssel)
-erklärt die Schlüssel und ihre Rollen. Diese Datei hat keinen Dienst `init`: Sie braucht `API_KEYS`
-und `VALKEY_PASSWORD` in `.env`.
+Diese Datei hat keinen Dienst `init`: Sie braucht `API_KEYS` und `VALKEY_PASSWORD` in `.env`.
+Ersetzen Sie die Zeile `API_KEYS` in `.env` durch die Zeile, die `--new-key` ausgegeben hat, und
+behalten Sie den Schlüssel selbst für Ihre Anfragen und die Spielwiese. Ohne uv führen Sie den
+Befehl im Image aus, sobald es gebaut und `VALKEY_PASSWORD` gesetzt ist (ohne das lädt die Datei
+nicht):
+`docker compose -f docker-compose.build.yml run --rm --no-deps api text-extraction-init --new-key me --role admin`.
+Ein `VALKEY_PASSWORD` besteht nur aus Buchstaben und Ziffern. Ohne `openssl` (unter Windows bringt
+Git Bash es mit) erzeugt auch `python -c "import secrets; print(secrets.token_hex(24))"` eines.
 
 ### Optionale Worker
 
@@ -177,6 +223,122 @@ Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt h
 `BROWSER_UNBLOCK_ENABLED=true`. Das setzen docker compose und `.env.example` seit 0.1.9 (ein Admin
 muss weiterhin `compliance: ignore` wählen); `false` in `.env` schaltet es aus. Siehe
 [Website-Regeln](site-rules.md#maximale-extraktion).
+
+## API-Schlüssel: anzeigen, erzeugen, eintragen
+
+Der Dienst prüft jede Anfrage gegen eine Liste von Schlüsseln. Für jeden Schlüssel enthält die
+Liste einen Namen, eine Rolle und den SHA-256 des Schlüssels, nie den Schlüssel selbst: Es gibt
+also immer zwei Teile.
+
+- Der Schlüssel: 64 Buchstaben und Ziffern. Sie behalten ihn, senden ihn mit jeder Anfrage als
+  `Authorization: Bearer <key>` und melden sich damit an der Spielwiese an. Aus der Liste lässt er
+  sich nicht zurückgewinnen: Verloren ist verloren, dann erzeugen Sie einen neuen.
+- Sein Eintrag in `API_KEYS`: `[{"name":"jan","role":"user","sha256":"…"}]`, eine JSON-Liste
+  in den Einstellungen. Mehrere Schlüssel teilen sich eine Liste: `[{…},{…}]`.
+
+Die Rolle ist `user` oder `admin`: Ein Admin darf außerdem die Website-Regeln abschalten (und damit
+die maximale Extraktion nutzen), XPath-Selektoren und die Aktion `evaluate` verwenden und jeden Job
+lesen. [API-Schlüssel](usage.md#api-schlüssel) in der Anleitung zur Nutzung beschreibt die Rollen
+und die Fehlerantworten.
+
+### Den erzeugten Admin-Schlüssel anzeigen
+
+Die `docker-compose.yml` im Hauptordner legt beim ersten Start einen Admin-Schlüssel namens `admin`
+an und bewahrt ihn im Volume `secrets` auf. Dieser Befehl gibt ihn jederzeit aus, gleich in bash,
+PowerShell und der Webkonsole von Hostinger (dort zuerst `cd /docker/text-extraction`):
+
+```bash
+docker compose run --rm -T init text-extraction-init --show-admin-key
+```
+
+Für die meisten Einrichtungen mit einer Person genügt dieser Schlüssel. `docker compose down -v`
+löscht die Volumes und mit ihnen diesen Schlüssel (und die geladenen Modelle); der nächste Start
+legt einen neuen an.
+
+### Einen weiteren Schlüssel erzeugen
+
+`--new-key` gibt einen neuen Schlüssel und seinen Eintrag zum Einfügen aus; von sich aus ändert es
+nichts. Geben Sie jedem Schlüssel einen eigenen Namen (Buchstaben, Ziffern, `.`, `_` oder `-`;
+`admin` gehört dem erzeugten Schlüssel) und die Rolle, die er braucht, standardmäßig `user`:
+
+```bash
+docker compose run --rm -T init text-extraction-init --new-key anna                 # a user key
+docker compose run --rm -T init text-extraction-init --new-key jan --role admin     # an admin key
+uv run text-extraction-init --new-key anna                                          # without Docker
+```
+
+Die Antwort hat drei Teile (hier gekürzt):
+
+```text
+Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):
+  9f2c…
+.env line (docker compose; replace the API_KEYS line, then run docker compose up -d):
+  API_KEYS=[{"name":"anna","role":"user","sha256":"4be1…"}]
+Docker panel variable (such as Hostinger): name API_KEYS, value:
+  [{"name":"anna","role":"user","sha256":"4be1…"}]
+More than one key: put every entry, comma-separated, into one list: [{...},{...}]
+```
+
+Legen Sie den Schlüssel jetzt sicher ab: Er wird nirgends gespeichert. `--new-key` braucht Version
+`0.1.13` oder neuer; ohne den Befehl (ältere Images) zeigt [API-Schlüssel](usage.md#api-schlüssel),
+wie Sie einen Schlüssel mit `openssl` erzeugen.
+
+### Den Schlüssel eintragen
+
+| Wo der Dienst läuft | Was zu tun ist |
+| --- | --- |
+| `docker compose` (beide Dateien) | `.env` in einem Texteditor öffnen, die ganze Zeile, die mit `API_KEYS=` beginnt, durch die ausgegebene `.env`-Zeile ersetzen, speichern, `docker compose up -d --wait` ausführen (mit `-f docker-compose.build.yml` für die Build-Datei). |
+| Hostinger und andere Docker-Oberflächen | Siehe [unten](#hostinger-und-andere-docker-oberflächen). |
+| `uv run` ohne Docker | `export API_KEYS='[…]'` mit dem ausgegebenen Wert in jedem Terminal, dann die Prozesse neu starten. |
+| Kubernetes | Der Wert gehört in `secrets.apiKeys` (oder Ihr eigenes Secret), siehe [Helm-Chart](../../../deploy/helm/text-extraction/README.md) (Englisch). |
+
+Für mehrere Schlüssel enthält die Zeile eine Liste mit allen Einträgen, zum Beispiel
+`API_KEYS=[{"name":"anna","role":"user","sha256":"…"},{"name":"jan","role":"admin","sha256":"…"}]`.
+Halten Sie sie in einer Zeile und ohne Anführungszeichen um die Liste. Der erzeugte Schlüssel
+`admin` steht nicht in dieser Liste (er kommt aus dem Volume) und gilt weiter. Um einen Schlüssel zu
+entziehen, entfernen Sie seinen Eintrag und führen `docker compose up -d --wait` erneut aus.
+
+Compose gibt `.env` nur beim Anlegen der Container weiter: `docker compose up -d` tut das nach
+einer Änderung, `docker compose restart` behält dagegen die alten Werte.
+
+### Hostinger und andere Docker-Oberflächen
+
+1. Den Schlüssel in der Webkonsole des VPS (einer Root-Shell) erzeugen:
+   `cd /docker/text-extraction && docker compose run --rm -T init text-extraction-init --new-key anna`.
+2. Docker Manager, das Projekt, „Bearbeiten“ (Umgebungsvariablen): eine Variable hinzufügen.
+   - Name: `API_KEYS`
+   - Wert: die Zeile unter „Docker panel variable“, die mit `[` beginnt. Nicht die
+     `.env`-Zeile: `API_KEYS=` im Feld Wert lässt den Namen doppelt erscheinen, und jeder Dienst
+     bricht mit „API_KEYS must be a JSON list“ ab.
+3. Erneut bereitstellen. Die Variablen landen in `.env`, und die Container starten mit der neuen
+   Liste.
+
+Gibt es schon eine Variable `API_KEYS` (aus `.env.example`, mit Nullen als Hash), ersetzen Sie
+ihren Wert, statt eine zweite anzulegen.
+
+### Den Schlüssel prüfen
+
+```bash
+curl -H "Authorization: Bearer <key>" http://localhost:8080/v1/info
+```
+
+```powershell
+Invoke-RestMethod -Headers @{ Authorization = "Bearer <key>" } http://localhost:8080/v1/info
+```
+
+Die Antwort nennt die `role` des Schlüssels. In Windows PowerShell 5 ist `curl` ein anderer
+Befehl: Nehmen Sie `curl.exe` oder `Invoke-RestMethod`. Hinter einer Domain nehmen Sie
+`https://<DOMAIN>` statt `http://localhost:8080`.
+
+### Wenn es nicht klappt
+
+| Was Sie sehen | Ursache und Abhilfe |
+| --- | --- |
+| 401 `unauthorized` | Der Schlüssel passt zu keinem Eintrag: erneut kopieren, ohne Leerzeichen. Nach einer Änderung von `.env` `docker compose up -d --wait` ausführen (ein Neustart behält die alte Liste). |
+| Die API startet nicht, ihr Log sagt `API_KEYS must be a JSON list` | Der Wert ist keine reine Liste: Er beginnt mit `API_KEYS=` (Feld Wert einer Oberfläche), steht in einem Feld in Anführungszeichen oder geht über mehrere Zeilen. |
+| Das Log sagt `duplicate API key name` | Zwei Einträge haben denselben Namen, oder einer heißt `admin` neben dem erzeugten Schlüssel: umbenennen (bei `--new-key` einen anderen Namen wählen). |
+| Das Log sagt `AUTH_MODE=api_key requires API_KEYS or API_KEYS_FILE` | Es gibt gar keinen Schlüssel: einen eintragen, oder die `docker-compose.yml` im Hauptordner nehmen, die einen anlegt. |
+| Der Schlüssel ist verloren | Einen eigenen Schlüssel kann niemand zurückholen: einen neuen erzeugen und seinen Eintrag ersetzen. Den erzeugten Admin-Schlüssel: `--show-admin-key`. |
 
 ## Kubernetes mit Helm
 
