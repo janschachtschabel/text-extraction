@@ -1,0 +1,15 @@
+{#- The site run (package 23): what the site-structure form answers once its job is accepted. The
+live tree takes the place of the wrapper at once (hx-trigger load) and refreshes itself while the
+job runs; until the first answer the head says the job is queued. The section is the tree's host:
+the tree's cancel answer replaces its content. -#}
+<section class="site-run tree-host jobs-view" aria-label="{{ t('tree.label') }}" tabindex="-1">
+  <div class="tree-live-wrapper" data-tree-live="{{ refresh_seconds }}" data-refresh hx-get="{{ refresh_url }}" hx-trigger="load" hx-swap="outerHTML">
+    <section class="tree-view" aria-label="{{ t('tree.label') }}" data-announce="{{ t('status.job', id=job_id, state=t(state_text('queued'))) }}">
+      <div class="tree-head-line">
+        <h3 class="tree-title">{{ t("tree.title", id=code(job_id)) }}</h3>
+        <span class="state state-queued" data-value="queued">{{ t(state_text("queued")) }}</span>
+      </div>
+      <p class="tree-starting">{{ t("tree.starting") }}</p>
+    </section>
+  </div>
+</section>

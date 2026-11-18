@@ -11,12 +11,49 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
 {%- if refresh_url %}
 <div class="tree-live-wrapper" data-tree-live="{{ refresh_seconds }}" data-refresh hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ refresh_seconds }}s" hx-swap="outerHTML">
 {%- endif %}
-<section class="tree-view" aria-label="{{ t('tree.label') }}">
-  <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
+{#- The head carries the job's state (package 23): data-announce says it, and ui.js writes it to
+#ui-status only when a refresh changes it. The cancel answer replaces the whole tree host (the
+site run, or the progress view's detail area), so no refresh brings the tree back. #}
+{%- set state_label = t(state_text(job_state)) if state_text(job_state) else (job_state or "") %}
+<section class="tree-view" aria-label="{{ t('tree.label') }}"{% if job_state %} data-announce="{{ t('status.job', id=job_id, state=state_label) }}"{% endif %}>
+  <div class="tree-head-line">
+    <h3 class="tree-title">{{ t("tree.title", id=code(job_id)) }}</h3>
+    {%- if job_state %}
+    <span class="state state-{{ job_state }}" data-value="{{ job_state }}">{{ state_label }}</span>
+    {%- endif %}
+    {%- if cancel %}
+    <form class="cancel tree-cancel" hx-post="/ui/run/cancel" hx-target="closest .tree-host" hx-swap="innerHTML" hx-confirm="{{ t('progress.cancel_confirm') }}">
+      <input type="hidden" name="id" value="{{ job_id }}">
+      <button type="submit" id="tree-{{ job_id }}-cancel" class="secondary">{{ t("progress.cancel") }}</button>
+    </form>
+    {%- endif %}
+  </div>
+  {%- if job_state %}
+  <p class="tree-progress">
+    {%- if cancel %}{{ t("tree.progress_running", done=progress.done, total=progress.total, elapsed=progress.elapsed) }}
+    {%- elif duration is not none %}{{ t("tree.duration", seconds=duration) }}{% endif %}
+    {%- if progress.failed %} · <span class="fetches-failed">{{ tn("tree.fetches_failed", progress.failed) }}</span>{% endif %}</p>
+  {%- endif %}
+  {#- The single fetches (package 23, D1): loaded when the fold first opens, kept with its state
+  and content across a refresh of the tree (hx-preserve by id). Outside the tree's form: an item's
+  result holds a form of its own. #}
+  <details class="fold tree-fetches" id="tree-{{ job_id }}-fetches" hx-preserve>
+    <summary>{{ t("tree.fetches") }}</summary>
+    <div hx-get="/ui/run/progress?id={{ job_id }}&amp;items=1" hx-trigger="toggle once from:closest details" hx-swap="innerHTML"><p class="hint">{{ t("tree.fetches_hint") }}</p></div>
+  </details>
+  {%- if not tree.roots %}
+  {%- if cancel %}
+  <p class="tree-starting">{{ t("tree.starting") }}</p>
+  {%- else %}
+  <p class="tree-empty">{{ t("tree.empty") }}</p>
+  {%- endif %}
+  {%- endif %}
   {% if snapshot %}<p class="hint tree-snapshot">{{ t("tree.snapshot") }}</p>{% endif %}
   {#- ui.js shows this note and hides the snapshot note: without it nothing refreshes. #}
   {% if refresh_url %}<p class="hint tree-live" hidden>{{ t("tree.live") }}</p>{% endif %}
-  <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if duration is not none %} · {{ t("tree.duration", seconds=duration) }}{% endif %}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  {%- if tree.roots %}
+  <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  {%- endif %}
   {%- if tree.blocked %}
   {#- The note names only the "Site rules" steps this caller is offered that let a blocked URL
   be selected (third audit U4): none when there is no choice. #}
@@ -119,7 +156,7 @@ aria-live: a refresh announces nothing. Without ui.js and htmx nothing refreshes
     {%- if tree.social %}
     {#- Links out of the site: listed, never selectable. #}
     <section class="tree-social" aria-labelledby="tree-{{ job_id }}-social">
-      <h5 id="tree-{{ job_id }}-social">{{ t("tree.social_title") }}</h5>
+      <h4 id="tree-{{ job_id }}-social">{{ t("tree.social_title") }}</h4>
       <p class="hint">{{ t("tree.social_hint") }}</p>
       <ul>
         {%- for link in tree.social %}

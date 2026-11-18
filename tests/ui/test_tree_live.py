@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
-from tests.ui.conftest import run, running
+from tests.ui.conftest import running
 from tests.ui.site_items import page_item, sitemap_item
 from tests.ui.test_jobs_views import (
     HEADERS,
@@ -82,7 +82,8 @@ def test_a_finished_jobs_tree_has_neither(
 ) -> None:
     root = site_tree(client, monkeypatch, state="completed", live=True)
 
-    assert root.xpath("//*[@hx-trigger]") == []
+    # The fold of single fetches loads on its first opening (package 23), nothing refreshes.
+    assert root.xpath("//*[@hx-trigger]/@hx-trigger") == ["toggle once from:closest details"]
     assert root.xpath("//*[@data-tree-live]") == []
     assert root.xpath("//p[contains(@class, 'tree-live')]") == []
 
@@ -111,13 +112,6 @@ def test_the_tree_button_of_a_site_job_with_results_may_load_the_tree(
 
     assert button.get("data-tree-auto") is not None
     assert button.get("hx-get") == f"/ui/run/site-tree?id={JOB}"
-
-
-def test_the_tree_button_of_a_job_without_results_does_not(client: TestClient) -> None:
-    html = run(client, "site-structure", url=f"{ORIGIN}/", depth="1").text
-
-    [button] = tree(html).xpath("//button[contains(@class, 'tree-button')]")
-    assert button.get("data-tree-auto") is None
 
 
 def fresh(items: list[JobItem]) -> Callable[[int, int], list[JobItem]]:
