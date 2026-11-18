@@ -52,6 +52,7 @@ _TAGS = (
     ("/v1/screenshot", "extraction"),
     ("/v1/extract", "extraction"),
     ("/v1/info", "service"),
+    ("/v1/search", "search"),
 )
 
 

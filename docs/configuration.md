@@ -812,10 +812,10 @@ hits; the caller extracts the ones it wants. SearXNG must have the `json` format
 | `SEARCH_ENABLED` | `false` | Serve the search route and tool. Off: `400` `invalid_request`. The root compose files switch it on together with their `searxng` service; Helm: `searxng.enabled`. |
 | `SEARCH_URL` | `http://searxng:8080` | Base URL of SearXNG (http or https with a host; a trailing slash is dropped). It is the operator's endpoint, so the SSRF guard does not apply to it. Anything else makes the service exit with code 2. |
 | `SEARCH_TIMEOUT_SECONDS` | `10` | Time a search may take before it answers `failed` / `search_failed`, retryable. 1 to 120. |
-| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`. 1 to 200. |
+| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`; more is `422`. 1 to 200. |
 | `SEARCH_CACHE_SECONDS` | `3600` | How long a finished search (`success` only; a `partial` answer is asked again) is kept in Valkey, per query, language, page, time range, sources and `max_results`. 0 turns the cache off. 0 to 86400. |
-| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources`, as a comma list; a request without `sources` uses all of them. |
-| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys. |
+| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources` (in any case; another name is `422`, its message lists these), as a comma list; a request without `sources` uses all of them. |
+| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys; a user key gets `403` `forbidden`. |
 
 ## UI
 

@@ -54,6 +54,12 @@ def offered_features(
     return offered, admin_only
 
 
+def search_offered(role: str | None, settings: Settings) -> bool:
+    """Whether a key of ``role`` can search: ``SEARCH_ENABLED`` and, for a user key,
+    ``SEARCH_ALLOW_USERS``."""
+    return settings.search_enabled and allowed("search", role, settings)
+
+
 class InfoFeatures(BaseModel):
     """What the caller's key can use on this service."""
 
@@ -80,6 +86,10 @@ class InfoFeatures(BaseModel):
         "for `ignore` needs an admin key)."
     )
     compliance_default: ComplianceMode = Field(description="The mode without a request.")
+    search: bool = Field(
+        description="Web search: `POST /v1/search` (`SEARCH_ENABLED`; user keys while "
+        "`SEARCH_ALLOW_USERS`)."
+    )
 
 
 class InfoLimits(BaseModel):
@@ -101,6 +111,10 @@ class InfoLimits(BaseModel):
     )
     rate_limit_per_minute: int | None = Field(
         description="Requests per minute of the key; null while rate limiting is off."
+    )
+    search_max_results: int | None = Field(
+        description="Most `max_results` of a web search (`SEARCH_MAX_RESULTS`); null when the "
+        "key cannot search."
     )
 
 
@@ -134,6 +148,7 @@ def _features(
         site_structure=settings.jobs_enabled,
         compliance_choice=admin or settings.compliance_allow_override,
         compliance_default=settings.compliance_default,
+        search=search_offered(principal.role, settings),
     )
 
 
@@ -153,6 +168,9 @@ def _limits(
         media_upload_max_bytes=(settings.media_upload_max_bytes if offered["transcribe"] else None),
         request_max_body_bytes=settings.request_max_body_bytes,
         rate_limit_per_minute=rate if settings.rate_limit_enabled else None,
+        search_max_results=(
+            settings.search_max_results if search_offered(principal.role, settings) else None
+        ),
     )
 
 

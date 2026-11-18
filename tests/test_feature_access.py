@@ -1,5 +1,6 @@
 """Optional features kept for admin keys (package 19, P19-D1 b, ruling P19-R4):
-``OCR_ALLOW_USERS``, ``PII_ALLOW_USERS``, ``LLM_ALLOW_USERS``, ``ASR_ALLOW_USERS``."""
+``OCR_ALLOW_USERS``, ``PII_ALLOW_USERS``, ``LLM_ALLOW_USERS``, ``ASR_ALLOW_USERS``; and
+``SEARCH_ALLOW_USERS`` (package 25)."""
 
 import hashlib
 from collections.abc import Iterator
@@ -41,12 +42,14 @@ ALL_ON: dict[str, Any] = {
     "pii_enabled": True,
     "llm_enabled": True,
     "asr_enabled": True,
+    "search_enabled": True,
 }
 NONE_FOR_USERS: dict[str, Any] = {
     "ocr_allow_users": False,
     "pii_allow_users": False,
     "llm_allow_users": False,
     "asr_allow_users": False,
+    "search_allow_users": False,
 }
 
 
@@ -93,7 +96,7 @@ def test_switches_default_to_true(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_admins_may_always_users_while_allowed() -> None:
     closed = settings(**NONE_FOR_USERS)
-    for feature in ("ocr", "pii", "llm", "asr"):
+    for feature in ("ocr", "pii", "llm", "asr", "search"):
         assert allowed(feature, "admin", closed)
         assert not allowed(feature, "user", closed)
         assert not allowed(feature, None, closed)
@@ -109,6 +112,17 @@ def test_settings_for_switches_off_what_the_key_may_not_use() -> None:
     assert not llm_available(seen)
     assert (seen.docling_enabled, seen.pii_enabled, seen.asr_enabled) == (True, True, True)
     assert llm_available(closed)  # the service's own settings are unchanged
+
+
+def test_settings_for_switches_search_off_without_jobs_too() -> None:
+    # Search runs in the API, not on the job workers: JOBS_ENABLED does not matter to it.
+    workers_off = {name: False for name in ALL_ON if name != "search_enabled"}
+    closed = settings(search_allow_users=False, jobs_enabled=False, **workers_off)
+    assert settings_for(closed, USER).search_enabled is False
+    assert settings_for(closed, ADMIN).search_enabled is True
+    with pytest.raises(ServiceError) as caught:
+        check_feature_access(USER, closed, search=True)
+    assert caught.value.message == "Web search is for admin keys only on this service."
 
 
 # --- the explicit requests ----------------------------------------------------------------------
@@ -132,6 +146,7 @@ EXPLICIT: list[tuple[str, dict[str, Any]]] = [
     ),
     ("llm", {"chunking": ChunkingOptions.model_validate({"strategy": "semantic"})}),
     ("llm", {"describe": DescribeImagesOptions()}),
+    ("search", {"search": True}),
 ]
 
 
@@ -151,7 +166,12 @@ def test_an_explicit_request_is_403_for_a_user(feature: str, asked: dict[str, An
 def test_a_switched_off_feature_is_left_to_its_own_check(
     feature: str, asked: dict[str, Any]
 ) -> None:
-    enabled = {"ocr": "docling_enabled", "pii": "pii_enabled", "llm": "llm_enabled"}
+    enabled = {
+        "ocr": "docling_enabled",
+        "pii": "pii_enabled",
+        "llm": "llm_enabled",
+        "search": "search_enabled",
+    }
     off = settings(**{f"{feature}_allow_users": False, enabled.get(feature, "asr_enabled"): False})
     check_feature_access(USER, off, **asked)  # no 403: the feature's own 400 answers
 

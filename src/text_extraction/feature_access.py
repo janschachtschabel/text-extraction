@@ -1,15 +1,16 @@
 """Which optional features a key may use (package 19, decision P19-D1 b).
 
-``OCR_ALLOW_USERS``, ``PII_ALLOW_USERS``, ``LLM_ALLOW_USERS`` and ``ASR_ALLOW_USERS`` (default
-true) keep a feature for admin keys and refuse it to user keys, after the pattern of
-``COMPLIANCE_ALLOW_OVERRIDE``. A feature that is switched off (``*_ENABLED``) is off for every
-key; its own checks answer 400 for it, so ``check_feature_access`` leaves it to them.
+``OCR_ALLOW_USERS``, ``PII_ALLOW_USERS``, ``LLM_ALLOW_USERS``, ``ASR_ALLOW_USERS`` and
+``SEARCH_ALLOW_USERS`` (default true) keep a feature for admin keys and refuse it to user keys,
+after the pattern of ``COMPLIANCE_ALLOW_OVERRIDE``. A feature that is switched off
+(``*_ENABLED``) is off for every key; its own checks answer 400 for it, so
+``check_feature_access`` leaves it to them.
 
 What a user key may not use (ruling P19-R4):
 
 - **Asked for explicitly:** 403 ``forbidden`` before anything runs: ``ocr: always``, ``pii``,
   ``transcribe: true``, an audio or video upload, strategy ``llm``, ``learn_selectors``,
-  ``describe_images`` and ``semantic`` chunking.
+  ``describe_images``, ``semantic`` chunking and a web search (``POST /v1/search``).
 - **Used implicitly:** the request runs as if the feature were off. A document that needs OCR
   under ``ocr: auto`` gets no hand-off to the Docling workers (``Pipeline._ocr_kept``): its text
   layer with ``ocr_unavailable``, or for an image the 403 text as its ``unsupported_content_type``
@@ -38,13 +39,14 @@ __all__ = [
     "settings_for",
 ]
 
-Feature = Literal["ocr", "pii", "llm", "asr"]
+Feature = Literal["ocr", "pii", "llm", "asr", "search"]
 
 _NAMES: Final[dict[Feature, str]] = {
     "ocr": "OCR",
     "pii": "PII handling",
     "llm": "The LLM",
     "asr": "Transcription",
+    "search": "Web search",
 }
 # The switch that turns each feature on, for every key.
 _ENABLED: Final[dict[Feature, str]] = {
@@ -52,7 +54,11 @@ _ENABLED: Final[dict[Feature, str]] = {
     "pii": "pii_enabled",
     "llm": "llm_enabled",
     "asr": "asr_enabled",
+    "search": "search_enabled",
 }
+# The features that run on the job workers, so the service has them only with JOBS_ENABLED. Web
+# search runs in the API process.
+_ON_WORKERS: Final[frozenset[Feature]] = frozenset({"ocr", "pii", "llm", "asr"})
 
 
 def forbidden_message(feature: Feature) -> str:
@@ -61,8 +67,10 @@ def forbidden_message(feature: Feature) -> str:
 
 
 def _available(feature: Feature, settings: Settings) -> bool:
-    """Whether the service has the feature at all: its switch and the jobs it runs as."""
-    return bool(getattr(settings, _ENABLED[feature])) and settings.jobs_enabled
+    """Whether the service has the feature at all: its switch and, for a feature that runs on
+    the job workers, the jobs it runs as."""
+    on = bool(getattr(settings, _ENABLED[feature]))
+    return on and (settings.jobs_enabled or feature not in _ON_WORKERS)
 
 
 def allowed(feature: Feature, role: str | None, settings: Settings) -> bool:
@@ -119,15 +127,18 @@ def check_feature_access(
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
     describe: DescribeImagesOptions | None = None,
+    search: bool = False,
 ) -> None:
     """403 ``forbidden`` when a user key asks explicitly for a feature the service keeps for
     admin keys (the module docstring). ``media_upload``: the upload is audio or video, which is
-    always transcribed. A feature the service does not have is left to its own 400."""
+    always transcribed; ``search``: the request is a web search. A feature the service does not
+    have is left to its own 400."""
     asked: list[tuple[Feature, bool]] = [
         ("ocr", ocr == "always"),
         ("pii", pii is not None),
         ("asr", transcribe or media_upload),
         ("llm", _asks_llm(structured, chunking, describe)),
+        ("search", search),
     ]
     for feature, wanted in asked:
         if (
