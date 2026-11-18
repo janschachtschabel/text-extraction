@@ -21,6 +21,7 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Final, cast
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import lxml.html
@@ -201,6 +202,25 @@ def wait_completed(ui: httpx.Client, ids: list[str]) -> Any:
             assert fragment.xpath("//div[@class='progress-live']")[0].get("hx-trigger") is None
             return fragment
         assert time.monotonic() < deadline, states
+        time.sleep(0.2)
+
+
+def site_run_id(fragment: Any) -> str:
+    """The job id of a site run (package 23): its live wrapper loads the job's tree."""
+    [url] = fragment.xpath("//section[contains(@class, 'site-run')]/div[@data-tree-live]/@hx-get")
+    return str(parse_qs(urlsplit(str(url)).query)["id"][0])
+
+
+def wait_tree(ui: httpx.Client, job_id: str) -> Any:
+    """Refresh the site run's tree as the page does until its job is completed; the last tree."""
+    deadline = time.monotonic() + DONE_WITHIN_SECONDS
+    while True:
+        fragment = get(ui, "/ui/run/site-tree", id=job_id, live="1")
+        state = fragment.xpath("//section[@class='tree-view']//span[contains(@class, 'state')]")
+        if state and state[0].get("data-value") == "completed":
+            assert fragment.xpath("//*[@data-tree-live]") == []  # refreshing stops
+            return fragment
+        assert time.monotonic() < deadline
         time.sleep(0.2)
 
 
@@ -431,16 +451,13 @@ def test_batches_site_tree_and_cancel(
         scope="host",
         sitemaps="on",
     )
-    [site_id] = job_ids(site)
+    site_id = site_run_id(site)
     [site_call] = calls_of(forwarded, "site-structure")
     assert (site_call.view, site_call.status) == ("/ui/run/site-structure", 202)
     assert site_call.body is not None
     assert (site_call.body["status"], site_call.body["data"]["id"]) == ("success", site_id)
     assert site_call.body["data"]["kind"] == "site"
-    crawled = wait_completed(ui, [site_id])
-    assert texts(crawled, f"//section[@data-job='{site_id}']//span[@class='kind']") == ["site"]
-    tree_url = crawled.xpath("//button[contains(@class, 'tree-button')]")[0].get("hx-get")
-    site_tree = get(ui, tree_url)
+    site_tree = wait_tree(ui, site_id)
     checkable = set(site_tree.xpath("//ul[@class='tree']//input[@name='url']/@value"))
     assert {f"{origin}/", *urls} <= checkable
     # Page types (package 14): a badge per typed page, none for the imprint (a 404: its page

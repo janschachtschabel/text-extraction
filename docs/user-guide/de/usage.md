@@ -445,13 +445,12 @@ sagt die Seite das und verweist auf den `curl`-Befehl. Die Tabs:
   eigenen LLM-Schlüssel hat, damit Sie Ihren eingeben.
 - **Batch**: URLs, eine pro Zeile. **Batch-Datei**: eine CSV- oder JSON-Datei mit URLs, zuerst auf
   dem Server geprüft, mit einer Vorschau vor „Batch starten“.
-- **Website-Struktur**: startet einen Crawl; wenn er abgeschlossen ist, listet „Als Baum
-  anzeigen“ seine Seiten nach Host und Pfad (der Baum erscheint auch von selbst, sobald der Job ein
-  Ergebnis hat, und aktualisiert sich, solange er läuft; „Baum jetzt anzeigen“ zeigt eine
-  Momentaufnahme), mit einem Kontrollkästchen pro Seite und pro Abschnitt, und „Auswahl
-  extrahieren“ startet Batches der markierten URLs.
+- **Website-Struktur**: startet einen Crawl und zeigt seinen Baum sofort, nach Host und Pfad, der
+  wächst, solange er läuft, mit dem Zustand des Jobs und „Abbrechen“ im Kopf des Baums und den
+  einzelnen Abrufen in einem Bereich darunter zum Aufklappen; ein Kontrollkästchen pro Seite und
+  pro Abschnitt, und „Auswahl extrahieren“ startet Batches der markierten URLs.
 
-Jeder Job, der in der Spielwiese gestartet wurde, zeigt seinen Zustand, einen Fortschrittsbalken und
+Jeder andere Job, der in der Spielwiese gestartet wurde, zeigt seinen Zustand, einen Fortschrittsbalken und
 seine Einträge, aktualisiert sich alle 3 s, bis er abgeschlossen ist, und hat eine Schaltfläche
 „Abbrechen“.
 

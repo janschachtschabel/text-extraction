@@ -1,6 +1,6 @@
 """The site tree refreshes itself while its job runs (package 18): a running job's tree sits in
 a wrapper that fetches the tree again every ``TREE_REFRESH_SECONDS``, a finished job's tree does
-not; the progress view's tree button says when it may load the tree by itself; the rule
+not; the rule
 judgement is reused for 30 s per job and origin set (a bounded in-process memo, derived data
 only)."""
 
@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
-from tests.ui.conftest import run, running
+from tests.ui.conftest import running
 from tests.ui.site_items import page_item, sitemap_item
 from tests.ui.test_jobs_views import (
     HEADERS,
@@ -82,7 +82,8 @@ def test_a_finished_jobs_tree_has_neither(
 ) -> None:
     root = site_tree(client, monkeypatch, state="completed", live=True)
 
-    assert root.xpath("//*[@hx-trigger]") == []
+    # The fold of single fetches loads on its first opening (package 23), nothing refreshes.
+    assert root.xpath("//*[@hx-trigger]/@hx-trigger") == ["toggle once from:closest details"]
     assert root.xpath("//*[@data-tree-live]") == []
     assert root.xpath("//p[contains(@class, 'tree-live')]") == []
 
@@ -104,20 +105,15 @@ def tree_button(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Any:
     return button
 
 
-def test_the_tree_button_of_a_site_job_with_results_may_load_the_tree(
+def test_the_tree_button_of_a_site_job_loads_the_tree_on_a_click(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The site run shows the tree at once (package 23); a site job in the progress view keeps
+    a plain button, which loads nothing by itself."""
     button = tree_button(client, monkeypatch)
 
-    assert button.get("data-tree-auto") is not None
-    assert button.get("hx-get") == f"/ui/run/site-tree?id={JOB}"
-
-
-def test_the_tree_button_of_a_job_without_results_does_not(client: TestClient) -> None:
-    html = run(client, "site-structure", url=f"{ORIGIN}/", depth="1").text
-
-    [button] = tree(html).xpath("//button[contains(@class, 'tree-button')]")
     assert button.get("data-tree-auto") is None
+    assert button.get("hx-get") == f"/ui/run/site-tree?id={JOB}"
 
 
 def fresh(items: list[JobItem]) -> Callable[[int, int], list[JobItem]]:

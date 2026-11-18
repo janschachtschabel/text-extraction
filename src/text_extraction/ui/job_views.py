@@ -158,7 +158,6 @@ class JobPanel:
     next_url: str | None = None
     tree_url: str | None = None
     tree_label: Message | None = None
-    tree_auto: bool = False  # ui.js may load the tree by itself: the job has a result already
     error: Message | None = None
     error_detail: str | None = None
     retryable: bool = False
@@ -179,6 +178,7 @@ class _Shown:
     offsets: list[int]
     mode: RequestedMode | None
     limit: int = PAGE_ITEMS  # items per job and page
+    items_only: bool = False  # the site tree's fold of single fetches (package 23)
 
     def url(self, *, offsets: Sequence[int] | None = None) -> str:
         """The live view's URL (with ``offsets`` instead of the view's own)."""
@@ -186,6 +186,8 @@ class _Shown:
         query += [("offset", str(offset)) for offset in offsets or self.offsets]
         if self.mode is not None:
             query.append(("mode", self.mode))
+        if self.items_only:
+            query.append(("items", "1"))
         query.append(("live", "1"))
         return f"{RUN_PREFIX}/progress?{urlencode(query)}"
 
@@ -253,7 +255,6 @@ def _panel(view: JobView, shown: _Shown, position: int) -> JobPanel:
     if view.kind == "site":
         panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': view.id})}"
         panel.tree_label = SHOW_TREE if view.state == "completed" else SHOW_TREE_NOW
-        panel.tree_auto = progress.done >= 1
     return panel
 
 
@@ -266,9 +267,6 @@ def _accepted_panel(job: JobAccepted) -> JobPanel:
         total=job.total,
         elapsed=Message("progress.seconds", {"seconds": 0}),
     )
-    if job.kind == "site":
-        panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': job.id})}"
-        panel.tree_label = SHOW_TREE_NOW
     return panel
 
 
@@ -305,6 +303,7 @@ def _live_context(
     running = any(panel.running for panel in panels) or refused is not None
     return {
         "jobs": panels,
+        "items_only": shown.items_only,
         "refresh_url": shown.url() if running else None,
         "delay": max(delay, REFRESH_SECONDS),
         "refusal": (
@@ -350,7 +349,8 @@ async def progress_view(request: Request, settings: Settings) -> Response:
     hit, however many jobs it shows. One view reads at most ``ITEMS_PER_VIEW`` items (fewer per
     job when it shows more than five), ``READS_AT_ONCE`` jobs at a time, and keeps only the
     panels' fields of each. ``live=1`` answers the refreshing part only (the refresh and the
-    pager); without it the whole view."""
+    pager); without it the whole view. ``items=1`` shows the items, the pager and the detail
+    area only: the site tree's fold of single fetches (package 23)."""
     params = request.query_params
     given = params.getlist("id")
     offsets = [_offset(value) for value in params.getlist("offset")]
@@ -361,7 +361,11 @@ async def progress_view(request: Request, settings: Settings) -> Response:
     ids = list(first)
     limit = min(PAGE_ITEMS, max(MIN_PAGE_ITEMS, ITEMS_PER_VIEW // max(1, len(ids))))
     shown = _Shown(
-        ids=ids, offsets=list(first.values()), mode=_mode(params.get("mode")), limit=limit
+        ids=ids,
+        offsets=list(first.values()),
+        mode=_mode(params.get("mode")),
+        limit=limit,
+        items_only=params.get("items") == "1",
     )
     live = params.get("live") == "1"
     if not ids:
@@ -621,7 +625,8 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
 
 async def site_structure_view(request: Request) -> Response:
     """``POST /ui/run/site-structure``: forwards the form to ``POST /v1/site-structure``; a 202
-    shows the job's progress, anything else the REST answer."""
+    opens the site run (package 23: the live tree with the job's state in its head), anything
+    else shows the REST answer."""
     try:
         await authenticate(request)  # before the form is parsed; the forward checks it again
     except ServiceError as error:
@@ -641,7 +646,14 @@ async def site_structure_view(request: Request) -> Response:
     answer = await forward(request, "POST", path, json=body)
     data = (answer.body or {}).get("data")
     if answer.status == 202 and isinstance(data, dict):
-        return _started(request, [JobAccepted.model_validate(data)], None)
+        job = JobAccepted.model_validate(data)
+        context = {
+            "job_id": job.id,
+            "job_state": job.state,
+            "refresh_url": f"{RUN_PREFIX}/site-tree?{urlencode({'id': job.id, 'live': 1})}",
+            "refresh_seconds": TREE_REFRESH_SECONDS,
+        }
+        return templates.TemplateResponse(request, "site_run.html", context)
     curl = curl_line(
         str(request.base_url), "POST", path, headers=sent_keys(request), json_body=body
     )
@@ -667,6 +679,10 @@ class _TreeRead:
     state: str | None = None
     items: int = 0
     seconds: int | None = None  # how long a completed job took
+    done: int = 0  # the job's progress, from its last read
+    total: int = 0
+    failed: int = 0
+    elapsed: Message | None = None  # how long a running job has run
 
 
 async def _read_tree_page(
@@ -683,6 +699,12 @@ async def _read_tree_page(
     view = envelope.data
     assert view is not None  # noqa: S101 - read_job always answers its view
     read.kind, read.state = view.kind, view.state
+    read.done, read.total, read.failed = (
+        view.progress.done,
+        view.progress.total,
+        view.progress.failed,
+    )
+    read.elapsed = _elapsed(view.created_at, view.finished_at)
     if view.state == "completed" and view.finished_at is not None:
         read.seconds = max(0, round((view.finished_at - view.created_at).total_seconds()))
     read.items += len(view.items)
@@ -944,6 +966,9 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         # A refresh that reads more costs more rate-limit hits: it comes less often.
         "refresh_seconds": TREE_REFRESH_SECONDS * max(1, pages),
         "duration": read.seconds,
+        "job_state": read.state,
+        "progress": read,
+        "cancel": read.state != "completed",
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,
         "access": access,

@@ -199,9 +199,8 @@ def test_tree_and_preview_pills_are_26px_and_aligned(ui: tuple[str, str]) -> Non
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
         page.click("#panel-site-structure button[type=submit]")
-        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
-        expect(job.locator(".state")).to_have_text("completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_text("completed")
         expect(page.locator("#result .tree-view .page-type").first).to_be_visible()
         kind, found = boxes(page, "#result .tree-view .page-type", "#result .tree-view .cell-found")
         assert round(kind["height"]) == 26
@@ -226,9 +225,8 @@ def test_tree_actions_controls_stay_as_wide_as_the_settings_column(ui: tuple[str
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
         page.click("#panel-site-structure button[type=submit]")
-        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
-        expect(job.locator(".state")).to_have_text("completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_text("completed")
         expect(page.locator("#result .tree-actions")).to_be_visible()
         controls = boxes(page, ".tree-actions .segmented", ".tree-actions select")
         for box in controls:
@@ -319,9 +317,8 @@ def test_no_horizontal_scroll_on_a_phone(ui: tuple[str, str], language: Language
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
         page.click("#panel-site-structure button[type=submit]")
-        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
-        expect(job.locator(".state")).to_have_attribute("data-value", "completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_attribute("data-value", "completed")
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         assert page.evaluate(OVERFLOW) <= PHONE["width"], "site tree"
 
@@ -498,9 +495,8 @@ def test_focus_ring_on_download_and_tree_checkbox(ui: tuple[str, str]) -> None:
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
         page.click("#panel-site-structure button[type=submit]")
-        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
-        expect(job.locator(".state")).to_have_text("completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_text("completed")
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         _focus_by_keyboard(page, "#result ul.tree input[type=checkbox]")
         assert computed(page, ":focus", *RING) == FOCUS_RING

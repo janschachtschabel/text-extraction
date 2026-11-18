@@ -1,5 +1,5 @@
 {#- tabindex=-1: ui.js moves focus here when a refresh removes the focused button (R-P12-9). -#}
-<section class="jobs-view" aria-label="{{ t('progress.jobs') }}" tabindex="-1">
+<section class="jobs-view" aria-label="{{ t('tree.fetches') if items_only else t('progress.jobs') }}" tabindex="-1">
   {% if refused %}
   <div class="error" role="alert">
     <p>{{ t("progress.part_refused", part=refused.part, parts=refused.parts, status=refused.http_status, message=refused.message) }}</p>
@@ -8,5 +8,6 @@
   </div>
   {% endif %}
   {% include "progress_live.html" %}
-  <div class="job-detail"></div>
+  {#- The detail area hosts a site job's tree too: its cancel answer replaces it (package 23). #}
+  <div class="job-detail tree-host"></div>
 </section>

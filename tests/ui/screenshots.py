@@ -208,10 +208,8 @@ def _run(page: Page, url: str, origin: str, out: Path, language: str, width: int
     _submit(
         page,
         "#site-form button[type=submit]",
-        "#result section.job .state[data-value=completed]",
+        "#result .tree-view .state[data-value=completed]",
     )
-    page.click("#result button.tree-button")
-    page.wait_for_selector("#result .tree-view")
     page.click("#result [data-action=tree-unfold-all]")  # every row, so the columns show
     snap("site-tree")
 

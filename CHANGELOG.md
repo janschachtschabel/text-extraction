@@ -20,6 +20,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Changed
 
+- Playground, "Site structure" (package 23): the site tree appears at once in place of the job
+  card and grows while the crawl runs. The tree's head carries the job's state, the fetches
+  done so far, the failed ones, the elapsed time and "Cancel"; the list of single fetches
+  (robots.txt, sitemaps, pages, each with "Show") is a fold under the head that loads when
+  opened. One refresh (the tree's, every 4 s) replaces two. The REST API and MCP are unchanged.
 - Install guides (English and German): a section "API keys: show, create, enter" for docker
   compose, Hostinger and other Docker panels (name and value fields), the setup without Docker and
   Kubernetes, with Windows PowerShell commands, a key check and a troubleshooting table. The guide

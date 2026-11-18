@@ -1072,8 +1072,7 @@ section.tree-view {
 }
 
 .jobs-view section.job > h3,
-section.batch-preview > h3,
-section.tree-view > h4 {
+section.batch-preview > h3 {
   margin: 0 0 0.5rem;
   font-size: 16px;
 }
@@ -1084,6 +1083,60 @@ section.batch-preview > h4 {
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* The site run (package 23): the tree's head carries the job's state, its progress and the
+   cancel button (right, below the title on a narrow screen); the single fetches fold under it. */
+.tree-head-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 0.25rem;
+}
+
+.tree-head-line .tree-title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.tree-head-line form.tree-cancel {
+  margin: 0 0 0 auto;
+}
+
+.tree-head-line form.tree-cancel button {
+  margin-top: 0;
+}
+
+.tree-progress,
+.tree-starting,
+.tree-empty {
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.tree-progress .fetches-failed {
+  color: var(--error);
+}
+
+details.tree-fetches {
+  margin: 0.5rem 0 0.75rem;
+}
+
+details.tree-fetches > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details.tree-fetches[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+details.tree-fetches .jobs-view section.job {
+  margin: 0;
+  padding: 0;
+  border: none;
 }
 
 .bar {
@@ -1558,7 +1611,7 @@ button.chip[aria-pressed="true"]:hover:not(:disabled) {
   margin-top: 1rem;
 }
 
-.tree-social > h5 {
+.tree-social > h4 {
   margin: 0;
   font-size: 14px;
 }
