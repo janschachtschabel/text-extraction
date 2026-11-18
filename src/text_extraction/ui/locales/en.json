@@ -370,6 +370,7 @@
   "error.transcription_failed": "The transcription failed.",
   "error.llm_failed": "The LLM step did not run or failed.",
   "error.pii_failed": "Handling personal data did not run or did not finish.",
+  "error.search_failed": "The web search is not available or no source answered.",
   "error.rate_limited": "Too many requests: wait a moment and try again.",
   "error.internal_error": "An internal error of this service.",
   "error.invalid_request": "The request is not valid.",

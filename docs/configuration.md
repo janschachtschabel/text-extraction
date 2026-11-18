@@ -799,6 +799,24 @@ annotations for ingress-nginx.
 | `MCP_MAX_ANSWER_CHARS` | `200000` | Most characters of the envelope JSON of one tool answer. The answer carries that JSON twice (as `structuredContent` and as its last text), plus the hints and a screenshot, so the message is about twice this size. Over it, a `get_job` page drops its trailing items (its `next_offset` names the first) and then the lists `chunks`, `links`, `structured.tables` and `site.links` of a result are cut from the end, in that order, with the warning `mcp_answer_truncated` and a hint; REST returns them whole. `content` is bounded by `MCP_MAX_CONTENT_CHARS` alone, so with `MCP_ENABLED=true` this setting must be larger than it, or the service exits with code 2. 10000 to 50000000. |
 | `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
 
+## Web search
+
+Package 25: `POST /v1/search` and the `search` MCP tool query a self-hosted SearXNG (an
+unmodified container of its own, never imported) over its JSON API. The service never fetches the
+hits; the caller extracts the ones it wants. SearXNG must have the `json` format enabled
+(`search.formats` in its `settings.yml`), or it answers 403 and the search fails with
+`search_failed`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SEARCH_ENABLED` | `false` | Serve the search route and tool. Off: `404`. The root compose files switch it on together with their `searxng` service; Helm: `searxng.enabled`. |
+| `SEARCH_URL` | `http://searxng:8080` | Base URL of SearXNG (http or https with a host; a trailing slash is dropped). It is the operator's endpoint, so the SSRF guard does not apply to it. Anything else makes the service exit with code 2. |
+| `SEARCH_TIMEOUT_SECONDS` | `10` | Time a search may take before it answers `failed` / `search_failed`, retryable. 1 to 120. |
+| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`. 1 to 200. |
+| `SEARCH_CACHE_SECONDS` | `3600` | How long a finished search (`success` or `partial`) is kept in Valkey, per query, language, page, time range, sources and `max_results`. 0 turns the cache off. 0 to 86400. |
+| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources`, as a comma list; a request without `sources` uses all of them. Engines SearXNG does not have enabled are reported in `sources_failed`. |
+| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys. |
+
 ## UI
 
 `UI_ENABLED=true` serves a playground at `/ui` on the public port 8080: server-rendered pages

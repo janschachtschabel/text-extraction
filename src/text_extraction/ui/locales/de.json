@@ -370,6 +370,7 @@
   "error.transcription_failed": "Die Transkription ist fehlgeschlagen.",
   "error.llm_failed": "Der LLM-Schritt lief nicht oder ist fehlgeschlagen.",
   "error.pii_failed": "Die Behandlung personenbezogener Daten lief nicht oder wurde nicht fertig.",
+  "error.search_failed": "Die Websuche ist nicht erreichbar oder keine Quelle hat geantwortet.",
   "error.rate_limited": "Zu viele Anfragen: Warten Sie kurz und versuchen Sie es erneut.",
   "error.internal_error": "Ein interner Fehler dieses Dienstes.",
   "error.invalid_request": "Die Anfrage ist nicht gültig.",

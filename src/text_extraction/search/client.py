@@ -1,0 +1,222 @@
+"""The SearXNG client: one JSON search, mapped to an ``Envelope[SearchResult]``.
+
+SearXNG is the operator's service (``SEARCH_URL``), not a caller's target, so the SSRF guard does
+not apply. A finished ``success`` or ``partial`` answer is cached in Valkey for
+``SEARCH_CACHE_SECONDS`` under ``search:{<sha256>}``; the hash covers every parameter that
+changes the answer. A Valkey problem never fails a search: a read acts as a miss, a write is
+dropped, both with one log line that carries no query. Errors never echo the query or the URL."""
+
+import hashlib
+import json
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+import structlog
+from pydantic import ValidationError
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+
+from text_extraction import __version__
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.search.types import SearchHit, SearchRequest, SearchResult, SourceFailure
+from text_extraction.settings import Settings
+from text_extraction.tracing import outbound_trace_headers
+
+_log = structlog.get_logger(__name__)
+
+
+def _engines(request: SearchRequest, settings: Settings) -> list[str]:
+    """The engines to ask: the request's (deduplicated, in lower case) or the configured ones."""
+    if request.sources:
+        return list(dict.fromkeys(name.strip().lower() for name in request.sources))
+    return list(settings.search_sources)
+
+
+def cache_key(request: SearchRequest, engines: list[str]) -> str:
+    """Key of the answer to ``request`` asked of ``engines``. Spacing of the query and the order
+    of the engines do not matter; every other parameter does."""
+    canonical = json.dumps(
+        {
+            "q": " ".join(request.query.split()),
+            "language": request.language,
+            "page": request.page,
+            "time_range": request.time_range,
+            "engines": sorted(engines),
+            "max_results": request.max_results,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(f"{__version__}\0{canonical}".encode()).hexdigest()
+    return f"search:{{{digest}}}"
+
+
+def _failed(message: str, *, retryable: bool = True) -> Envelope[SearchResult]:
+    return Envelope[SearchResult](
+        status="failed",
+        error=ErrorInfo(code=ErrorCode.SEARCH_FAILED, message=message, retryable=retryable),
+    )
+
+
+def _is_web_url(url: object) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        return parts.scheme.lower() in {"http", "https"} and bool(parts.hostname)
+    except ValueError:
+        return False
+
+
+def _text(value: object) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _hit(raw: Any) -> SearchHit | None:
+    if not isinstance(raw, dict) or not _is_web_url(raw.get("url")):
+        return None
+    url = raw["url"].strip()
+    engines = raw.get("engines")
+    names = [e for e in engines if isinstance(e, str)] if isinstance(engines, list) else []
+    if not names and isinstance(raw.get("engine"), str):
+        names = [raw["engine"]]
+    score = raw.get("score")
+    return SearchHit(
+        url=url,
+        title=_text(raw.get("title")) or url,
+        snippet=_text(raw.get("content")),
+        sources=names,
+        published=_text(raw.get("publishedDate")),
+        score=float(score)
+        if isinstance(score, int | float) and not isinstance(score, bool)
+        else None,
+    )
+
+
+def _failures(raw: Any) -> list[SourceFailure]:
+    failures: list[SourceFailure] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, list | tuple) and entry and isinstance(entry[0], str):
+                reason = entry[1] if len(entry) > 1 and isinstance(entry[1], str) else "failed"
+                failures.append(SourceFailure(source=entry[0], reason=reason))
+    return failures
+
+
+def _map(body: Any, request: SearchRequest, engines: list[str]) -> Envelope[SearchResult]:
+    if not isinstance(body, dict):
+        return _failed("The search service answered in an unexpected format.")
+    raw_results = body.get("results")
+    hits = [
+        hit
+        for raw in (raw_results if isinstance(raw_results, list) else [])
+        if (hit := _hit(raw)) is not None
+    ][: request.max_results]
+    failures = _failures(body.get("unresponsive_engines"))
+    suggestions = body.get("suggestions")
+    if not hits and {f.source for f in failures} >= set(engines) and failures:
+        return _failed("No search source answered.")
+    result = SearchResult(
+        query=request.query,
+        results=hits,
+        suggestions=[s for s in suggestions if isinstance(s, str)]
+        if isinstance(suggestions, list)
+        else [],
+        sources_failed=failures,
+    )
+    return Envelope[SearchResult](status="partial" if failures else "success", data=result)
+
+
+async def _read_cache(valkey: Redis | None, key: str) -> Envelope[SearchResult] | None:
+    if valkey is None:
+        return None
+    try:
+        raw = await valkey.get(key)
+    except (RedisError, OSError) as error:
+        _log.warning("search_cache_read_failed", error=type(error).__name__)
+        return None
+    if raw is None:
+        return None
+    try:
+        envelope = Envelope[SearchResult].model_validate_json(raw)
+    except ValidationError:
+        _log.warning("search_cache_entry_unreadable")
+        return None
+    if envelope.data is None or envelope.status == "failed":
+        return None
+    envelope.data.cache = "hit"
+    return envelope
+
+
+async def _write_cache(
+    valkey: Redis | None, key: str, envelope: Envelope[SearchResult], seconds: int
+) -> None:
+    if valkey is None:
+        return
+    try:
+        await valkey.set(key, envelope.model_dump_json(), ex=seconds)
+    except (RedisError, OSError) as error:
+        _log.warning("search_cache_write_failed", error=type(error).__name__)
+
+
+async def search(
+    request: SearchRequest,
+    settings: Settings,
+    http: httpx.AsyncClient,
+    valkey: Redis | None,
+) -> Envelope[SearchResult]:
+    """Ask SearXNG, or answer from the cache. Never raises for a failure of the backend."""
+    engines = _engines(request, settings)
+    caching = settings.search_cache_seconds > 0 and valkey is not None
+    key = cache_key(request, engines)
+    if caching and (cached := await _read_cache(valkey, key)) is not None:
+        return cached
+
+    params = {
+        "q": request.query,
+        "format": "json",
+        "pageno": str(request.page),
+        "engines": ",".join(engines),
+    }
+    if request.language:
+        params["language"] = request.language
+    if request.time_range:
+        params["time_range"] = request.time_range
+    try:
+        response = await http.get(
+            f"{settings.search_url}/search",
+            params=params,
+            headers={**outbound_trace_headers(), "Accept": "application/json"},
+            timeout=settings.search_timeout_seconds,
+        )
+    except httpx.TimeoutException:
+        return _failed("The search service did not answer in time.")
+    except httpx.HTTPError as error:
+        _log.warning("search_backend_unreachable", error=type(error).__name__)
+        return _failed("The search service is not reachable.")
+
+    if response.status_code == 403:
+        return _failed(
+            "The search service refused the request: enable the json format in SearXNG "
+            "(`search.formats` in its settings.yml).",
+            retryable=False,
+        )
+    if response.status_code != 200:
+        _log.warning("search_backend_http_error", status=response.status_code)
+        return _failed(f"The search service answered HTTP {response.status_code}.")
+    try:
+        body = response.json()
+    except ValueError:
+        return _failed("The search service did not answer with JSON.")
+
+    envelope = _map(body, request, engines)
+    if envelope.data is None:
+        return envelope
+    if not caching:
+        envelope.data.cache = "bypass"
+        return envelope
+    envelope.data.cache = "miss"
+    await _write_cache(valkey, key, envelope, settings.search_cache_seconds)
+    return envelope

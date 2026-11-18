@@ -359,7 +359,7 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `dns_error`, `connection_error`, `timeout`, `target_http_error`, `bot_protection`,
 `login_required`, `likely_error_page`, `empty_content`, `content_too_short`,
 `unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
-`media_too_long`, `transcription_failed`, `llm_failed`, `pii_failed`, `rate_limited`,
+`media_too_long`, `transcription_failed`, `llm_failed`, `pii_failed`, `search_failed`, `rate_limited`,
 `internal_error`.
 
 `pii_failed` (retryable, except for an `annotate` that was asked for HTML on a path that does not

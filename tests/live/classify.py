@@ -71,6 +71,7 @@ CODE_BUCKETS: dict[str, Bucket] = {
     "internal_error": "service_error",
     "llm_failed": "service_error",
     "pii_failed": "service_error",
+    "search_failed": "service_error",
 }
 
 
