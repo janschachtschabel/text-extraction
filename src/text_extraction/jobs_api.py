@@ -16,7 +16,7 @@ import time
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Final, Literal
 
 import structlog
 from fastapi import APIRouter, Body, Depends, Header, Query, Request
@@ -474,6 +474,37 @@ def _is_lost(record: JobRecord) -> bool:
     )
 
 
+JobViewMode = Literal["full", "summary"]
+# The result fields a ``summary`` view drops (package 24, gap 4): the large ones.
+_SUMMARY_DROPPED: Final[tuple[str, ...]] = (
+    "content",
+    "metadata",
+    "links",
+    "fingerprint",
+    "structured",
+    "chunks",
+    "image_descriptions",
+    "server_errors",
+)
+
+
+def summary_item(item: JobItem) -> JobItem:
+    """``item`` without the large fields of its result (``_SUMMARY_DROPPED``), and of its
+    ``site`` the links and the sitemap's entries and children (``entry_count`` stays)."""
+    result = item.result
+    data = result.data if result is not None else None
+    if result is None or data is None:
+        return item
+    update: dict[str, Any] = dict.fromkeys(_SUMMARY_DROPPED)
+    if data.site is not None:
+        sitemap = data.site.sitemap
+        if sitemap is not None:
+            sitemap = sitemap.model_copy(update={"entries": [], "children": []})
+        update["site"] = data.site.model_copy(update={"links": None, "sitemap": sitemap})
+    summary = result.model_copy(update={"data": data.model_copy(update=update)})
+    return item.model_copy(update={"result": summary})
+
+
 def _shown(item: JobItem, record: JobRecord) -> JobItem:
     """``item`` as the API shows it: a result that failed without data (a fault of the
     service's own) gets the envelope's fields with nothing the run did not reach (C14)."""
@@ -522,6 +553,16 @@ async def get_job(
     limit: Annotated[
         int, Query(ge=1, le=MAX_PAGE_SIZE, description="Items per page.")
     ] = DEFAULT_PAGE_SIZE,
+    view: Annotated[
+        JobViewMode,
+        Query(
+            description="`full` (default): each item's whole result. `summary`: without "
+            "`content`, `metadata`, `links`, `fingerprint`, `structured`, `chunks`, "
+            "`image_descriptions` and `server_errors`, and in `site` without `links` and the "
+            "sitemap's `entries` and `children`: status, title, word count, page type, "
+            "warnings and the site's role, depth and parent stay."
+        ),
+    ] = "full",
 ) -> Envelope[JobView]:
     """Status and progress of a job with one page of its items.
 
@@ -538,15 +579,22 @@ async def get_job(
     the fetches within one run. A job that does not exist, has expired or belongs to another
     caller (admins see all) answers 404.
     """
-    return await read_job(request.app.state, principal, job_id, offset, limit)
+    return await read_job(request.app.state, principal, job_id, offset, limit, view=view)
 
 
 async def read_job(
-    state: State, principal: Principal, job_id: str, offset: int, limit: int
+    state: State,
+    principal: Principal,
+    job_id: str,
+    offset: int,
+    limit: int,
+    *,
+    view: JobViewMode = "full",
 ) -> Envelope[JobView]:
     """The core of ``GET /v1/jobs/{id}`` (ruling P10-S1): the job's status and progress with
     the page of ``limit`` items from ``offset`` (1 to ``MAX_PAGE_SIZE``; the route's query
-    checks them, other callers bound them themselves).
+    checks them, other callers bound them themselves), each item in ``view``
+    (``summary_item`` for ``summary``).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
     key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
@@ -563,6 +611,8 @@ async def read_job(
         if lost:
             record, items = _lost_view(record, items)
         items = [_shown(item, record) for item in items]
+        if view == "summary":
+            items = [summary_item(item) for item in items]
         status = _envelope_status(record)
         failure: ErrorInfo | None = None
         if status == "failed":
@@ -578,7 +628,7 @@ async def read_job(
     except (RedisError, OSError) as error:
         _log_unavailable(error)
         raise _unavailable() from None
-    view = JobView(
+    page = JobView(
         id=record.id,
         kind=record.kind,
         state=record.state,
@@ -590,7 +640,7 @@ async def read_job(
     )
     return Envelope(
         status=status,
-        data=view,
+        data=page,
         error=failure,
         trace_id=current_trace_id(),
     )
