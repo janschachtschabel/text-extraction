@@ -1,7 +1,7 @@
 """The SearXNG client: one JSON search, mapped to an ``Envelope[SearchResult]``.
 
 SearXNG is the operator's service (``SEARCH_URL``), not a caller's target, so the SSRF guard does
-not apply. A finished ``success`` or ``partial`` answer is cached in Valkey for
+not apply. A finished ``success`` answer is cached in Valkey for
 ``SEARCH_CACHE_SECONDS`` under ``search:{<sha256>}``; the hash covers every parameter that
 changes the answer. A Valkey problem never fails a search: a read acts as a miss, a write is
 dropped, both with one log line that carries no query. Errors never echo the query or the URL."""
@@ -105,7 +105,7 @@ def _failures(raw: Any) -> list[SourceFailure]:
     return failures
 
 
-def _map(body: Any, request: SearchRequest, engines: list[str]) -> Envelope[SearchResult]:
+def _map(body: Any, request: SearchRequest) -> Envelope[SearchResult]:
     if not isinstance(body, dict):
         return _failed("The search service answered in an unexpected format.")
     raw_results = body.get("results")
@@ -116,7 +116,9 @@ def _map(body: Any, request: SearchRequest, engines: list[str]) -> Envelope[Sear
     ][: request.max_results]
     failures = _failures(body.get("unresponsive_engines"))
     suggestions = body.get("suggestions")
-    if not hits and {f.source for f in failures} >= set(engines) and failures:
+    # SearXNG names engines by display name, so names are not matched: no hit and any engine
+    # that did not answer is a failed search.
+    if not hits and failures:
         return _failed("No search source answered.")
     result = SearchResult(
         query=request.query,
@@ -211,12 +213,13 @@ async def search(
     except ValueError:
         return _failed("The search service did not answer with JSON.")
 
-    envelope = _map(body, request, engines)
+    envelope = _map(body, request)
     if envelope.data is None:
         return envelope
     if not caching:
         envelope.data.cache = "bypass"
         return envelope
     envelope.data.cache = "miss"
-    await _write_cache(valkey, key, envelope, settings.search_cache_seconds)
+    if envelope.status == "success":  # a partial answer is asked again, not kept for the TTL
+        await _write_cache(valkey, key, envelope, settings.search_cache_seconds)
     return envelope

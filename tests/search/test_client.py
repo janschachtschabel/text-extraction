@@ -225,17 +225,40 @@ async def test_no_hits_and_every_engine_unresponsive_is_failed(settings: Setting
 
 
 @runs_async
-async def test_no_hits_and_one_engine_unresponsive_is_partial_and_empty(
+async def test_no_hits_and_unresponsive_names_in_other_case_is_failed(settings: Settings) -> None:
+    body = answer([], unresponsive=[["Wikipedia", "timeout"], ["ArXiv", "HTTP error"]])
+
+    envelope = await search(
+        SearchRequest(query="q", sources=["wikipedia", "arxiv"]),
+        settings,
+        serving(body).client(),
+        None,
+    )
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == "search_failed"
+    assert envelope.error.retryable is True
+
+
+@runs_async
+async def test_no_hits_and_a_requested_engine_in_neither_list_is_still_failed(
     settings: Settings,
 ) -> None:
     body = answer([], unresponsive=[["arxiv", "timeout"]])
 
-    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+    envelope = await search(
+        SearchRequest(query="q", sources=["wikipedia", "arxiv"]),
+        settings,
+        serving(body).client(),
+        None,
+    )
 
-    assert envelope.status == "partial"
-    assert envelope.data is not None
-    assert envelope.data.results == []
-    assert [f.source for f in envelope.data.sources_failed] == ["arxiv"]
+    assert envelope.status == "failed"
+    assert envelope.data is None
+    assert envelope.error is not None
+    assert envelope.error.code == "search_failed"
+    assert envelope.error.retryable is True
 
 
 @runs_async
@@ -429,7 +452,7 @@ async def test_cache_off_bypasses_valkey() -> None:
 
 
 @runs_async
-async def test_partial_is_cached_and_stays_partial(settings: Settings) -> None:
+async def test_partial_is_not_cached(settings: Settings) -> None:
     searx = serving(answer([hit("https://a.example/")], unresponsive=[["arxiv", "timeout"]]))
     valkey = FakeAsyncRedis()
 
@@ -438,8 +461,9 @@ async def test_partial_is_cached_and_stays_partial(settings: Settings) -> None:
 
     assert second.status == "partial"
     assert second.data is not None
-    assert second.data.cache == "hit"
-    assert [f.source for f in second.data.sources_failed] == ["arxiv"]
+    assert second.data.cache == "miss"
+    assert len(searx.requests) == 2
+    assert await valkey.keys("*") == []
 
 
 @runs_async
