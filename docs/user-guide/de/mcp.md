@@ -80,23 +80,36 @@ und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines 
 | `chunk` | Eine Seite oder ein Text, in Chunks zerlegt. | `POST /v1/chunk` | `url` oder `text`, `chunking` (Pflicht), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Viele URLs als ein Job. | `POST /v1/batch` | `urls`, `format`, `mode`; antwortet mit einem Job |
 | `site_structure` | Die Karte einer Website, als Job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`), `discovery` (`crawl`); antwortet mit einem Job |
-| `get_job` | Der Zustand eines Jobs und eine Seite seiner Einträge. | `GET /v1/jobs/{id}` | `job_id`, `offset`, `limit` (5, 1-50), `wait_seconds` (0, bis `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; keine `options` |
-| `get_job_screenshot` | Das Bild eines Screenshot-Jobs (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
+| `get_job` | Der Zustand eines Jobs und eine Seite seiner Einträge. | `GET /v1/jobs/{id}` | `job_id`, `view` (`full`; `summary` ohne Inhalt und Links), `offset`, `limit` (5; 1-50, mit `summary` 1-500), `wait_seconds` (0, bis `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; keine `options` |
+| `get_job_screenshot` | Das Bild eines Screenshot-Jobs oder einer Extraktion mit `screenshot: true`, die als Job weiterlief (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
 | `cancel_job` | Einen Job abbrechen und mit seinen Ergebnissen löschen. | `DELETE /v1/jobs/{id}` | `job_id`; keine `options` |
-| `service_info` | Name und Version des Dienstes sowie Name und Rolle des Schlüssels. | `GET /v1/info` | keine |
+| `service_info` | Name und Version des Dienstes, Name und Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. | `GET /v1/info` | keine |
 
 `options` nimmt jedes weitere Feld des REST-Bodys der Route (siehe [Parameter](parameters.md)),
 zum Beispiel `{"pii": {"mode": "mask"}}` oder `{"metadata": false}`; ein Feld, das sowohl als
-Argument als auch in `options` steht, wird abgelehnt. Der strukturierte Inhalt einer Tool-Antwort
-ist das REST-Envelope, und ihr Text ist dasselbe JSON, nach einem einzeiligen Hinweis, wenn etwas
-zu tun ist.
+Argument als auch in `options` steht, wird abgelehnt. Die Beschreibung von `options` nennt in
+jedem Tool die Felder, die es annimmt, mit einem kurzen Hinweis, sodass ein Agent sie kennt, ohne
+die API-Dokumentation zu lesen. Der strukturierte Inhalt einer Tool-Antwort ist das REST-Envelope,
+und ihr Text ist dasselbe JSON, nach einem einzeiligen Hinweis, wenn etwas zu tun ist. An ein
+Ergebnis mit Screenshot (`screenshot_url`, oder `extract_url`, `extract_structured` und `chunk` mit
+`"options": {"screenshot": true}`) wird das Bild bis zu `MCP_IMAGE_MAX_BYTES` angehängt; ein
+größeres wird verlinkt.
+
+`service_info` sagt einem Agenten vorab, was der Dienst seinem Schlüssel bietet: `features` (zum
+Beispiel `browser`, `screenshots`, `ocr`, `pii`, `transcribe`, `llm`, `unblock`) und `limits`
+(`batch_max_urls`, `site_max_depth`, `site_max_pages`, `upload_max_bytes`,
+`request_max_body_bytes`, `rate_limit_per_minute`).
 
 ## Jobs und `get_job`
 
 Ein Aufruf, der länger als `MCP_WAIT_SECONDS` (25 s) dauert, antwortet mit einem Job: Rufen Sie
 `get_job` mit seiner `job_id` und `wait_seconds` auf, bis er `completed` ist. `batch_extract` und
 `site_structure` antworten immer mit einem Job. `get_job` zeigt `limit` Einträge pro Aufruf
-(standardmäßig 5); lesen Sie mit `offset` weiter.
+(standardmäßig 5); lesen Sie mit `offset` weiter. Für einen Überblick über einen großen Job,
+etwa eine Website-Karte, rufen Sie es mit `"view": "summary"` auf: Die Einträge kommen ohne
+`content`, `metadata`, `links`, Chunks und strukturierte Daten (ein Website-Eintrag auch ohne seine
+Links und Sitemap-Einträge), und bis zu 500 passen in einen Aufruf. Einzelne Seiten lesen Sie
+danach vollständig.
 
 ```json
 {"job_id": "<job id>", "wait_seconds": 25, "offset": 0, "limit": 5}
