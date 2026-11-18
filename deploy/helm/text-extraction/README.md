@@ -328,7 +328,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `ingress.hosts` | one example host, path `/` | List of `host` with `paths` (`path`, `pathType`). |
 | `ingress.tls` | `[]` | |
 | `valkey.enabled` | `true` | Deploy a single-replica Valkey. |
-| `valkey.image.repository` / `tag` / `pullPolicy` | `valkey/valkey` / `8.1-alpine` / `IfNotPresent` | |
+| `valkey.image.repository` / `tag` / `pullPolicy` | `valkey/valkey` / `9.1-alpine` / `IfNotPresent` | |
 | `valkey.auth.enabled` | `true` | Valkey requires a password. |
 | `valkey.auth.existingSecret` | `""` | Your own Secret with the password; without it the chart generates one. The password must be URL-safe, see [Valkey password](#valkey-password). |
 | `valkey.auth.existingSecretKey` | `VALKEY_PASSWORD` | Key inside that Secret (also used for the chart-managed one). |

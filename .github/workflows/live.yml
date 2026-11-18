@@ -108,7 +108,7 @@ jobs:
       CLIENT_TIMEOUT: ${{ inputs.site_rules == 'off' && '180' || '120' }}
     services:
       valkey:
-        image: valkey/valkey:8.1-alpine
+        image: valkey/valkey:9.1-alpine
         ports:
           - 6379:6379
         options: >-

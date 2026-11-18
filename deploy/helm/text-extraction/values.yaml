@@ -763,7 +763,7 @@ valkey:
   enabled: true
   image:
     repository: valkey/valkey
-    tag: 8.1-alpine
+    tag: 9.1-alpine
     pullPolicy: IfNotPresent
   auth:
     # Valkey requires a password. API and worker pods get VALKEY_PASSWORD from the Secret and

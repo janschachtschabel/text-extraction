@@ -23,7 +23,7 @@ jobs:
     services:
       # Valkey 7.2+ for the `#!lua` script flags of the queue scripts; no password needed here.
       valkey:
-        image: valkey/valkey:8.1
+        image: valkey/valkey:9.1
         ports:
           - 6379:6379
         options: >-
