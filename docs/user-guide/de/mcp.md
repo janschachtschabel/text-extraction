@@ -80,7 +80,7 @@ und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines 
 | `chunk` | Eine Seite oder ein Text, in Chunks zerlegt. | `POST /v1/chunk` | `url` oder `text`, `chunking` (Pflicht), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Viele URLs als ein Job. | `POST /v1/batch` | `urls`, `format`, `mode`; antwortet mit einem Job |
 | `site_structure` | Die Karte einer Website, als Job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`), `discovery` (`crawl`); antwortet mit einem Job |
-| `get_job` | Der Zustand eines Jobs und eine Seite seiner Einträge. | `GET /v1/jobs/{id}` | `job_id`, `view` (`full`; `summary` ohne Inhalt und Links), `offset`, `limit` (5; 1-50, mit `summary` 1-500), `wait_seconds` (0, bis `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; keine `options` |
+| `get_job` | Der Zustand eines Jobs und eine Seite seiner Einträge. | `GET /v1/jobs/{id}` | `job_id`, `view` (`full`; `summary` ohne Inhalt und Links), `offset`, `limit` (5; 1-50, mit `summary` 1-500, so viele wie in die Antwort passen), `wait_seconds` (0, bis `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; keine `options` |
 | `get_job_screenshot` | Das Bild eines Screenshot-Jobs oder einer Extraktion mit `screenshot: true`, die als Job weiterlief (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
 | `cancel_job` | Einen Job abbrechen und mit seinen Ergebnissen löschen. | `DELETE /v1/jobs/{id}` | `job_id`; keine `options` |
 | `service_info` | Name und Version des Dienstes, Name und Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. | `GET /v1/info` | keine |
@@ -97,8 +97,8 @@ größeres wird verlinkt.
 
 `service_info` sagt einem Agenten vorab, was der Dienst seinem Schlüssel bietet: `features` (zum
 Beispiel `browser`, `screenshots`, `ocr`, `pii`, `transcribe`, `llm`, `unblock`) und `limits`
-(`batch_max_urls`, `site_max_depth`, `site_max_pages`, `upload_max_bytes`,
-`request_max_body_bytes`, `rate_limit_per_minute`).
+(`batch_max_urls`, `site_max_depth`, `site_max_pages`, `document_max_bytes`,
+`media_upload_max_bytes`, `request_max_body_bytes`, `rate_limit_per_minute`).
 
 ## Jobs und `get_job`
 
@@ -108,8 +108,9 @@ Ein Aufruf, der länger als `MCP_WAIT_SECONDS` (25 s) dauert, antwortet mit eine
 (standardmäßig 5); lesen Sie mit `offset` weiter. Für einen Überblick über einen großen Job,
 etwa eine Website-Karte, rufen Sie es mit `"view": "summary"` auf: Die Einträge kommen ohne
 `content`, `metadata`, `links`, Chunks und strukturierte Daten (ein Website-Eintrag auch ohne seine
-Links und Sitemap-Einträge), und bis zu 500 passen in einen Aufruf. Einzelne Seiten lesen Sie
-danach vollständig.
+Links und Sitemap-Einträge), und mit `"limit": 500` passen etwa 150 davon in eine Antwort
+(`MCP_MAX_ANSWER_CHARS`; `next_offset` liest weiter). Einzelne Seiten lesen Sie danach
+vollständig.
 
 ```json
 {"job_id": "<job id>", "wait_seconds": 25, "offset": 0, "limit": 5}

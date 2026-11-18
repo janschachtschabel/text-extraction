@@ -126,9 +126,10 @@ its last claim by a worker (`pool`, `attempts`, `claimed_at`; null while it wait
 above 1 means that the item runs again after a lost lease or a deferral.
 
 `view=summary` (`/v1/jobs/<job id>?view=summary&limit=500`) shows each item without `content`,
-`metadata`, `links`, `fingerprint`, `structured`, `chunks`, `image_descriptions` and
-`server_errors`, and a site item without its `links` and its sitemap's `entries` and `children`:
-status, title, word count, page type, warnings and the site's role, depth and parent stay. It
+`quality`, `metadata`, `links`, `fingerprint`, `structured`, `chunks`, `image_descriptions` and
+`server_errors`, without the `signals` of its page type and the entities of a `pii` report, and a
+site item without its `links` and its sitemap's `entries` and `children`: status, title, word
+count, page type, warnings and the site's role, depth and parent stay. It
 suits an overview of a large batch or site job; without `view` (or with `view=full`) the items
 are whole.
 
@@ -136,7 +137,8 @@ are whole.
 `jobs`, `browser`, `screenshots`, `unblock`, `media`, `ocr`, `pii`, `transcribe`, `llm`,
 `llm_needs_key`, `semantic_chunking`, `describe_images`, `site_structure`, `compliance_choice`,
 `compliance_default`) and the `limits` (`batch_max_urls`, `site_max_depth`, `site_max_pages`,
-`upload_max_bytes`, `request_max_body_bytes`, `rate_limit_per_minute`).
+`document_max_bytes`, `media_upload_max_bytes`, `request_max_body_bytes`,
+`rate_limit_per_minute`).
 
 ### Cancel a job
 

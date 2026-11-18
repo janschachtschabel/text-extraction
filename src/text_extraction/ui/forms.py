@@ -427,8 +427,8 @@ def feature_offer(role: str, settings: Settings) -> FeatureOffer:
         pii=offered["pii"],
         transcribe=offered["transcribe"],
         llm=offered["llm"],
-        llm_needs_key=offered["llm"] and settings.llm_api_key is None,
-        semantic=offered["llm"] and settings.llm_embedding_model is not None,
+        llm_needs_key=offered["llm_needs_key"],
+        semantic=offered["semantic"],
         admin_only=admin_only,
     )
 

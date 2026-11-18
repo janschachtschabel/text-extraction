@@ -76,7 +76,7 @@ A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and 
 | `chunk` | A page or a text split into chunks. | `POST /v1/chunk` | `url` or `text`, `chunking` (required), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Many URLs as one job. | `POST /v1/batch` | `urls`, `format`, `mode`; answers a job |
 | `site_structure` | The map of a site, as a job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`), `discovery` (`crawl`); answers a job |
-| `get_job` | A job's state and one page of its items. | `GET /v1/jobs/{id}` | `job_id`, `view` (`full`; `summary` without content and links), `offset`, `limit` (5; 1-50, with `summary` 1-500), `wait_seconds` (0, up to `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; no `options` |
+| `get_job` | A job's state and one page of its items. | `GET /v1/jobs/{id}` | `job_id`, `view` (`full`; `summary` without content and links), `offset`, `limit` (5; 1-50, with `summary` 1-500, as many as fit the answer), `wait_seconds` (0, up to `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; no `options` |
 | `get_job_screenshot` | The image of a screenshot job, or of an extraction with `screenshot: true` that continued as a job (PNG, JPEG or WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; no `options` |
 | `cancel_job` | Cancel a job and delete it with its results. | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
 | `service_info` | The service's name and version, the key's name and role, the features the key can use and the limits. | `GET /v1/info` | none |
@@ -92,8 +92,8 @@ to `MCP_IMAGE_MAX_BYTES`; a larger one is linked.
 
 `service_info` tells an agent beforehand what the service offers its key: `features` (for
 example `browser`, `screenshots`, `ocr`, `pii`, `transcribe`, `llm`, `unblock`) and `limits`
-(`batch_max_urls`, `site_max_depth`, `site_max_pages`, `upload_max_bytes`,
-`request_max_body_bytes`, `rate_limit_per_minute`).
+(`batch_max_urls`, `site_max_depth`, `site_max_pages`, `document_max_bytes`,
+`media_upload_max_bytes`, `request_max_body_bytes`, `rate_limit_per_minute`).
 
 ## Jobs and `get_job`
 
@@ -102,8 +102,8 @@ A call that takes longer than `MCP_WAIT_SECONDS` (25 s) answers a job: call `get
 answer a job. `get_job` shows `limit` items per call (5 by default); read on with `offset`.
 For an overview of a large job, such as a site map, call it with `"view": "summary"`: the items
 come without `content`, `metadata`, `links`, chunks and structured data (and a site item without
-its links and sitemap entries), and up to 500 fit in one call. Read single pages in full
-afterwards.
+its links and sitemap entries), and with `"limit": 500` about 150 of them fit in one answer
+(`MCP_MAX_ANSWER_CHARS`; `next_offset` reads on). Read single pages in full afterwards.
 
 ```json
 {"job_id": "<job id>", "wait_seconds": 25, "offset": 0, "limit": 5}

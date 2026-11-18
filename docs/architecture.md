@@ -3599,17 +3599,21 @@ could not learn or use well:
 - **R24-2 features and limits in `GET /v1/info`.** `data.features` says what the caller's key can
   use (`info.offered_features`, shared with the UI's `feature_offer`, so a feature kept for admin
   keys is false for a user key) and `data.limits` the limits that apply (the key's own rate limit
-  before the service's; null while rate limiting is off). `service_info` answers the same.
+  before the service's, null while rate limiting is off; `document_max_bytes`, and
+  `media_upload_max_bytes` only for a key whose uploads are transcribed). `service_info` answers the same.
 - **R24-3 screenshots of every extraction tool.** The attachment of `data.screenshot` moved from
   `screenshot_url` to the base class, so `extract_url`, `extract_structured` and `chunk` with
   `screenshot: true` attach the image (or link it over `MCP_IMAGE_MAX_BYTES`). `get_job` attaches
   no image but names `get_job_screenshot` for each item with a screenshot.
 - **R24-4 `view=summary`.** `GET /v1/jobs/{id}` and `get_job` take `view` (`full`, the default and
-  unchanged, or `summary`). `summary` sets `content`, `metadata`, `links`, `fingerprint`,
-  `structured`, `chunks`, `image_descriptions` and `server_errors` to null, and of `site` the
-  `links` and the sitemap's `entries` and `children` (its `entry_count` stays); the stored item is
-  not changed. `get_job` takes up to 50 items with `full` (they share `max_chars`) and up to 500
-  with `summary`. The UI's live tree keeps reading the full view.
+  unchanged, or `summary`). `summary` sets `content`, `quality`, `metadata`, `links`,
+  `fingerprint`, `structured`, `chunks`, `image_descriptions` and `server_errors` to null, empties
+  the page type's `signals`, drops a `pii` report's `items`, and of `site` the `links` and the
+  sitemap's `entries` and `children` (its `entry_count` stays); the stored item is not changed.
+  `get_job` takes up to 50 items with `full` (they share `max_chars`) and up to 500 with
+  `summary`; `MCP_MAX_ANSWER_CHARS` still bounds the answer, so a summary page holds about 150
+  site items (the required `timings` and `compliance` stay), and `next_offset` reads on. The UI's
+  live tree keeps reading the full view.
 
 ## Observability
 

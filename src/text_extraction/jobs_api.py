@@ -478,6 +478,7 @@ JobViewMode = Literal["full", "summary"]
 # The result fields a ``summary`` view drops (package 24, gap 4): the large ones.
 _SUMMARY_DROPPED: Final[tuple[str, ...]] = (
     "content",
+    "quality",
     "metadata",
     "links",
     "fingerprint",
@@ -489,13 +490,19 @@ _SUMMARY_DROPPED: Final[tuple[str, ...]] = (
 
 
 def summary_item(item: JobItem) -> JobItem:
-    """``item`` without the large fields of its result (``_SUMMARY_DROPPED``), and of its
-    ``site`` the links and the sitemap's entries and children (``entry_count`` stays)."""
+    """``item`` without the large fields of its result (``_SUMMARY_DROPPED``), the signals of
+    its ``page_type`` (the type stays), the entities of its ``pii`` report (the counts stay),
+    and of its ``site`` the links and the sitemap's entries and children (``entry_count``
+    stays)."""
     result = item.result
     data = result.data if result is not None else None
     if result is None or data is None:
         return item
     update: dict[str, Any] = dict.fromkeys(_SUMMARY_DROPPED)
+    if data.page_type is not None:
+        update["page_type"] = data.page_type.model_copy(update={"signals": []})
+    if data.pii is not None:
+        update["pii"] = data.pii.model_copy(update={"items": None})
     if data.site is not None:
         sitemap = data.site.sitemap
         if sitemap is not None:
@@ -557,10 +564,11 @@ async def get_job(
         JobViewMode,
         Query(
             description="`full` (default): each item's whole result. `summary`: without "
-            "`content`, `metadata`, `links`, `fingerprint`, `structured`, `chunks`, "
-            "`image_descriptions` and `server_errors`, and in `site` without `links` and the "
-            "sitemap's `entries` and `children`: status, title, word count, page type, "
-            "warnings and the site's role, depth and parent stay."
+            "`content`, `quality`, `metadata`, `links`, `fingerprint`, `structured`, `chunks`, "
+            "`image_descriptions` and `server_errors`, the page type's `signals`, a `pii` "
+            "report's `items`, and in `site` without `links` and the sitemap's `entries` and "
+            "`children`: status, title, word count, page type, warnings and the site's role, "
+            "depth and parent stay."
         ),
     ] = "full",
 ) -> Envelope[JobView]:

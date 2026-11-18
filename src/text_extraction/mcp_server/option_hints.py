@@ -16,7 +16,7 @@ OPTION_HINTS: Final[dict[str, str]] = {
     "compliance": "site rules: enforce|report|ignore (ignore: admin keys)",
     "unblock": "false: no unblock browser under compliance ignore; default true",
     "cache": "use the result cache; default true",
-    "actions": 'browser steps, e.g. [{"type": "click", "selector": "#more"}]',
+    "actions": "[{type: click|scroll|wait_for|type|press|select|expand_all|...}]",
     "cookies": '[{"name", "value", "domain"}] set before the page loads',
     "headers": "extra request headers, e.g. Authorization",
     "screenshot": "also capture a screenshot (attached as an image)",
@@ -39,6 +39,13 @@ OPTION_HINTS: Final[dict[str, str]] = {
 # A field whose meaning differs on one route.
 ROUTE_HINTS: Final[dict[str, dict[str, str]]] = {
     "POST /v1/screenshot": {"format": "png|jpeg|webp; default png"},
+    "POST /v1/chunk": {"format": "markdown|text; default markdown"},
+    "POST /v1/extract/file": {"metadata": "the document's metadata; default true"},
+}
+# A sentence after the field list of one route.
+ROUTE_NOTES: Final[dict[str, str]] = {
+    "POST /v1/chunk": " With `text` only format, metadata, pii and structured apply; "
+    "the others need `url`.",
 }
 
 
@@ -60,4 +67,5 @@ def options_description(route: str, fields: list[str]) -> str:
         name if (hint := option_hint(route, name)) is None else f"{name} ({hint})"
         for name in fields
     )
-    return f"Further fields of the REST body of {route} (details: /docs): {listed}."
+    note = ROUTE_NOTES.get(route, "")
+    return f"Further fields of the REST body of {route} (details: /docs): {listed}.{note}"

@@ -136,7 +136,8 @@ class GetJobArguments(SlicedArguments):
         ge=1,
         le=MAX_PAGE_SIZE,
         description=f"Items per page, at most {MAX_PAGE_ITEMS} with view full (they share "
-        f"max_chars of content) and {MAX_PAGE_SIZE} with view summary.",
+        f"max_chars of content) and {MAX_PAGE_SIZE} with view summary; a page holds only as many "
+        "as fit MCP_MAX_ANSWER_CHARS (about 150 summary items), next_offset reads on.",
     )
     wait_seconds: float = Field(  # a number here, never None
         default=0,
@@ -149,7 +150,8 @@ class GetJobArguments(SlicedArguments):
     @field_validator("limit")
     @classmethod
     def _within_the_view(cls, value: int, info: ValidationInfo) -> int:
-        if info.data.get("view", "full") == "full" and value > MAX_PAGE_ITEMS:
+        # An invalid view has its own error; no second one about the limit.
+        if info.data.get("view") == "full" and value > MAX_PAGE_ITEMS:
             raise ValueError(f"limit is at most {MAX_PAGE_ITEMS} with view full")
         return value
 
@@ -192,8 +194,8 @@ class SiteStructureTool(ExtractionTool):
             "site_structure",
             "Map a site as a job (POST /v1/site-structure): its pages by following links, its "
             "robots.txt and sitemaps. Poll get_job; each item's data.site has the role, depth "
-            "and links or sitemap entries. get_job with view summary lists up to 500 pages a "
-            "call without their content and links.",
+            "and links or sitemap entries. get_job with view summary and limit 500 lists about "
+            "150 pages a call without their content and links.",
         )
 
     async def answer(

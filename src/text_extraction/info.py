@@ -12,7 +12,6 @@ from text_extraction.compliance import ComplianceMode
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope
 from text_extraction.feature_access import Feature, allowed
-from text_extraction.file_api import upload_file_limit
 from text_extraction.pii_dispatch import pii_available
 from text_extraction.pipeline_media import asr_available
 from text_extraction.settings import Settings, llm_available
@@ -20,9 +19,9 @@ from text_extraction.tracing import current_trace_id
 
 SERVICE_NAME = "text-extraction"
 
-OfferedFeature = Literal["ocr", "pii", "transcribe", "llm"]
+OfferedFeature = Literal["ocr", "pii", "transcribe", "llm", "llm_needs_key", "semantic"]
 # The switch (``feature_access``) behind each offered feature.
-_SWITCH: Final[dict[OfferedFeature, Feature]] = {
+_SWITCH: Final[dict[str, Feature]] = {
     "ocr": "ocr",
     "pii": "pii",
     "transcribe": "asr",
@@ -34,8 +33,10 @@ def offered_features(
     role: str | None, settings: Settings
 ) -> tuple[dict[OfferedFeature, bool], frozenset[str]]:
     """The optional features a key of ``role`` can use (the service has them and the role may
-    use them, ``feature_access.allowed``), and those the service has but keeps for admin keys.
-    The UI's forms (``ui.forms.feature_offer``) and ``GET /v1/info`` both read it."""
+    use them, ``feature_access.allowed``), and those the service has but keeps for admin keys;
+    ``llm_needs_key`` (the LLM is offered and the service has no key) and ``semantic`` (semantic
+    chunking: the LLM and an embedding model) follow from them. The UI's forms
+    (``ui.forms.feature_offer``) and ``GET /v1/info`` both read it."""
     has: dict[OfferedFeature, bool] = {
         "ocr": ocr_available(settings),
         "pii": pii_available(settings),
@@ -45,7 +46,12 @@ def offered_features(
     admin_only = frozenset(
         name for name, on in has.items() if on and not allowed(_SWITCH[name], role, settings)
     )
-    return {name: on and name not in admin_only for name, on in has.items()}, admin_only
+    offered: dict[OfferedFeature, bool] = {
+        name: on and name not in admin_only for name, on in has.items()
+    }
+    offered["llm_needs_key"] = offered["llm"] and settings.llm_api_key is None
+    offered["semantic"] = offered["llm"] and settings.llm_embedding_model is not None
+    return offered, admin_only
 
 
 class InfoFeatures(BaseModel):
@@ -70,7 +76,8 @@ class InfoFeatures(BaseModel):
     describe_images: bool = Field(description="`describe_images` with the vision model.")
     site_structure: bool = Field(description="`/v1/site-structure`.")
     compliance_choice: bool = Field(
-        description="The key may choose `compliance` (`ignore` stays for admin keys)."
+        description="The key may ask for another `compliance` mode than the default (asking "
+        "for `ignore` needs an admin key)."
     )
     compliance_default: ComplianceMode = Field(description="The mode without a request.")
 
@@ -81,7 +88,13 @@ class InfoLimits(BaseModel):
     batch_max_urls: int = Field(description="Most URLs of one batch (`BATCH_MAX_URLS`).")
     site_max_depth: int = Field(description="Most `depth` of a site job (`SITE_MAX_DEPTH`).")
     site_max_pages: int = Field(description="Most `max_pages` of a site job (`SITE_MAX_PAGES`).")
-    upload_max_bytes: int = Field(description="Most bytes of an uploaded file.")
+    document_max_bytes: int = Field(
+        description="Most bytes of a document, uploaded or fetched (`DOCUMENT_MAX_BYTES`)."
+    )
+    media_upload_max_bytes: int | None = Field(
+        description="Most bytes of an uploaded audio or video file (`MEDIA_UPLOAD_MAX_BYTES`); "
+        "null when the key cannot have uploads transcribed."
+    )
     request_max_body_bytes: int = Field(
         description="Most bytes of a JSON body (`REQUEST_MAX_BODY_BYTES`; batches and chunk "
         "texts have larger limits)."
@@ -100,8 +113,9 @@ class InfoData(BaseModel):
     limits: InfoLimits
 
 
-def _features(principal: Principal, settings: Settings) -> InfoFeatures:
-    offered, _ = offered_features(principal.role, settings)
+def _features(
+    principal: Principal, settings: Settings, offered: dict[OfferedFeature, bool]
+) -> InfoFeatures:
     admin = principal.role == "admin"
     browser = settings.browser_enabled
     return InfoFeatures(
@@ -114,8 +128,8 @@ def _features(principal: Principal, settings: Settings) -> InfoFeatures:
         pii=offered["pii"],
         transcribe=offered["transcribe"],
         llm=offered["llm"],
-        llm_needs_key=offered["llm"] and settings.llm_api_key is None,
-        semantic_chunking=offered["llm"] and settings.llm_embedding_model is not None,
+        llm_needs_key=offered["llm_needs_key"],
+        semantic_chunking=offered["semantic"],
         describe_images=offered["llm"],
         site_structure=settings.jobs_enabled,
         compliance_choice=admin or settings.compliance_allow_override,
@@ -123,7 +137,9 @@ def _features(principal: Principal, settings: Settings) -> InfoFeatures:
     )
 
 
-def _limits(principal: Principal, settings: Settings) -> InfoLimits:
+def _limits(
+    principal: Principal, settings: Settings, offered: dict[OfferedFeature, bool]
+) -> InfoLimits:
     rate = (
         principal.rate_limit_per_minute
         if principal.rate_limit_per_minute is not None
@@ -133,7 +149,8 @@ def _limits(principal: Principal, settings: Settings) -> InfoLimits:
         batch_max_urls=settings.batch_max_urls,
         site_max_depth=settings.site_max_depth,
         site_max_pages=settings.site_max_pages,
-        upload_max_bytes=upload_file_limit(settings),
+        document_max_bytes=settings.document_max_bytes,
+        media_upload_max_bytes=(settings.media_upload_max_bytes if offered["transcribe"] else None),
         request_max_body_bytes=settings.request_max_body_bytes,
         rate_limit_per_minute=rate if settings.rate_limit_enabled else None,
     )
@@ -145,12 +162,13 @@ def service_info(principal: Principal, settings: Settings) -> Envelope[InfoData]
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
     key has), then one ``check_rate`` hit."""
+    offered, _ = offered_features(principal.role, settings)
     data = InfoData(
         name=SERVICE_NAME,
         version=__version__,
         principal=principal.name,
         role=principal.role,
-        features=_features(principal, settings),
-        limits=_limits(principal, settings),
+        features=_features(principal, settings, offered),
+        limits=_limits(principal, settings, offered),
     )
     return Envelope(status="success", data=data, trace_id=current_trace_id())

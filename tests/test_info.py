@@ -90,7 +90,7 @@ def test_info_limits() -> None:
     assert user["limits"]["site_max_depth"] == 3
     assert user["limits"]["rate_limit_per_minute"] == 7
     assert admin["limits"]["rate_limit_per_minute"] == 60
-    assert user["limits"]["upload_max_bytes"] > 0
+    assert user["limits"]["document_max_bytes"] == 20_000_000
     assert user["limits"]["request_max_body_bytes"] == 65536
     with running(rate_limit_enabled=False) as client:
         assert info(client, USER_KEY)["limits"]["rate_limit_per_minute"] is None
@@ -108,5 +108,15 @@ def test_offered_features_match_the_ui() -> None:
             "pii": offer.pii,
             "transcribe": offer.transcribe,
             "llm": offer.llm,
+            "llm_needs_key": offer.llm_needs_key,
+            "semantic": offer.semantic,
         }
         assert admin_only == offer.admin_only
+
+
+def test_media_upload_limit_only_for_keys_that_transcribe() -> None:
+    with running(asr_enabled=True, asr_allow_users=False, media_upload_max_bytes=30_000_000) as c:
+        user, admin = info(c, USER_KEY), info(c, ADMIN_KEY)
+
+    assert user["limits"]["media_upload_max_bytes"] is None
+    assert admin["limits"]["media_upload_max_bytes"] == 30_000_000

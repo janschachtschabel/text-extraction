@@ -71,4 +71,8 @@ def test_hints_are_short() -> None:
 
 def test_the_screenshot_format_is_an_image_format() -> None:
     assert "format (png|jpeg|webp; default png)" in description("screenshot_url")
-    assert "format (markdown|text|html; default markdown)" in description("chunk")
+    assert "format (markdown|text; default markdown)" in description("chunk")
+
+
+def test_chunk_names_the_fields_a_text_takes() -> None:
+    assert "With `text` only format, metadata, pii and structured apply" in description("chunk")

@@ -17,7 +17,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   use (`features`) and the limits (`limits`). `extract_url`, `extract_structured` and `chunk`
   attach their screenshot as `screenshot_url` does, and `get_job` points to
   `get_job_screenshot`. `GET /v1/jobs/{id}` and `get_job` take `view=summary`: the items without
-  content, metadata and links, `get_job` up to 500 a call; without `view` nothing changes.
+  content, metadata and links, `get_job` about 150 site pages a call instead of 50; without `view`
+  nothing changes.
 
 ### Changed
 
