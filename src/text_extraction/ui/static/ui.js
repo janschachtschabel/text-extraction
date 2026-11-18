@@ -537,7 +537,6 @@
   // scroll position and the focus. A refresh says nothing and moves the focus nowhere; while a
   // text field, select or textarea of the form has the focus it waits.
   var treeSaved = null;
-  var autoLoaded = {};
 
   // A node's key across refreshes: a page by its URL, a section by the labels of its path.
   function nodeKey(item) {
@@ -809,66 +808,6 @@
       restoreTree(form, saved.form);
     }
     showLiveNote(root);
-  });
-
-  // A site job's tree shows itself once the job has a result: the progress view marks the
-  // button (data-tree-auto), and the script presses it once per job unless the tree was asked
-  // for already (a click, a request in flight) or something is shown below the jobs. Marked
-  // data-refresh, the request is no request of the user's: nothing is announced. A click while
-  // the script's own request is in flight is dropped (the tree is on its way), any other click
-  // counts as the user's request, so the script never loads the tree a second time. Without
-  // this script the "Show tree now" button stays as it is. The progress view replaces the
-  // button every few seconds, so the state is kept by the job's button id.
-  var autoPending = {};
-  var pressing = false;
-
-  document.addEventListener("click", function (event) {
-    var target = event.target instanceof Element ? event.target : null;
-    var button = target ? target.closest("button.tree-button") : null;
-    if (!button || pressing) {
-      return;
-    }
-    if (autoPending[button.id]) {
-      event.stopImmediatePropagation();  // htmx listens on the button itself, later
-      return;
-    }
-    autoLoaded[button.id] = true;
-  }, true);
-
-  document.addEventListener("htmx:load", function (event) {
-    var root = event.target instanceof Element ? event.target : null;
-    var buttons = root ? root.querySelectorAll("button.tree-button[data-tree-auto]") : [];
-    Array.prototype.forEach.call(buttons, function (button) {
-      window.setTimeout(function () {
-        var view = button.closest(".jobs-view");
-        var detail = view ? view.querySelector(".job-detail") : null;
-        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild ||
-            button.classList.contains("htmx-request")) {
-          return;
-        }
-        autoLoaded[button.id] = true;
-        autoPending[button.id] = true;
-        button.setAttribute("data-refresh", "");
-        // Once the answer is in, the button is the user's again.
-        var done = function (settled) {
-          // A swap is over at afterSettle; a request that swapped nothing ends at afterRequest.
-          var over = settled.type === "htmx:afterSettle" || !settled.detail.successful;
-          if (settled.detail.elt === button && over) {
-            autoPending[button.id] = false;
-            button.removeAttribute("data-refresh");
-            document.removeEventListener("htmx:afterSettle", done);
-            document.removeEventListener("htmx:afterRequest", done);
-          }
-        };
-        document.addEventListener("htmx:afterSettle", done);
-        document.addEventListener("htmx:afterRequest", done);
-        // A request that never ends (its button gone) must not drop the user's clicks for good.
-        window.setTimeout(function () { autoPending[button.id] = false; }, 10000);
-        pressing = true;
-        button.click();
-        pressing = false;
-      }, 0);
-    });
   });
 
   // The "Unblock browser" box (package 22) shows only while the chosen "Site rules" step is

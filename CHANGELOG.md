@@ -11,6 +11,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Changed
 
+- Playground, "Site structure" (package 23): the site tree appears at once in place of the job
+  card and grows while the crawl runs. The tree's head carries the job's state, the fetches
+  done so far, the failed ones, the elapsed time and "Cancel"; the list of single fetches
+  (robots.txt, sitemaps, pages, each with "Show") is a fold under the head that loads when
+  opened. One refresh (the tree's, every 4 s) replaces two. The REST API and MCP are unchanged.
+
 - Valkey 8.1 → 9.1 everywhere: both compose files, the Helm chart default
   (`valkey.image.tag: 9.1-alpine`), the e2e and live workflows and the install guides
   (supersedes Dependabot PR #60, which changed only the compose files). Valkey reads the data an

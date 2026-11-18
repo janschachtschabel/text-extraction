@@ -1,9 +1,9 @@
 """The site tree loads itself and refreshes while the job runs (package 18, ``pytest -m
 browser``): a site whose pages answer slowly, each page linking one address of its own under
-``/docs/``. The tree appears without a click once the job has a result; the user ticks a box,
-unfolds a section, presses the "Content" chip and scrolls; the next refresh adds addresses and
-changes none of that, and the focus stays on the chip. A text field with the focus holds the
-refresh back."""
+``/docs/``. The tree appears without a click in place of a job card (package 23); the user ticks
+a box, unfolds a section, presses the "Content" chip and scrolls; the next refresh adds addresses
+and changes none of that, and the focus stays on the chip. A text field with the focus holds the
+refresh back. The tree's head says the job's state and cancels it; the single fetches fold."""
 
 import re
 import time
@@ -15,7 +15,7 @@ from playwright.sync_api import Locator, Page, Route, expect
 from pytest_httpserver import HTTPServer
 from werkzeug import Request, Response
 
-from tests.ui.test_a11y_browser import _axe
+from tests.ui.test_a11y_browser import _RECORD_STATUS, _axe
 from tests.ui.test_playground_browser import (
     _page,
     _settings,
@@ -111,7 +111,6 @@ def test_the_tree_keeps_the_users_work_across_a_refresh(ui: tuple[str, str]) -> 
         expect(view.locator(".tree-live")).to_have_text("Updates while the job runs")
         expect(view.locator(".tree-live")).to_be_visible()
         expect(view.locator(".tree-snapshot")).to_be_hidden()  # the note says it already
-        expect(page.locator("button.tree-button[data-refresh]")).to_have_count(0)
 
         # The first page's address is under /docs/; its section starts folded: the user opens it.
         name = page.locator(
@@ -301,32 +300,78 @@ def test_a_failing_refresh_announces_its_error_once(ui: tuple[str, str]) -> None
         assert page.evaluate("window.alertWrites") == 1
 
 
-def test_a_click_on_the_tree_button_and_the_auto_load_ask_for_one_tree(
-    ui: tuple[str, str],
-) -> None:
+def test_the_site_run_shows_the_tree_and_announces_the_end_once(ui: tuple[str, str]) -> None:
+    """Package 23: no job card, the tree's head says the state; the change to "completed" is
+    announced once, the refreshes before it say nothing."""
     url, origin = ui
     with browsing(url) as (page, console):
-        requests: list[str] = []
-        page.on(
-            "request",
-            lambda request: (
-                requests.append(request.url)
-                if "/ui/run/site-tree" in request.url and "live=1" not in request.url
-                else None
-            ),
-        )
         log_in(page)
         page.wait_for_selector("#app-shell")
+        page.evaluate(_RECORD_STATUS)
         open_tab(page, "site-structure")
         panel = page.locator("#panel-site-structure")
         panel.locator("input[name=url]").fill(f"{origin}/")
         panel.locator("input[name=depth]").fill("1")
         panel.locator("input[name=max_pages]").fill(str(FAST + SLOW + 1))
         panel.locator("button[type=submit]").click()
-        # The user's click comes as early as there is a button, before the job has a result.
-        page.locator("#result button.tree-button").click()
-        expect(page.locator("#result .tree-view input[name=url]").first).to_be_attached()
-        page.wait_for_timeout(8_000)  # past the progress view's next refreshes, which auto-load
+        view = page.locator("#result .tree-view")
+        expect(view.locator("input[name=url]").first).to_be_attached()
+        expect(page.locator("#result section.job")).to_have_count(0)
+        head = view.locator(".tree-head-line")
+        expect(head.locator(".state")).to_have_attribute("data-value", "running")
+        expect(view.locator(".tree-progress")).to_contain_text("fetches done so far")
+        expect(head.locator(".state")).to_have_attribute("data-value", "completed", timeout=60_000)
+        expect(head.locator("form.tree-cancel")).to_have_count(0)
+        expect(page.locator("[data-tree-live]")).to_have_count(0)
+        page.wait_for_timeout(500)
+        texts: list[str] = page.evaluate("window.uiStatusTexts")
+        assert _axe(page, "finished site run") == []
 
-        assert len(requests) == 1, requests
+    ends = [text for text in texts if text.endswith(": completed.")]
+    assert len(ends) == 1, texts
+    assert not [text for text in texts if text.endswith(": running.")][1:], texts
+    assert console == []
+
+
+def test_cancel_in_the_head_ends_the_site_run(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        view = _start(page, origin)
+        cancel = view.locator("form.tree-cancel button")
+        button_id = cancel.get_attribute("id") or ""
+        cancel.focus()
+        _wrapper_mark(page)
+        _refreshed(page)
+        assert page.evaluate("document.activeElement.id") == button_id  # kept across a refresh
+
+        page.once("dialog", lambda dialog: dialog.accept())
+        cancel.click()
+        expect(page.locator("#result .site-run .cancelled")).to_be_visible()
+        expect(page.locator("#result .tree-view")).to_have_count(0)
+        page.wait_for_timeout(5_000)  # past a refresh interval: nothing brings the tree back
+        expect(page.locator("#result .tree-view")).to_have_count(0)
+    assert console == []
+
+
+def test_the_single_fetches_fold_lists_the_fetches_and_stays_open(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        view = _start(page, origin)
+        fold = view.locator("details.tree-fetches")
+        expect(fold).not_to_have_attribute("open", "")
+        fold.locator("summary").click()
+        rows = fold.locator("table.items tbody tr")
+        expect(rows.first).to_be_visible()
+        expect(fold.locator("h3")).to_have_count(0)  # no second job card in the fold
+        fold.locator("table.items tbody tr").first.locator("button").click()
+        detail = fold.locator(".job-detail")
+        expect(detail.locator(".result-view")).to_be_visible()
+
+        page.evaluate("window.__fold = document.querySelector('details.tree-fetches')")
+        _wrapper_mark(page)
+        _refreshed(page)
+        assert page.evaluate("window.__fold === document.querySelector('details.tree-fetches')")
+        expect(fold).to_have_attribute("open", "")
+        expect(detail.locator(".result-view")).to_be_visible()
+        assert _axe(page, "single fetches open") == []
     assert console == []

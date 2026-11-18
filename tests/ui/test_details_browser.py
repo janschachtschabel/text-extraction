@@ -130,9 +130,8 @@ def test_guessed_page_type_fits_the_tree(guessed_ui: tuple[str, str], language: 
         panel.locator("input[name=url]").fill(f"{origin}/")
         panel.locator("input[name=depth]").fill("1")
         panel.locator("button[type=submit]").click()
-        job = page.locator("#result section.job")
-        expect(job.locator(".state")).to_have_attribute("data-value", "completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_attribute("data-value", "completed")
         # The badge's leaf is in a section, folded at first (package 17).
         page.locator("#result [data-action=tree-unfold-all]").click()
 

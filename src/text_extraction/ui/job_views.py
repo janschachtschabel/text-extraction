@@ -158,7 +158,6 @@ class JobPanel:
     next_url: str | None = None
     tree_url: str | None = None
     tree_label: Message | None = None
-    tree_auto: bool = False  # ui.js may load the tree by itself: the job has a result already
     error: Message | None = None
     error_detail: str | None = None
     retryable: bool = False
@@ -256,7 +255,6 @@ def _panel(view: JobView, shown: _Shown, position: int) -> JobPanel:
     if view.kind == "site":
         panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': view.id})}"
         panel.tree_label = SHOW_TREE if view.state == "completed" else SHOW_TREE_NOW
-        panel.tree_auto = progress.done >= 1
     return panel
 
 

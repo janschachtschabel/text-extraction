@@ -412,13 +412,13 @@ which saves the whole envelope. An answer too large for the download says so and
   has no LLM key of its own, so that you enter yours.
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
-- **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by
-  host and path (the tree also appears by itself once the job has a result and refreshes while it
-  runs; "Show tree now" shows a snapshot), with a checkbox per page and
-  per section, and "Extract selected" starts batches of the checked URLs.
+- **Site structure**: starts a crawl and shows its tree at once, by host and path, growing while
+  it runs, with the job's state and "Cancel" in the tree's head and the single fetches in a fold
+  under it; a checkbox per page and per section, and "Extract selected" starts batches of the
+  checked URLs.
 
-Every job started from the playground shows its state, a progress bar and its items, refreshes
-every 3 s until it is completed, and has a "Cancel" button.
+Every other job started from the playground shows its state, a progress bar and its items,
+refreshes every 3 s until it is completed, and has a "Cancel" button.
 
 ### Site rules in the playground
 

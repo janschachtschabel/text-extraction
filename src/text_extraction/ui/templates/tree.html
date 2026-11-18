@@ -34,13 +34,6 @@ site run, or the progress view's detail area), so no refresh brings the tree bac
     {%- elif duration is not none %}{{ t("tree.duration", seconds=duration) }}{% endif %}
     {%- if progress.failed %} · <span class="fetches-failed">{{ tn("tree.fetches_failed", progress.failed) }}</span>{% endif %}</p>
   {%- endif %}
-  {#- The single fetches (package 23, D1): loaded when the fold first opens, kept with its state
-  and content across a refresh of the tree (hx-preserve by id). Outside the tree's form: an item's
-  result holds a form of its own. #}
-  <details class="fold tree-fetches" id="tree-{{ job_id }}-fetches" hx-preserve>
-    <summary>{{ t("tree.fetches") }}</summary>
-    <div hx-get="/ui/run/progress?id={{ job_id }}&amp;items=1" hx-trigger="toggle once from:closest details" hx-swap="innerHTML"><p class="hint">{{ t("tree.fetches_hint") }}</p></div>
-  </details>
   {%- if not tree.roots %}
   {%- if cancel %}
   <p class="tree-starting">{{ t("tree.starting") }}</p>
@@ -73,6 +66,13 @@ site run, or the progress view's detail area), so no refresh brings the tree bac
   <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last or tree.untyped %}, {% endif %}{% endfor %}
     {%- if tree.untyped %}<span class="type-count type-count-open">{{ t("tree.type_open") }} {{ tree.untyped }}</span>{% endif %}</p>
   {%- endif %}
+  {#- The single fetches (package 23, D1): loaded when the fold first opens, kept with its state
+  and content across a refresh of the tree (hx-preserve by id). Outside the tree's form: an item's
+  result holds a form of its own. #}
+  <details class="fold tree-fetches" id="tree-{{ job_id }}-fetches" hx-preserve>
+    <summary>{{ t("tree.fetches") }}</summary>
+    <div hx-get="/ui/run/progress?id={{ job_id }}&amp;items=1" hx-trigger="toggle once from:closest details" hx-swap="innerHTML"><p class="hint">{{ t("tree.fetches_hint") }}</p></div>
+  </details>
   {% if tree.roots %}
   {% set prefix = "tree" %}
   <form id="tree-form" class="tree-form" data-access-mode="{{ tree_mode }}" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">

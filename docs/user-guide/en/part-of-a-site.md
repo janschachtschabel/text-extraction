@@ -69,9 +69,9 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   directory", "Link depth" and "Most pages", choose "Thorough: follow links" under "How to read
   the site" (the preset "Fast: sitemap first" reads only the start page when the site has a
   sitemap, and a sitemap lists the whole site; clearing "robots.txt and sitemaps" chooses it for
-  you), clear "robots.txt and sitemaps" for `"sitemaps": false`, and press "Read the site structure". Once the job is completed, "Show as
-  tree" lists its pages by host and path, each marked crawled, sitemap or linked only; while it
-  runs, "Show tree now" shows a snapshot. Check the pages you want, or a section to check all
+  you), clear "robots.txt and sitemaps" for `"sitemaps": false`, and press "Read the site structure". The tree of its pages
+  appears at once, by host and path, each marked crawled, sitemap or linked only, and grows
+  while the crawl runs; its head shows the job's state and "Cancel". Check the pages you want, or a section to check all
   its pages, and press "Extract selected": the checked URLs become batches, with the format,
   the browser fallback, the metadata and the options you set below the tree.
 

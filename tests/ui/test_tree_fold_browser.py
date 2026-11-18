@@ -62,9 +62,8 @@ def _open_tree(page: Page, origin: str) -> Locator:
     panel.locator("input[name=url]").fill(f"{origin}/")
     panel.locator("input[name=depth]").fill("1")
     panel.locator("button[type=submit]").click()
-    job = page.locator("#result section.job")
-    expect(job.locator(".state")).to_have_text("completed")
-    job.locator("button.tree-button").click()
+    job = page.locator("#result .tree-view")
+    expect(job.locator(".tree-head-line .state")).to_have_text("completed")
     view = page.locator("#result .tree-view")
     expect(view.locator("input[name=url]")).to_have_count(URLS)
     return view
