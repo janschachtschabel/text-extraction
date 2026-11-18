@@ -6,7 +6,9 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
 {%- set state = t(job.error) if job.error else (t(state_text(job.state)) if state_text(job.state) else job.state or "") %}
 {%- set announce.parts = announce.parts + [t("status.job", id=job.id, state=state)] %}
 {%- endfor %}
-<div class="progress-live" data-announce="{{ announce.parts|join(' ') }}"{% if refresh_url %} data-refresh hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ delay }}s" hx-swap="outerHTML"{% endif %}>
+{#- items_only: the site tree's fold of single fetches (package 23); the tree's head says the
+job's state, so the fold announces nothing and shows the items, the pager and the detail only. #}
+<div class="progress-live{% if items_only %} items-only{% endif %}"{% if not items_only %} data-announce="{{ announce.parts|join(' ') }}"{% endif %}{% if refresh_url %} data-refresh hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ delay }}s" hx-swap="outerHTML"{% endif %}>
   {% if refusal %}
   <div class="error" role="alert">
     <p>{{ t(refusal) }}</p>
@@ -16,13 +18,16 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
   {% for job in jobs %}
   <section class="job" data-job="{{ job.id }}">
     {% set job_id %}<code class="job-id">{{ job.id }}</code>{% endset %}
+    {%- if not items_only %}
     <h3>{{ t("progress.job", id=job_id) }}{% if job.kind %} <span class="kind">{{ code(job.kind) }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}" data-value="{{ job.state }}">{{ t(state_text(job.state)) if state_text(job.state) else code(job.state) }}</span>{% endif %}</h3>
+    {%- endif %}
     {% if job.error %}
     <div class="error job-error">
       <p class="error-text">{{ t(job.error) }}</p>
       {% with detail=job.error_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
     </div>
     {% else %}
+    {%- if not items_only %}
     <p class="bar">
       <progress value="{{ job.done }}" max="{{ job.total }}" aria-label="{{ t('progress.bar', id=job.id) }}">{{ job.done }}/{{ job.total }}</progress>
       <span class="done">{{ job.done }}/{{ job.total }}</span>
@@ -32,6 +37,7 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
     {#- Only a crawl that still runs can grow its total (third audit U6). #}
     {% if job.kind == "site" and job.state in ("queued", "running") %}<p class="hint">{{ t("progress.site_total") }}</p>{% endif %}
     <p class="elapsed">{{ t("progress.elapsed", elapsed=job.elapsed) }}</p>
+    {%- endif %}
     {% if job.items %}
     <table class="items">
       <thead><tr><th scope="col">#</th><th scope="col">URL</th><th scope="col">{{ t("progress.state") }}</th><th scope="col">{{ t("progress.error") }}</th><th scope="col"><span class="visually-hidden">{{ t("progress.actions") }}</span></th></tr></thead>
@@ -54,13 +60,15 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
       {% if job.next_url %}<button type="button" id="job-{{ job.id }}-next" class="secondary next" hx-get="{{ job.next_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">{{ t("progress.next", count=page_items) }}</button>{% endif %}
     </p>
     {% endif %}
+    {%- if not items_only %}
     <p class="actions">
-      {% if job.tree_url %}<button type="button" id="job-{{ job.id }}-tree" class="secondary tree-button"{% if job.tree_auto %} data-tree-auto{% endif %} hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
+      {% if job.tree_url %}<button type="button" id="job-{{ job.id }}-tree" class="secondary tree-button" hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
     </p>
     <form class="cancel" hx-post="/ui/run/cancel" hx-target="next .job-detail" hx-swap="innerHTML" hx-confirm="{{ t('progress.cancel_confirm') }}">
       <input type="hidden" name="id" value="{{ job.id }}">
       <button type="submit" id="job-{{ job.id }}-cancel" class="secondary">{{ t("progress.cancel") }}</button>
     </form>
+    {%- endif %}
     {% endif %}
   </section>
   {% endfor %}

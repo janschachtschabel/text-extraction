@@ -553,21 +553,6 @@ def test_batch_file_bounds(hits: list[str]) -> None:
         assert not preview.xpath("//form")
 
 
-def test_site_structure_form_starts_a_job(client: TestClient) -> None:
-    html = run(
-        client, "site-structure", url=PAGE, depth="1", max_pages="5", scope="host", sitemaps="on"
-    ).text
-
-    (section,) = jobs_of(html).values()
-    assert texts(section, ".//span[@class='kind']") == ["site"]
-    assert "The total grows while it crawls." in texts(section, ".//p[@class='hint']")
-    button = section.xpath(".//button[contains(@class, 'tree-button')]")[0]
-    assert button.text_content() == "Show tree now"
-    assert button.get("hx-get") == f"/ui/run/site-tree?id={section.get('data-job')}"
-    refused = tree(run(client, "site-structure", url=PAGE, depth="99").text)
-    assert texts(refused, "//*[@class='http-status']") == ["HTTP 422"]
-
-
 @pytest.mark.parametrize(
     ("state", "shown"), [("queued", True), ("running", True), ("completed", False)]
 )
@@ -594,7 +579,12 @@ Pages = Callable[[int, int], list[JobItem]]
 
 
 def fake_reads(
-    monkeypatch: pytest.MonkeyPatch, total: int, items_of: Pages, *, state: str = "completed"
+    monkeypatch: pytest.MonkeyPatch,
+    total: int,
+    items_of: Pages,
+    *,
+    state: str = "completed",
+    progress: JobProgress | None = None,
 ) -> list[tuple[int, int]]:
     """Replace the ``read_job`` core by one that answers a ``site`` job of ``total`` items made
     by ``items_of(offset, limit)``; records each read's (offset, limit) and checks that the items
@@ -621,7 +611,8 @@ def fake_reads(
             state=state,  # type: ignore[arg-type]
             created_at=created,
             finished_at=created + timedelta(seconds=58) if state == "completed" else None,
-            progress=JobProgress(total=total, done=total, success=total, partial=0, failed=0),
+            progress=progress
+            or JobProgress(total=total, done=total, success=total, partial=0, failed=0),
             items=items,
             next_offset=offset + limit if offset + limit < total else None,
         )
@@ -671,8 +662,9 @@ def test_tree_checkboxes_named_only_for_urls(
         "Found: linked only"
     ]
     assert texts(root, "//p[@class='tree-counts']") == [
-        "4 URLs · 2 crawled · 1 from the sitemap · 1 only linked · finished in 58 s"
+        "4 URLs · 2 crawled · 1 from the sitemap · 1 only linked"
     ]
+    assert texts(root, "//p[@class='tree-progress']") == ["finished in 58 s"]
     assert texts(root, "//span[@class='tree-counter']") == ["0 selected"]
     assert {button.get("data-action") for button in root.xpath("//button[@data-action]")} == {
         "tree-all",
@@ -912,10 +904,10 @@ def test_tree_lists_social_links(client: TestClient, monkeypatch: pytest.MonkeyP
     # After the tree, before the actions: it is no part of the selection.
     assert social.getprevious().get("class") == "tree-box"
     assert social.getnext().get("class") == "tree-actions"
-    [title] = social.xpath("./h5")
+    [title] = social.xpath("./h4")
     assert title.get("id")
     assert social.get("aria-labelledby") == title.get("id")
-    assert texts(social, "./h5") == ["Social media"]
+    assert texts(social, "./h4") == ["Social media"]
     assert texts(social, ".//p[@class='hint']") == [
         "Profiles the site links to. They are outside the site, so they cannot be selected."
     ]
@@ -1188,14 +1180,12 @@ def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch
     assert texts(tree(lines), "//ul[@class='problems']/li") == [
         "Zeile 1: Das Schema der URL muss http oder https sein"
     ]
-    # A site job's tree button and the tree's labels.
+    # A site run's head (package 23) and the tree's labels.
     site = client.post(
         "/ui/run/site-structure", data={"url": PAGE, "depth": "1"}, headers=german
     ).text
-    (site_section,) = jobs_of(site).values()
-    assert texts(site_section, ".//button[contains(@class, 'tree-button')]") == [
-        "Baum jetzt anzeigen"
-    ]
+    assert texts(tree(site), "//p[@class='tree-starting']") == ["Der Crawl startet …"]
+    assert texts(tree(site), "//span[contains(@class, 'state')]") == ["wartet"]
     fake_reads(
         monkeypatch, len(SMALL_SITE), lambda offset, limit: SMALL_SITE[offset : offset + limit]
     )

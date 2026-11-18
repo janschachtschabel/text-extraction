@@ -943,8 +943,10 @@ progress:
   hit, and refreshing stops
   once all are completed (after a 429 it tries again after `Retry-After`). A single operation
   that continues as a job (202) has a "Show progress" button for it.
-- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree now"
-  while it runs): each URL has a badge with its page type (guessed from the URL for a sitemap
+- **Site tree** (`/ui/run/site-tree`): the site-structure form opens it at once (package 23)
+  and it refreshes itself every 4 s while the job runs (longer for a job of more than 500
+  items), with the job's state, progress, elapsed time and "Cancel" in its head and the single
+  fetches in a fold that reads `/ui/run/progress?items=1` when first opened; each URL has a badge with its page type (guessed from the URL for a sitemap
   entry or a linked-only URL), "Types:" counts the shown URLs per type, and "Select content pages"
   ticks the content pages and unticks imprint, privacy, legal, contact, login, search and error
   pages and failed ones. The job is read in pages of 20 items, so at most 20 items are held at a

@@ -187,9 +187,8 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         panel.locator("input[name=depth]").fill("1")
         panel.locator("button[type=submit]").click()
 
-        job = page.locator("#result section.job")
-        expect(job.locator(".state")).to_have_text("completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_text("completed")
         view = page.locator("#result .tree-view")
         expect(view.locator("input[name=url]")).to_have_count(5)
 
@@ -262,9 +261,8 @@ def test_select_content_pages_leaves_failed_pages_out(failing_ui: tuple[str, str
         panel.locator("input[name=depth]").fill("1")
         panel.locator("button[type=submit]").click()
 
-        job = page.locator("#result section.job")
-        expect(job.locator(".state")).to_have_text("completed")
-        job.locator("button.tree-button").click()
+        job = page.locator("#result .tree-view")
+        expect(job.locator(".tree-head-line .state")).to_have_text("completed")
         view = page.locator("#result .tree-view")
         expect(view.locator("input[name=url]")).to_have_count(5)
         broken = view.locator(f"input[name=url][value='{origin}/broken.html']")

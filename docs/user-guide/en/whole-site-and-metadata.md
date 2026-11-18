@@ -209,9 +209,11 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
    the host, choose "How to read the site" ("Fast: sitemap first", the preset, or "Thorough: follow
    links"), and press "Read the site structure".
-2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
-   "Show tree now" shows a snapshot; the tree also appears by itself once the job has a result and
-   refreshes while it runs. Each URL shows its page type, and the "Types:" line above the tree counts them; with
+2. The site tree appears at once in place of a job card and grows every few seconds while the
+   crawl runs; your ticks, folds and filter stay. Its head shows the job's state, how many
+   fetches are done so far, the failed ones, how long it has run (or took) and, while it runs,
+   "Cancel". "Single fetches" under the head folds out the list of every fetch (robots.txt,
+   sitemaps, pages) with its state, error code and "Show". Each URL shows its page type, and the "Types:" line above the tree counts them; with
    JavaScript, chips under "Filter by type" replace that line and show only the URLs of a type
    (without JavaScript the line stays). "Select all" checks every URL shown (under a type filter
    only the shown ones), and "Select content pages" every shown URL but imprint,

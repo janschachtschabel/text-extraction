@@ -75,9 +75,9 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   „Schnell: Sitemap zuerst“ liest nur die Startseite, wenn die Website eine Sitemap hat, und eine
   Sitemap listet die ganze Website; ohne Häkchen bei „robots.txt und Sitemaps“ wird es von selbst
   gewählt), entfernen Sie das Häkchen bei „robots.txt und Sitemaps“ für `"sitemaps": false`, und klicken
-  Sie auf „Website-Struktur lesen“. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“
-  seine Seiten nach Host und Pfad, jede als gecrawlt, Sitemap oder nur verlinkt markiert;
-  während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. Markieren Sie die Seiten,
+  Sie auf „Website-Struktur lesen“. Der Baum seiner Seiten erscheint sofort,
+  nach Host und Pfad, jede als gecrawlt, Sitemap oder nur verlinkt markiert, und wächst, solange
+  der Crawl läuft; sein Kopf zeigt den Zustand des Jobs und „Abbrechen“. Markieren Sie die Seiten,
   die Sie möchten, oder einen Abschnitt für alle seine Seiten, und klicken Sie auf „Auswahl
   extrahieren“: Die markierten URLs werden zu Batches, mit dem Format, dem Browser-Fallback, den
   Metadaten und den Optionen, die Sie unter dem Baum setzen.

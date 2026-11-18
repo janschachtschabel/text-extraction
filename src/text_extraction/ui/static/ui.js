@@ -537,7 +537,6 @@
   // scroll position and the focus. A refresh says nothing and moves the focus nowhere; while a
   // text field, select or textarea of the form has the focus it waits.
   var treeSaved = null;
-  var autoLoaded = {};
 
   // A node's key across refreshes: a page by its URL, a section by the labels of its path.
   function nodeKey(item) {
@@ -755,6 +754,31 @@
     }
   });
 
+  // The tree's fold of single fetches (package 23) refreshes only while it is open: a refresh
+  // of a closed fold is skipped and asked for again when the fold opens.
+  document.addEventListener("htmx:beforeRequest", function (event) {
+    var live = event.detail.elt;
+    var fold = live instanceof Element ? live.closest("details.tree-fetches") : null;
+    if (fold && !fold.open && live.hasAttribute("data-refresh")) {
+      event.preventDefault();
+      live.setAttribute("data-skipped", "");
+    }
+  });
+
+  document.addEventListener("toggle", function (event) {
+    var fold = event.target;
+    if (!(fold instanceof HTMLDetailsElement) || !fold.open || !fold.matches(".tree-fetches")) {
+      return;
+    }
+    var live = fold.querySelector(".progress-live[data-skipped]");
+    if (live && window.htmx) {
+      live.removeAttribute("data-skipped");
+      window.htmx.ajax("GET", live.getAttribute("hx-get"), {
+        source: live, target: live, swap: "outerHTML"
+      });
+    }
+  }, true);
+
   // The answer arrived while the user started typing: it is dropped (afterRequest asks again).
   document.addEventListener("htmx:beforeSwap", function (event) {
     var wrapper = event.detail.elt;
@@ -809,66 +833,6 @@
       restoreTree(form, saved.form);
     }
     showLiveNote(root);
-  });
-
-  // A site job's tree shows itself once the job has a result: the progress view marks the
-  // button (data-tree-auto), and the script presses it once per job unless the tree was asked
-  // for already (a click, a request in flight) or something is shown below the jobs. Marked
-  // data-refresh, the request is no request of the user's: nothing is announced. A click while
-  // the script's own request is in flight is dropped (the tree is on its way), any other click
-  // counts as the user's request, so the script never loads the tree a second time. Without
-  // this script the "Show tree now" button stays as it is. The progress view replaces the
-  // button every few seconds, so the state is kept by the job's button id.
-  var autoPending = {};
-  var pressing = false;
-
-  document.addEventListener("click", function (event) {
-    var target = event.target instanceof Element ? event.target : null;
-    var button = target ? target.closest("button.tree-button") : null;
-    if (!button || pressing) {
-      return;
-    }
-    if (autoPending[button.id]) {
-      event.stopImmediatePropagation();  // htmx listens on the button itself, later
-      return;
-    }
-    autoLoaded[button.id] = true;
-  }, true);
-
-  document.addEventListener("htmx:load", function (event) {
-    var root = event.target instanceof Element ? event.target : null;
-    var buttons = root ? root.querySelectorAll("button.tree-button[data-tree-auto]") : [];
-    Array.prototype.forEach.call(buttons, function (button) {
-      window.setTimeout(function () {
-        var view = button.closest(".jobs-view");
-        var detail = view ? view.querySelector(".job-detail") : null;
-        if (!button.isConnected || autoLoaded[button.id] || !detail || detail.firstChild ||
-            button.classList.contains("htmx-request")) {
-          return;
-        }
-        autoLoaded[button.id] = true;
-        autoPending[button.id] = true;
-        button.setAttribute("data-refresh", "");
-        // Once the answer is in, the button is the user's again.
-        var done = function (settled) {
-          // A swap is over at afterSettle; a request that swapped nothing ends at afterRequest.
-          var over = settled.type === "htmx:afterSettle" || !settled.detail.successful;
-          if (settled.detail.elt === button && over) {
-            autoPending[button.id] = false;
-            button.removeAttribute("data-refresh");
-            document.removeEventListener("htmx:afterSettle", done);
-            document.removeEventListener("htmx:afterRequest", done);
-          }
-        };
-        document.addEventListener("htmx:afterSettle", done);
-        document.addEventListener("htmx:afterRequest", done);
-        // A request that never ends (its button gone) must not drop the user's clicks for good.
-        window.setTimeout(function () { autoPending[button.id] = false; }, 10000);
-        pressing = true;
-        button.click();
-        pressing = false;
-      }, 0);
-    });
   });
 
   // The "Unblock browser" box (package 22) shows only while the chosen "Site rules" step is
@@ -1038,11 +1002,17 @@
     return element instanceof Element && element.hasAttribute("data-refresh");
   }
 
-  // The data-announce texts of "root" and the elements in it, joined.
-  function announcement(root) {
+  // The data-announce texts of "root" and the elements in it, joined. "own": not those in an
+  // hx-preserve element inside root (package 23): a refresh carries that over unchanged, and what
+  // is in it announces through its own requests.
+  function announcement(root, own) {
     var found = root.matches("[data-announce]") ? [root] : root.querySelectorAll("[data-announce]");
-    return Array.prototype.map
+    return Array.prototype.filter
       .call(found, function (element) {
+        var kept = own && element.parentElement ? element.parentElement.closest("[hx-preserve]") : null;
+        return !kept || kept === root || !root.contains(kept);
+      })
+      .map(function (element) {
         return element.getAttribute("data-announce").trim();
       })
       .filter(Boolean)
@@ -1173,8 +1143,9 @@
     var message = announcement(root);
     if (isRefresh(event.detail.elt)) {
       // The view before the refresh said its states already.
-      if (message && message !== announcement(event.detail.elt)) {
-        announce(message);
+      var own = announcement(root, true);
+      if (own && own !== announcement(event.detail.elt, true)) {
+        announce(own);
       }
       return;
     }
