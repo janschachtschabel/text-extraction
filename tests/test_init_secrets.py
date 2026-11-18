@@ -208,6 +208,7 @@ def test_new_key_prints_the_key_and_matching_api_keys_lines(
     env_line = _value_after(".env", out)
     assert env_line.startswith("API_KEYS=[")
     assert json.loads(env_line.removeprefix("API_KEYS=")) == [entry]
+    assert _value_after("Shell", out) == f"export {env_line[:9]}'{env_line[9:]}'"
     panel_value = _value_after("Docker panel", out)
     assert panel_value.startswith("[")
     keys = [ApiKey.model_validate(item) for item in json.loads(panel_value)]
@@ -242,3 +243,13 @@ def test_new_key_and_show_admin_key_exclude_each_other(capsys: pytest.CaptureFix
     code, _, _ = _new_key_output(["--new-key", "jan", "--show-admin-key"], capsys)
 
     assert code == 2
+
+
+def test_role_without_new_key_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _new_key_output(["--secrets-dir", str(tmp_path), "--role", "admin"], capsys)
+
+    assert code == 2
+    assert "--role" in err
+    assert list(tmp_path.iterdir()) == []  # the full init did not run

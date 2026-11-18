@@ -123,7 +123,7 @@ log in with the key. The same steps for Windows PowerShell are under
 Manager deploys the same file from this repository's URL: see
 [Hostinger VPS](docs/user-guide/en/installation.md#hostinger-vps).
 
-`--new-key <name>` instead of `--show-admin-key` makes one more key (for another person, or with
+From version 0.1.13 on, `--new-key <name>` instead of `--show-admin-key` makes one more key (for another person, or with
 the role `user`) and prints the line for `API_KEYS`;
 [API keys: show, create, enter](docs/user-guide/en/installation.md#api-keys-show-create-enter)
 shows where it goes with Docker, on Hostinger and without Docker.

@@ -40,11 +40,13 @@ process its own `INTERNAL_PORT`. The browser worker needs the extra `browser` an
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` and set `BROWSER_ENABLED=true` on the
 API, the extract worker and the browser worker.
 
-With an API key instead of `AUTH_MODE=none` (for example when other machines reach the port):
+With an API key instead of `AUTH_MODE=none` (for example when other machines reach the port),
+first take `AUTH_MODE=none` away again, or the keys are ignored:
 
 ```bash
-uv run text-extraction-init --new-key me --role admin   # prints a key and its API_KEYS line
-export API_KEYS='[{"name":"me","role":"admin","sha256":"<the sha256 it printed>"}]'  # in each terminal
+uv run text-extraction-init --new-key me --role admin   # prints a key and an "export API_KEYS=..." line
+unset AUTH_MODE                                         # in each terminal: keys are on again
+export API_KEYS='[{"name":"me","role":"admin","sha256":"..."}]'  # the printed line, in each terminal
 UI_ENABLED=true uv run text-extraction                  # log in to http://localhost:8080/ui with the key
 ```
 
@@ -101,8 +103,8 @@ Invoke-RestMethod -Method Post -Headers @{ Authorization = "Bearer $KEY" } `
   -ContentType "application/json" -Body '{"url": "https://example.org/"}' `
   http://localhost:8080/v1/extract
 ```
- The internal port
-9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
+
+The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
 http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
 
 The file follows the newest `0.1.x` release on its own: its default image tag is `0.1`, and every
@@ -154,9 +156,9 @@ docker compose logs api | tail -n 20                   # why the API does not st
 ### Build from the checkout
 
 ```bash
-cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
+cp .env.example .env                           # then set VALKEY_PASSWORD and API_KEYS in it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
+uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
 docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
@@ -165,7 +167,7 @@ This file has no `init` service: it needs `API_KEYS` and `VALKEY_PASSWORD` in `.
 requests and the playground. Without uv, run the command in the image once it is built and
 `VALKEY_PASSWORD` is set (the file refuses to load without it):
 `docker compose -f docker-compose.build.yml run --rm --no-deps api text-extraction-init --new-key me --role admin`.
-A `VALKEY_PASSWORD` is letters and digits only. Without `openssl` (on Windows, Git Bash has it),
+A `VALKEY_PASSWORD` may hold only letters and digits. Without `openssl` (on Windows, Git Bash has it),
 `python -c "import secrets; print(secrets.token_hex(24))"` makes one too.
 
 ### Optional workers
@@ -254,13 +256,15 @@ docker compose run --rm -T init text-extraction-init --new-key jan --role admin 
 uv run text-extraction-init --new-key anna                                          # without Docker
 ```
 
-The answer has three parts (shortened here):
+The answer has four parts (shortened here):
 
 ```text
 Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):
   9f2c…
 .env line (docker compose; replace the API_KEYS line, then run docker compose up -d):
   API_KEYS=[{"name":"anna","role":"user","sha256":"4be1…"}]
+Shell (uv run without Docker; run it in each terminal):
+  export API_KEYS='[{"name":"anna","role":"user","sha256":"4be1…"}]'
 Docker panel variable (such as Hostinger): name API_KEYS, value:
   [{"name":"anna","role":"user","sha256":"4be1…"}]
 More than one key: put every entry, comma-separated, into one list: [{...},{...}]
@@ -276,7 +280,7 @@ later; without it (older images) [API keys](usage.md#api-keys) shows how to make
 | --- | --- |
 | `docker compose` (either file) | Open `.env` in a text editor, replace the whole line that starts with `API_KEYS=` with the printed `.env` line, save, run `docker compose up -d --wait` (with `-f docker-compose.build.yml` for the build file). |
 | Hostinger and other Docker panels | See [below](#hostinger-and-other-docker-panels). |
-| `uv run` without Docker | `export API_KEYS='[…]'` with the printed value in every terminal, then start the processes again. |
+| `uv run` without Docker | Run the printed `export API_KEYS=…` line in every terminal, then start the processes again. |
 | Kubernetes | The value goes into `secrets.apiKeys` (or your own Secret), see the [Helm chart](../../../deploy/helm/text-extraction/README.md). |
 
 For several keys, the line holds one list with every entry, for example
@@ -295,8 +299,8 @@ that after a change, while `docker compose restart` keeps the old values.
 2. Docker Manager, the project, "Edit" (environment variables): add a variable.
    - Name: `API_KEYS`
    - Value: the line under "Docker panel variable", the one that starts with `[`. Not the
-     `.env` line: `API_KEYS=` in the value field makes the name appear twice, and every service
-     stops with "API_KEYS must be a JSON list".
+     `.env` line: `API_KEYS=` in the value field makes the name appear twice, and the API and
+     the workers stop with "API_KEYS must be a JSON list".
 3. Deploy again. The variables go into `.env`, and the containers start with the new list.
 
 If a variable `API_KEYS` already exists (from `.env.example`, with zeros as the hash), replace its

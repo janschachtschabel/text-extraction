@@ -43,11 +43,13 @@ eigenen `INTERNAL_PORT`. Der Browser-Worker braucht das Extra `browser` und Chro
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` und setzen Sie `BROWSER_ENABLED=true`
 für die API, den Extract-Worker und den Browser-Worker.
 
-Mit einem API-Schlüssel statt `AUTH_MODE=none` (etwa wenn andere Rechner den Port erreichen):
+Mit einem API-Schlüssel statt `AUTH_MODE=none` (etwa wenn andere Rechner den Port erreichen)
+nehmen Sie `AUTH_MODE=none` zuerst wieder weg, sonst bleiben die Schlüssel unbeachtet:
 
 ```bash
-uv run text-extraction-init --new-key me --role admin   # prints a key and its API_KEYS line
-export API_KEYS='[{"name":"me","role":"admin","sha256":"<the sha256 it printed>"}]'  # in each terminal
+uv run text-extraction-init --new-key me --role admin   # prints a key and an "export API_KEYS=..." line
+unset AUTH_MODE                                         # in each terminal: keys are on again
+export API_KEYS='[{"name":"me","role":"admin","sha256":"..."}]'  # the printed line, in each terminal
 UI_ENABLED=true uv run text-extraction                  # log in to http://localhost:8080/ui with the key
 ```
 
@@ -160,19 +162,19 @@ docker compose logs api | tail -n 20                   # why the API does not st
 ### Aus dem Checkout bauen
 
 ```bash
-cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
+cp .env.example .env                           # then set VALKEY_PASSWORD and API_KEYS in it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
+uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
 docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
 Diese Datei hat keinen Dienst `init`: Sie braucht `API_KEYS` und `VALKEY_PASSWORD` in `.env`.
 Ersetzen Sie die Zeile `API_KEYS` in `.env` durch die Zeile, die `--new-key` ausgegeben hat, und
 behalten Sie den Schlüssel selbst für Ihre Anfragen und die Spielwiese. Ohne uv führen Sie den
-Befehl im Image aus, sobald es gebaut und `VALKEY_PASSWORD` gesetzt ist (ohne das lädt die Datei
+Befehl im Image aus, sobald es gebaut und `VALKEY_PASSWORD` gesetzt ist (ohne es lädt die Datei
 nicht):
 `docker compose -f docker-compose.build.yml run --rm --no-deps api text-extraction-init --new-key me --role admin`.
-Ein `VALKEY_PASSWORD` besteht nur aus Buchstaben und Ziffern. Ohne `openssl` (unter Windows bringt
+Ein `VALKEY_PASSWORD` darf nur Buchstaben und Ziffern enthalten. Ohne `openssl` (unter Windows bringt
 Git Bash es mit) erzeugt auch `python -c "import secrets; print(secrets.token_hex(24))"` eines.
 
 ### Optionale Worker
@@ -232,7 +234,7 @@ also immer zwei Teile.
 
 - Der Schlüssel: 64 Buchstaben und Ziffern. Sie behalten ihn, senden ihn mit jeder Anfrage als
   `Authorization: Bearer <key>` und melden sich damit an der Spielwiese an. Aus der Liste lässt er
-  sich nicht zurückgewinnen: Verloren ist verloren, dann erzeugen Sie einen neuen.
+  sich nicht zurückgewinnen: Ist er verloren, erzeugen Sie einen neuen.
 - Sein Eintrag in `API_KEYS`: `[{"name":"jan","role":"user","sha256":"…"}]`, eine JSON-Liste
   in den Einstellungen. Mehrere Schlüssel teilen sich eine Liste: `[{…},{…}]`.
 
@@ -267,13 +269,15 @@ docker compose run --rm -T init text-extraction-init --new-key jan --role admin 
 uv run text-extraction-init --new-key anna                                          # without Docker
 ```
 
-Die Antwort hat drei Teile (hier gekürzt):
+Die Antwort hat vier Teile (hier gekürzt):
 
 ```text
 Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):
   9f2c…
 .env line (docker compose; replace the API_KEYS line, then run docker compose up -d):
   API_KEYS=[{"name":"anna","role":"user","sha256":"4be1…"}]
+Shell (uv run without Docker; run it in each terminal):
+  export API_KEYS='[{"name":"anna","role":"user","sha256":"4be1…"}]'
 Docker panel variable (such as Hostinger): name API_KEYS, value:
   [{"name":"anna","role":"user","sha256":"4be1…"}]
 More than one key: put every entry, comma-separated, into one list: [{...},{...}]
@@ -289,12 +293,12 @@ wie Sie einen Schlüssel mit `openssl` erzeugen.
 | --- | --- |
 | `docker compose` (beide Dateien) | `.env` in einem Texteditor öffnen, die ganze Zeile, die mit `API_KEYS=` beginnt, durch die ausgegebene `.env`-Zeile ersetzen, speichern, `docker compose up -d --wait` ausführen (mit `-f docker-compose.build.yml` für die Build-Datei). |
 | Hostinger und andere Docker-Oberflächen | Siehe [unten](#hostinger-und-andere-docker-oberflächen). |
-| `uv run` ohne Docker | `export API_KEYS='[…]'` mit dem ausgegebenen Wert in jedem Terminal, dann die Prozesse neu starten. |
+| `uv run` ohne Docker | Die ausgegebene Zeile `export API_KEYS=…` in jedem Terminal ausführen, dann die Prozesse neu starten. |
 | Kubernetes | Der Wert gehört in `secrets.apiKeys` (oder Ihr eigenes Secret), siehe [Helm-Chart](../../../deploy/helm/text-extraction/README.md) (Englisch). |
 
 Für mehrere Schlüssel enthält die Zeile eine Liste mit allen Einträgen, zum Beispiel
 `API_KEYS=[{"name":"anna","role":"user","sha256":"…"},{"name":"jan","role":"admin","sha256":"…"}]`.
-Halten Sie sie in einer Zeile und ohne Anführungszeichen um die Liste. Der erzeugte Schlüssel
+Schreiben Sie sie in eine Zeile und ohne Anführungszeichen um die Liste. Der erzeugte Schlüssel
 `admin` steht nicht in dieser Liste (er kommt aus dem Volume) und gilt weiter. Um einen Schlüssel zu
 entziehen, entfernen Sie seinen Eintrag und führen `docker compose up -d --wait` erneut aus.
 
@@ -308,8 +312,8 @@ einer Änderung, `docker compose restart` behält dagegen die alten Werte.
 2. Docker Manager, das Projekt, „Bearbeiten“ (Umgebungsvariablen): eine Variable hinzufügen.
    - Name: `API_KEYS`
    - Wert: die Zeile unter „Docker panel variable“, die mit `[` beginnt. Nicht die
-     `.env`-Zeile: `API_KEYS=` im Feld Wert lässt den Namen doppelt erscheinen, und jeder Dienst
-     bricht mit „API_KEYS must be a JSON list“ ab.
+     `.env`-Zeile: `API_KEYS=` im Feld „Wert“ lässt den Namen doppelt erscheinen, und die API und
+     die Worker brechen mit „API_KEYS must be a JSON list“ ab.
 3. Erneut bereitstellen. Die Variablen landen in `.env`, und die Container starten mit der neuen
    Liste.
 
@@ -335,7 +339,7 @@ Befehl: Nehmen Sie `curl.exe` oder `Invoke-RestMethod`. Hinter einer Domain nehm
 | Was Sie sehen | Ursache und Abhilfe |
 | --- | --- |
 | 401 `unauthorized` | Der Schlüssel passt zu keinem Eintrag: erneut kopieren, ohne Leerzeichen. Nach einer Änderung von `.env` `docker compose up -d --wait` ausführen (ein Neustart behält die alte Liste). |
-| Die API startet nicht, ihr Log sagt `API_KEYS must be a JSON list` | Der Wert ist keine reine Liste: Er beginnt mit `API_KEYS=` (Feld Wert einer Oberfläche), steht in einem Feld in Anführungszeichen oder geht über mehrere Zeilen. |
+| Die API startet nicht, ihr Log sagt `API_KEYS must be a JSON list` | Der Wert ist keine reine Liste: Er beginnt mit `API_KEYS=` (Feld „Wert“ einer Oberfläche), steht in einem Feld in Anführungszeichen oder geht über mehrere Zeilen. |
 | Das Log sagt `duplicate API key name` | Zwei Einträge haben denselben Namen, oder einer heißt `admin` neben dem erzeugten Schlüssel: umbenennen (bei `--new-key` einen anderen Namen wählen). |
 | Das Log sagt `AUTH_MODE=api_key requires API_KEYS or API_KEYS_FILE` | Es gibt gar keinen Schlüssel: einen eintragen, oder die `docker-compose.yml` im Hauptordner nehmen, die einen anlegt. |
 | Der Schlüssel ist verloren | Einen eigenen Schlüssel kann niemand zurückholen: einen neuen erzeugen und seinen Eintrag ersetzen. Den erzeugten Admin-Schlüssel: `--show-admin-key`. |

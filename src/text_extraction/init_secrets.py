@@ -25,8 +25,8 @@ The command does not read ``Settings``: they need API keys, which do not exist y
 the Valkey password.
 
 ``--new-key NAME`` touches no secret: it prints a new API key and the matching ``API_KEYS`` value
-(for ``.env``, a Docker panel's variable form or a shell), so nobody has to compute a SHA-256 or
-write the JSON by hand. It runs wherever the image or the package runs, Windows included.
+(for ``.env``, a Docker panel's variable form and a POSIX shell), so nobody has to compute a
+SHA-256 or write the JSON by hand. It runs wherever the image or the package runs.
 """
 
 import argparse
@@ -148,6 +148,8 @@ def new_key_text(name: str, role: Literal["user", "admin"]) -> str:
         f"  {key}\n"
         ".env line (docker compose; replace the API_KEYS line, then run docker compose up -d):\n"
         f"  API_KEYS={value}\n"
+        "Shell (uv run without Docker; run it in each terminal):\n"
+        f"  export API_KEYS='{value}'\n"
         "Docker panel variable (such as Hostinger): name API_KEYS, value:\n"
         f"  {value}\n"
         "More than one key: put every entry, comma-separated, into one list: [{...},{...}]\n"
@@ -209,13 +211,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--role",
         choices=("user", "admin"),
-        default="user",
         help="Role of the key that --new-key prints (default user).",
     )
     args = parser.parse_args(argv)
+    if args.role is not None and args.new_key is None:
+        parser.error("--role goes with --new-key")
 
     if args.new_key is not None:
-        print(new_key_text(args.new_key, args.role), end="")
+        print(new_key_text(args.new_key, args.role or "user"), end="")
         sys.exit(0)
 
     if args.show_admin_key:
