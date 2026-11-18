@@ -12,7 +12,7 @@ Requires Python 3.13, [uv](https://docs.astral.sh/uv/) and a Valkey on `localhos
 
 ```bash
 uv sync                                                     # install the dependencies into .venv
-docker run -d --name valkey -p 6379:6379 valkey/valkey:8.1-alpine
+docker run -d --name valkey -p 6379:6379 valkey/valkey:9.1-alpine
 export AUTH_MODE=none                                       # in each terminal below
 UI_ENABLED=true uv run text-extraction                      # terminal 1: API on http://localhost:8080
 INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extract worker (jobs)

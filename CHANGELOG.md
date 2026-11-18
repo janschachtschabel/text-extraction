@@ -9,6 +9,14 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- Valkey 8.1 → 9.1 everywhere: both compose files, the Helm chart default
+  (`valkey.image.tag: 9.1-alpine`), the e2e and live workflows and the install guides
+  (supersedes Dependabot PR #60, which changed only the compose files). Valkey reads the data an
+  8.1 server wrote; going back to 8.1 after 9.1 has saved data is not guaranteed to work.
+- CI: astral-sh/setup-uv 10.3.2 → 10.3.3 (Dependabot PR #61).
+
 ## [0.1.12] - 2026-11-10
 
 ### Added
