@@ -129,14 +129,18 @@ def test_the_found_cell_names_the_source_and_the_lastmod(rendered: Any) -> None:
 @pytest.mark.parametrize(
     ("language", "summary"),
     [
-        ("en", "5 URLs · 2 crawled · 1 from the sitemap · 2 only linked · finished in 58 s"),
-        ("de", "5 URLs · 2 gecrawlt · 1 aus der Sitemap · 2 nur verlinkt · fertig in 58 s"),
+        ("en", "5 URLs · 2 crawled · 1 from the sitemap · 2 only linked|finished in 58 s"),
+        ("de", "5 URLs · 2 gecrawlt · 1 aus der Sitemap · 2 nur verlinkt|fertig in 58 s"),
     ],
 )
 def test_the_summary_has_the_counts_and_the_duration(
     rendered: Any, language: str, summary: str
 ) -> None:
-    assert texts(rendered(language), "//p[@class='tree-counts']") == [summary]
+    """The duration is in the head's progress line (package 23)."""
+    counts, duration = summary.split("|")
+    root = rendered(language)
+    assert texts(root, "//p[@class='tree-counts']") == [counts]
+    assert texts(root, "//p[@class='tree-progress']") == [duration]
 
 
 @pytest.mark.parametrize(

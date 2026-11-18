@@ -222,9 +222,12 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    Seitenzahl“, lassen Sie „Bereich“ beim Host, wählen Sie bei „So wird die Website gelesen“
    „Schnell: Sitemap zuerst“ (Voreinstellung) oder „Gründlich: Links folgen“, und klicken Sie auf
    „Website-Struktur lesen“.
-2. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“ die Seiten nach Host und Pfad;
-   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme; der Baum erscheint auch von
-   selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange er läuft. Jede URL zeigt
+2. Der Website-Baum erscheint sofort statt eines Job-Kastens und wächst alle paar Sekunden mit,
+   solange der Crawl läuft; Ihre Häkchen, aufgeklappten Abschnitte und der Filter bleiben. Sein
+   Kopf zeigt den Zustand des Jobs, wie viele Abrufe bisher erledigt sind, die fehlgeschlagenen,
+   wie lange er läuft (oder lief) und, solange er läuft, „Abbrechen“. „Einzelne Abrufe“ unter dem
+   Kopf klappt die Liste aller Abrufe (robots.txt, Sitemaps, Seiten) mit Zustand, Fehlercode und
+   „Anzeigen“ auf. Jede URL zeigt
    ihren Seitentyp, und die Zeile „Typen:“ über dem Baum zählt sie; mit JavaScript ersetzen
    Filter-Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
    JavaScript bleibt die Zeile stehen). „Alle auswählen“ markiert jede angezeigte URL (unter einem

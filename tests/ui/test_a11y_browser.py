@@ -83,9 +83,8 @@ def _tree(page: Page, origin: str, state: str) -> list[str]:
     page.fill("#site-url", f"{origin}/")
     page.fill("#site-depth", "1")
     _submit(page, "site-structure")
-    site = page.locator("#result section.job", has=page.locator("button.tree-button"))
-    expect(site.locator(".state")).to_have_attribute("data-value", "completed")
-    site.locator("button.tree-button").click()
+    site = page.locator("#result .tree-view")
+    expect(site.locator(".tree-head-line .state")).to_have_attribute("data-value", "completed")
     view = page.locator("#result .tree-view")
     expect(view.locator("input[name=url]")).to_have_count(TREE_URLS)
     blocked = view.locator("input[data-blocked=robots]")
@@ -628,12 +627,11 @@ def _open_tree(page: Page, origin: str) -> str:
     page.fill("#site-url", f"{origin}/")
     page.fill("#site-depth", "1")
     _submit(page, "site-structure")
-    site = page.locator("#result section.job", has=page.locator("button.tree-button"))
-    expect(site.locator(".state")).to_have_attribute("data-value", "completed")
-    site.locator("button.tree-button").click()
+    site = page.locator("#result .tree-view")
+    expect(site.locator(".tree-head-line .state")).to_have_attribute("data-value", "completed")
     expect(page.locator("#result .tree-view input[name=url]")).to_have_count(TREE_URLS)
-    job_id: str = site.get_attribute("data-job") or ""
-    return job_id
+    fetches = page.locator("#result .tree-fetches").get_attribute("id") or ""
+    return fetches.removeprefix("tree-").removesuffix("-fetches")
 
 
 def test_tree_actions_are_reachable_from_the_start_of_the_tree(ui: tuple[str, str]) -> None:
@@ -668,12 +666,12 @@ def test_refresh_that_removes_the_focused_button_keeps_focus_in_the_view(
     with browsing(url) as (page, console):
         _log_in(page)
         page.wait_for_selector("#app-shell")
-        page.click("#tab-site-structure")
-        page.fill("#site-url", f"{origin}{SLOW_PATH}")
-        _submit(page, "site-structure")
+        page.click("#tab-batch")
+        page.fill("#batch-urls", f"{origin}{SLOW_PATH}")
+        _submit(page, "batch")
         job = page.locator("#result section.job")
         job_id = job.get_attribute("data-job")
-        button = f"job-{job_id}-tree"
+        button = f"job-{job_id}-cancel"
         page.focus(f"[id='{button}']")
         page.keyboard.press("Shift+Tab")  # a keyboard user's focus, with its ring
         page.keyboard.press("Tab")

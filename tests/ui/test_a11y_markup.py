@@ -487,11 +487,10 @@ def _untitled_result(language: Language) -> Any:
 def test_headings_do_not_skip_a_level(
     admin: TestClient, language: Language, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Audit U8 (axe heading-order): a fragment shown under a tab's h2 starts at h3 at most, and
-    the tree, shown under its job's h3, at h4."""
+    """Audit U8 (axe heading-order): a fragment shown under a tab's h2 starts at h3 at most; the
+    tree too, shown on its own in the site run (package 23)."""
     fragments = _fragments(admin, language, monkeypatch)
-    shown = {name: (fragments[name], 2) for name in ("result", "preview", "progress")}
-    shown["tree"] = (fragments["tree"], 3)
+    shown = {name: (fragments[name], 2) for name in ("result", "preview", "progress", "tree")}
     shown["untitled result"] = (_untitled_result(language), 2)
 
     for name, (root, under) in shown.items():
