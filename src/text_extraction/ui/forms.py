@@ -22,12 +22,9 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from text_extraction.compliance import ComplianceMode
-from text_extraction.documents.routing import ocr_available
-from text_extraction.feature_access import Feature, allowed
 from text_extraction.file_api import PATH as FILE_PATH
-from text_extraction.pii_dispatch import pii_available
-from text_extraction.pipeline_media import asr_available
-from text_extraction.settings import Settings, llm_available
+from text_extraction.info import offered_features
+from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
 from text_extraction.ui.i18n import Message, MessageError
@@ -423,18 +420,8 @@ _ADMIN_ONLY_HINTS: Final[dict[str, str]] = {
 
 def feature_offer(role: str, settings: Settings) -> FeatureOffer:
     """The features the forms offer to a caller of ``role``: what the service has and the role
-    may use (``feature_access.allowed``)."""
-    has = {
-        "ocr": ocr_available(settings),
-        "pii": pii_available(settings),
-        "transcribe": asr_available(settings) and settings.media_enabled,
-        "llm": llm_available(settings),
-    }
-    switch: dict[str, Feature] = {"ocr": "ocr", "pii": "pii", "transcribe": "asr", "llm": "llm"}
-    admin_only = frozenset(
-        name for name, on in has.items() if on and not allowed(switch[name], role, settings)
-    )
-    offered = {name: on and name not in admin_only for name, on in has.items()}
+    may use (``info.offered_features``)."""
+    offered, admin_only = offered_features(role, settings)
     return FeatureOffer(
         ocr=offered["ocr"],
         pii=offered["pii"],

@@ -181,7 +181,7 @@ def test_check_jobs_enabled() -> None:
 
 
 def test_service_info() -> None:
-    answer = service_info(Principal("alice", "user", None))
+    answer = service_info(Principal("alice", "user", None), make_settings())
 
     assert answer.status == "success"
     assert answer.data is not None

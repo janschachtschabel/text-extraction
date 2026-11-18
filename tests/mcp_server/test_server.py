@@ -120,6 +120,8 @@ def test_service_info_call(client: TestClient) -> None:
     assert envelope["data"]["principal"] == "alice"
     assert envelope["data"]["role"] == "user"
     assert envelope["data"]["name"] == "text-extraction"
+    rest = client.get("/v1/info", headers=AUTH).json()["data"]
+    assert envelope["data"] == rest
 
 
 def test_not_in_openapi(client: TestClient) -> None:

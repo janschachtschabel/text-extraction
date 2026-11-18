@@ -364,8 +364,9 @@ def create_public_app(
     async def info(
         principal: Annotated[Principal, Depends(require_role("user"))],
     ) -> Envelope[InfoData]:
-        """Name and version of the service, and who the caller is."""
-        return service_info(principal)
+        """Name and version of the service, who the caller is, which features the caller's key
+        can use (`features`) and which limits apply (`limits`)."""
+        return service_info(principal, settings)
 
     path_limits = {
         "/v1/batch": batch_body_limit(settings),
