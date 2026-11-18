@@ -42,6 +42,7 @@ from text_extraction.file_models import FileForm
 from text_extraction.jobs_api import check_jobs_enabled
 from text_extraction.mcp_server.calls import ModelTool, call_header
 from text_extraction.mcp_server.files import MAX_CONTENT_TYPE_CHARS, decode_file
+from text_extraction.mcp_server.option_hints import option_fields, options_description
 from text_extraction.mcp_server.results import (
     answer_payload,
     fit_answer,
@@ -266,6 +267,7 @@ class ExtractionTool(ModelTool):
     answers a job (``POST /v1/batch``, ``POST /v1/site-structure``) has none."""
 
     route: ClassVar[str]
+    rest_model: ClassVar[type[BaseModel]]
     waits: ClassVar[bool] = True
 
     def __init__(self, name: str, description: str) -> None:
@@ -275,6 +277,10 @@ class ExtractionTool(ModelTool):
             parameters=lean_schema(self.args_model),
             annotations=_OPEN_WORLD,
         )
+        # The fields ``options`` carries, with their hints (package 24, gap 1).
+        fields = option_fields(self.rest_model, self.args_model)
+        options = self.parameters["properties"]["options"]
+        options["description"] = options_description(self.route, fields)
 
     @abstractmethod
     async def answer(
@@ -321,6 +327,8 @@ class ExtractionTool(ModelTool):
 
 
 class ExtractUrlTool(ExtractionTool):
+    route = "POST /v1/extract"
+    rest_model = ExtractRequest
     args_model = ExtractUrlArguments
 
     def __init__(self) -> None:
@@ -347,6 +355,8 @@ class ExtractUrlTool(ExtractionTool):
 
 
 class ExtractFileTool(ExtractionTool):
+    route = "POST /v1/extract/file"
+    rest_model = FileForm
     args_model = ExtractFileArguments
 
     def __init__(self, settings: Settings) -> None:
@@ -384,6 +394,8 @@ class ExtractFileTool(ExtractionTool):
 
 
 class ScreenshotUrlTool(ExtractionTool):
+    route = "POST /v1/screenshot"
+    rest_model = ScreenshotRequest
     args_model = ScreenshotUrlArguments
 
     def __init__(self) -> None:
@@ -441,6 +453,8 @@ class ScreenshotUrlTool(ExtractionTool):
 
 
 class ExtractStructuredTool(ExtractionTool):
+    route = "POST /v1/structured"
+    rest_model = StructuredRequest
     args_model = ExtractStructuredArguments
 
     def __init__(self) -> None:
@@ -460,6 +474,8 @@ class ExtractStructuredTool(ExtractionTool):
 
 
 class ChunkTool(ExtractionTool):
+    route = "POST /v1/chunk"
+    rest_model = ChunkRequest
     args_model = ChunkArguments
 
     def check_body(self, body: dict[str, Any], settings: Settings) -> None:

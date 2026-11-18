@@ -139,6 +139,8 @@ class GetJobArguments(SlicedArguments):
 
 
 class BatchExtractTool(ExtractionTool):
+    route = "POST /v1/batch"
+    rest_model = BatchRequest
     args_model = BatchExtractArguments
     waits = False
 
@@ -164,6 +166,8 @@ class BatchExtractTool(ExtractionTool):
 
 
 class SiteStructureTool(ExtractionTool):
+    route = "POST /v1/site-structure"
+    rest_model = SiteStructureRequest
     args_model = SiteStructureArguments
     waits = False
 
