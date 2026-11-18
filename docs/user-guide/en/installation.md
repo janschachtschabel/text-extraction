@@ -34,7 +34,7 @@ there (or put them in a file and run `set -a; . ./my.env; set +a` in each termin
 only, and only while you need it. It answers only the host names of `ALLOWED_HOSTS` (`localhost`,
 `127.0.0.1`, `[::1]` and `api`), so a web page that points its own domain at your machine (DNS
 rebinding) is refused. Every process reads the same settings, so each terminal needs
-`AUTH_MODE=none` (or the same `API_KEYS`), and each serves its internal port: give every further
+`AUTH_MODE=none` (or, without it, the same `API_KEYS`), and each serves its internal port: give every further
 process its own `INTERNAL_PORT`. The browser worker needs the extra `browser` and Chromium
 (`uv sync --extra browser`, then `uv run playwright install chromium`); start it with
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` and set `BROWSER_ENABLED=true` on the
@@ -256,7 +256,7 @@ docker compose run --rm -T init text-extraction-init --new-key jan --role admin 
 uv run text-extraction-init --new-key anna                                          # without Docker
 ```
 
-The answer has four parts (shortened here):
+The answer has four parts (shortened here; your key and hash differ):
 
 ```text
 Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):

@@ -134,8 +134,9 @@ Windows-PowerShell stehen unter
 Manager von Hostinger stellt dieselbe Datei über die URL dieses Repositorys bereit: siehe
 [Hostinger-VPS](docs/user-guide/de/installation.md#hostinger-vps).
 
-Ab Version 0.1.13 erzeugt `--new-key <name>` statt `--show-admin-key` einen weiteren Schlüssel (für eine andere
-Person oder mit der Rolle `user`) und gibt die Zeile für `API_KEYS` aus;
+Ab Version 0.1.13 erzeugt `--new-key <name>` statt `--show-admin-key` einen weiteren
+Schlüssel (für eine andere Person oder mit der Rolle `user`) und gibt die Zeile für `API_KEYS`
+aus;
 [API-Schlüssel: anzeigen, erzeugen, eintragen](docs/user-guide/de/installation.md#api-schlüssel-anzeigen-erzeugen-eintragen)
 zeigt, wohin sie mit Docker, bei Hostinger und ohne Docker gehört.
 [Installation](docs/user-guide/de/installation.md) beschreibt außerdem HTTPS mit `DOMAIN`, das

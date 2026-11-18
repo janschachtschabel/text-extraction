@@ -36,8 +36,8 @@ sie dort also mit `export` (oder schreiben Sie sie in eine Datei und führen Sie
 Ihrem eigenen Rechner und nur, solange Sie es brauchen. Er antwortet nur den Hostnamen aus
 `ALLOWED_HOSTS` (`localhost`, `127.0.0.1`, `[::1]` und `api`), sodass eine Webseite, die ihre
 eigene Domain auf Ihren Rechner zeigen lässt (DNS-Rebinding), abgewiesen wird. Jeder Prozess liest
-dieselben Einstellungen, also braucht jedes Terminal `AUTH_MODE=none` (oder dieselben
-`API_KEYS`), und jeder bedient seinen internen Port: Geben Sie jedem weiteren Prozess einen
+dieselben Einstellungen, also braucht jedes Terminal `AUTH_MODE=none` (oder, ohne es,
+dieselben `API_KEYS`), und jeder bedient seinen internen Port: Geben Sie jedem weiteren Prozess einen
 eigenen `INTERNAL_PORT`. Der Browser-Worker braucht das Extra `browser` und Chromium
 (`uv sync --extra browser`, dann `uv run playwright install chromium`); starten Sie ihn mit
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` und setzen Sie `BROWSER_ENABLED=true`
@@ -269,7 +269,7 @@ docker compose run --rm -T init text-extraction-init --new-key jan --role admin 
 uv run text-extraction-init --new-key anna                                          # without Docker
 ```
 
-Die Antwort hat vier Teile (hier gekürzt):
+Die Antwort hat vier Teile (hier gekürzt; Ihr Schlüssel und Hash sehen anders aus):
 
 ```text
 Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):
