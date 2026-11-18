@@ -219,6 +219,24 @@ async def _wait_until_completed(
     return None
 
 
+def screenshot_hints(payload: dict[str, Any]) -> list[str]:
+    """One hint per item of the page whose result has a screenshot (package 24, gap 3): get_job
+    attaches no image, get_job_screenshot does."""
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    hints: list[str] = []
+    for item in data.get("items") or []:
+        result = item.get("result") if isinstance(item, dict) else None
+        found = result.get("data") if isinstance(result, dict) else None
+        if isinstance(found, dict) and isinstance(found.get("screenshot"), dict):
+            hints.append(
+                f"Item {item.get('index')} has a screenshot: get_job_screenshot with job_id "
+                f"{data.get('id')}."
+            )
+    return hints
+
+
 class GetJobTool(ModelTool):
     """Status, progress and one page of a job's items (``GET /v1/jobs/{id}``)."""
 
@@ -254,7 +272,7 @@ class GetJobTool(ModelTool):
         max_chars = args.max_chars or settings.mcp_max_content_chars
         sliced = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
         cut = fit_answer(payload, max_chars=settings.mcp_max_answer_chars)
-        hints = [*kept_item_hints(payload, sliced), *cut]
+        hints = [*kept_item_hints(payload, sliced), *cut, *screenshot_hints(payload)]
         return payload_result(payload, is_error=False, hints=hints)
 
 
@@ -266,7 +284,8 @@ class GetJobScreenshotTool(ModelTool):
     def __init__(self) -> None:
         super().__init__(
             name="get_job_screenshot",
-            description="The screenshot of a screenshot job (PNG, JPEG or WebP, as its request "
+            description="The screenshot of a job (screenshot_url, or an extraction with "
+            "`screenshot: true` that continued as a job; PNG, JPEG or WebP, as its request "
             "asked; GET /v1/jobs/{id}/artifacts/screenshot.png, .jpg or .webp), attached as an "
             "image.",
             parameters=lean_schema(JobIdArguments),

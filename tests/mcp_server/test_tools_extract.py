@@ -31,7 +31,11 @@ from text_extraction.mcp_server.results import (
     slice_content,
 )
 from text_extraction.mcp_server.server import mcp_body_limit
-from text_extraction.mcp_server.tools_extract import ExtractFileArguments, ScreenshotUrlTool
+from text_extraction.mcp_server.tools_extract import (
+    ExtractFileArguments,
+    ExtractUrlTool,
+    ScreenshotUrlTool,
+)
 from text_extraction.pipeline import create_pipeline
 from text_extraction.settings import Settings
 from text_extraction.structured.checks import XPATH_NEEDS_ADMIN_MESSAGE
@@ -708,6 +712,37 @@ def test_screenshot_image_has_the_media_type_of_its_format(
     assert envelope_of(result)["data"]["screenshot"]["name"] == name
 
 
+@pytest.mark.parametrize("limit", [5_000_000, 500])
+def test_extract_url_attaches_its_screenshot(limit: int) -> None:
+    """Package 24, gap 3: an extraction with ``screenshot: true`` attaches the image as
+    screenshot_url does, or links it when it is over MCP_IMAGE_MAX_BYTES."""
+    case = BrowserCase(mcp_enabled=True, mcp_image_max_bytes=limit)
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        arguments = {"url": PAGE, "options": {"screenshot": True}}
+        result = call_tool(client, "extract_url", arguments, headers=AUTH)
+
+    assert result["isError"] is False
+    envelope = envelope_of(result)
+    assert envelope["data"]["content"]
+    shot = envelope["data"]["screenshot"]
+    images = [block for block in result["content"] if block["type"] == "image"]
+    if limit >= len(PNG):
+        assert [base64.b64decode(image["data"]) for image in images] == [PNG]
+        assert hints_of(result) == []
+    else:
+        assert images == []
+        assert hints_of(result) == [
+            f"The screenshot ({len(PNG)} bytes) is over MCP_IMAGE_MAX_BYTES; download it from "
+            f"{shot['url']}."
+        ]
+
+
+def test_extract_url_without_a_screenshot_attaches_nothing(client: TestClient) -> None:
+    result = call_tool(client, "extract_url", {"url": PAGE}, headers=AUTH)
+
+    assert [block for block in result["content"] if block["type"] == "image"] == []
+
+
 def test_screenshot_tool_describes_the_formats() -> None:
     description = ScreenshotUrlTool().description or ""
 
@@ -727,9 +762,7 @@ def test_screenshot_hint_without_a_size() -> None:
         images: list[Any] = []
         payload = {"status": "success", "data": {"screenshot": ref}}
         asyncio.run(
-            ScreenshotUrlTool().attach(
-                state, Principal("alice", "user", None), payload, hints, images
-            )
+            ExtractUrlTool().attach(state, Principal("alice", "user", None), payload, hints, images)
         )
         assert images == []
         assert hints == [f"The screenshot is not attached; download it from {ref['url']}."]

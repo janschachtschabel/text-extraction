@@ -640,6 +640,20 @@ def test_get_job_screenshot_reads_the_name_from_the_result(
     }
 
 
+def test_get_job_hints_at_the_screenshot() -> None:
+    """Package 24, gap 3: get_job names get_job_screenshot for an item with a screenshot."""
+    case = BrowserCase(mcp_enabled=True)
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        started = call_tool(
+            client, "extract_url", {"url": PAGE, "options": {"screenshot": True}}, headers=AUTH
+        )
+        job_id = envelope_of(started)["data"]["screenshot"]["url"].split("/")[3]
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    assert result["isError"] is False
+    assert f"Item 0 has a screenshot: get_job_screenshot with job_id {job_id}." in hints_of(result)
+
+
 def test_get_job_screenshot_over_the_image_limit() -> None:
     with running(mcp_image_max_bytes=500) as client:
         job_id = start_batch(client)
