@@ -3,15 +3,26 @@ stack's secrets on its first start (Hostinger rule: the first deploy works witho
 
 import hashlib
 import json
+import re
 import stat
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
+import yaml
 
 from text_extraction import init_secrets
 from text_extraction.settings import ApiKey
 
-FILES = ("valkey-password", "admin-key", "valkey.conf", "valkey-url", "api-keys.json")
+FILES = (
+    "valkey-password",
+    "admin-key",
+    "valkey.conf",
+    "valkey-url",
+    "api-keys.json",
+    "searxng-secret",
+    "searxng/settings.yml",
+)
 
 
 def _mode(path: Path) -> int:
@@ -21,7 +32,8 @@ def _mode(path: Path) -> int:
 def test_creates_every_file(tmp_path: Path) -> None:
     result = init_secrets.ensure_secrets(tmp_path)
 
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(FILES)
+    created = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    assert created == sorted(FILES)
     password = (tmp_path / "valkey-password").read_text().strip()
     admin_key = (tmp_path / "admin-key").read_text().strip()
     assert len(password) == 48
@@ -89,12 +101,58 @@ def test_second_run_keeps_the_secrets(tmp_path: Path) -> None:
 def test_derived_files_are_rebuilt_from_the_kept_secrets(tmp_path: Path) -> None:
     init_secrets.ensure_secrets(tmp_path)
     expected = {name: (tmp_path / name).read_text() for name in FILES}
-    for name in ("valkey.conf", "valkey-url", "api-keys.json"):
+    for name in ("valkey.conf", "valkey-url", "api-keys.json", "searxng/settings.yml"):
         (tmp_path / name).unlink()
 
     init_secrets.ensure_secrets(tmp_path)
 
     assert {name: (tmp_path / name).read_text() for name in FILES} == expected
+
+
+def _searxng_key(directory: Path) -> str:
+    settings = yaml.safe_load((directory / "searxng/settings.yml").read_text())
+    return str(settings["server"]["secret_key"])
+
+
+def test_searxng_settings_carry_a_generated_key(tmp_path: Path) -> None:
+    init_secrets.ensure_secrets(tmp_path)
+
+    key = _searxng_key(tmp_path)
+    assert re.fullmatch(r"[0-9a-f]{64}", key)
+    assert (tmp_path / "searxng-secret").read_text().strip() == key
+    # The packaged template, with nothing changed but the placeholder.
+    template = files("text_extraction").joinpath("data/searxng-settings.yml").read_text("utf-8")
+    rendered = (tmp_path / "searxng/settings.yml").read_text()
+    assert rendered == template.replace("ultrasecretkey", key)
+
+
+def test_searxng_key_differs_from_the_other_secrets(tmp_path: Path) -> None:
+    init_secrets.ensure_secrets(tmp_path)
+
+    others = {(tmp_path / n).read_text().strip() for n in ("valkey-password", "admin-key")}
+    assert _searxng_key(tmp_path) not in others
+
+
+def test_second_run_keeps_the_searxng_key(tmp_path: Path) -> None:
+    init_secrets.ensure_secrets(tmp_path)
+    key = _searxng_key(tmp_path)
+    (tmp_path / "searxng/settings.yml").write_text("stale: true\n")
+
+    init_secrets.ensure_secrets(tmp_path)
+
+    # Rendered again from the template on every start, so an updated template arrives, with the
+    # kept key.
+    assert _searxng_key(tmp_path) == key
+
+
+def test_searxng_files_are_readable_by_the_searxng_user(tmp_path: Path) -> None:
+    init_secrets.ensure_secrets(tmp_path)
+
+    # SearXNG runs as its own user (977) and gets only the folder searxng/ (a volume subpath);
+    # the key it is rendered from stays with the app user.
+    assert _mode(tmp_path / "searxng") == 0o755
+    assert _mode(tmp_path / "searxng/settings.yml") == 0o644
+    assert _mode(tmp_path / "searxng-secret") == 0o600
 
 
 def test_valkey_host_option(tmp_path: Path) -> None:
@@ -146,6 +204,8 @@ def test_main_creates_the_secrets_and_logs_the_key_once(
     assert "--show-admin-key" in second_out
     password = (tmp_path / "valkey-password").read_text().strip()
     assert password not in first_out + second_out
+    searxng_key = (tmp_path / "searxng-secret").read_text().strip()
+    assert searxng_key not in first_out + second_out
 
 
 def test_main_show_admin_key(

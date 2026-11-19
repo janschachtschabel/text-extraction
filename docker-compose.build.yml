@@ -27,6 +27,8 @@
 # `docker compose -f docker-compose.build.yml up -d --wait --scale docling-models=0
 # --scale docling-worker=0` (ASR: asr-models, asr-worker; PII: nlp-models, nlp-worker; LLM:
 # llm-worker).
+# Web search: the service `searxng` (SearXNG, AGPL-3.0, unmodified, no published port) answers the
+# API's POST /v1/search; SEARCH_ENABLED=false in .env switches it off for the API.
 # The MCP endpoint (http://127.0.0.1:8080/mcp) and the playground (http://127.0.0.1:8080/ui) are on
 # for the api service; MCP_ENABLED=false or UI_ENABLED=false in .env or the shell switches them off.
 # No service sets deploy.resources. With every worker the stack takes about 6 GiB of memory when
@@ -78,6 +80,9 @@ services:
       # Under AUTH_MODE=none both are open to anyone who can reach port 8080.
       MCP_ENABLED: ${MCP_ENABLED:-true}
       UI_ENABLED: ${UI_ENABLED:-true}
+      # Web search through the searxng service (SEARCH_URL defaults to it); SEARCH_ENABLED=false in
+      # .env or the shell switches it off. The API does not wait for SearXNG.
+      SEARCH_ENABLED: ${SEARCH_ENABLED:-true}
     ports:
       - "8080:8080" # public API, /mcp and /ui; the internal port 9090 is not published
     healthcheck:
@@ -324,6 +329,35 @@ services:
     # both together (e.g. 130 s and 140s), or Docker kills the worker before the hand-back and
     # its items wait for their lease (4 x LLM_TIMEOUT_SECONDS + 10 s).
     stop_grace_period: 45s
+
+  # Web search backend of the API (package 25): SearXNG, unmodified, as in docker-compose.yml
+  # (same image, user, hardening and health check; tests/test_compose_files.py). No port is
+  # published. This file has no init service: the template is mounted from the checkout and
+  # SEARXNG_SECRET, which wins over its placeholder key, is generated afresh on every start (the
+  # key signs nothing that outlives the container).
+  searxng:
+    image: searxng/searxng:2026.11.2-cccbc9e15
+    user: "977:977"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - export SEARXNG_SECRET="$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; exec /usr/local/searxng/entrypoint.sh
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/searxng:uid=977,gid=977
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./src/text_extraction/data/searxng-settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
 
   valkey:
     image: valkey/valkey:9.1-alpine

@@ -1,0 +1,73 @@
+# SearXNG settings of the text-extraction stack (package 25). SearXNG runs as its own, unmodified
+# container (searxng/searxng, AGPL-3.0) and answers only the API's JSON requests.
+#
+# text-extraction-init renders this file into the secrets volume (searxng/settings.yml) on every
+# start, with the placeholder secret_key replaced by a generated key it keeps; the Helm chart mounts
+# it from a ConfigMap and sets the key through SEARXNG_SECRET. SearXNG refuses to start with the
+# placeholder, so an unrendered copy never runs with a known key.
+#
+# Merged over SearXNG's own settings.yml. SEARCH_SOURCES must name exactly the engines kept here
+# (tests/test_searxng_settings.py).
+
+use_default_settings:
+  engines:
+    # Only engines with an official, free API (ruling D2 a); every scraping engine stays off.
+    keep_only:
+      - wikipedia
+      - wikibooks
+      - wikiversity
+      - wikinews
+      - mwmbl
+      - openalex
+      - arxiv
+      - crossref
+
+general:
+  instance_name: text-extraction search
+
+search:
+  # The API asks for JSON; html stays for a look at the instance from inside the network.
+  formats:
+    - html
+    - json
+  # No autocomplete requests to a scraping backend.
+  autocomplete: ""
+
+server:
+  secret_key: "ultrasecretkey"
+  # Only the API asks (no published port): no bot protection, no public-instance mode, no image
+  # proxy.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+outgoing:
+  # Cut every engine below the API's SEARCH_TIMEOUT_SECONDS (10): a slow source (crossref waits
+  # 30 s by default) is reported as unresponsive instead of failing the whole search.
+  max_request_timeout: 8.0
+
+# No Valkey of its own (the limiter is off).
+valkey:
+  url: false
+
+# Merged by name into SearXNG's engine definitions. Five of the eight are disabled by default:
+# each is switched on here, so a search that names no engine reaches all eight.
+engines:
+  - name: wikipedia
+    disabled: false
+    # A list of hits instead of one infobox.
+    display_type: ["list"]
+  - name: wikibooks
+    disabled: false
+  - name: wikiversity
+    disabled: false
+  - name: wikinews
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: openalex
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: crossref
+    disabled: false

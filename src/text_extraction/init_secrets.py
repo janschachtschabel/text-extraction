@@ -16,8 +16,14 @@ Files in ``--secrets-dir`` (default ``/secrets``):
   ``VALKEY_URL_FILE``.
 - ``api-keys.json`` (0600): the admin key's SHA-256 in the shape of ``API_KEYS``, read through
   ``API_KEYS_FILE`` (merged with ``API_KEYS`` from ``.env``).
+- ``searxng-secret`` (0600): SearXNG's ``server.secret_key``, 64 hex characters, created once.
+- ``searxng/settings.yml`` (0644 in a 0755 folder; SearXNG runs as its own user): the packaged
+  ``data/searxng-settings.yml`` with the placeholder key replaced by ``searxng-secret``. The
+  ``searxng`` service mounts only this folder (a volume subpath), never the other secrets.
 
-The last three are written again from the first two on every start (same content). A ``DOMAIN``
+The derived files (``valkey.conf``, ``valkey-url``, ``api-keys.json``, ``searxng/settings.yml``)
+are written again from the kept secrets on every start: the same content, unless a new image
+brings a new SearXNG template, which so reaches the volume with the kept key. A ``DOMAIN``
 in the environment must be a bare host name: the Traefik labels take it unchanged, and
 ``https://...`` there breaks the route without an error at deploy time, so the command exits 1.
 
@@ -34,6 +40,7 @@ import secrets
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
@@ -44,6 +51,9 @@ from text_extraction.logging import configure_logging
 _log = structlog.get_logger(__name__)
 
 DEFAULT_SECRETS_DIR = Path("/secrets")
+SEARXNG_TEMPLATE = "data/searxng-settings.yml"
+# The template's secret_key; SearXNG refuses to start with it.
+SEARXNG_KEY_PLACEHOLDER = "ultrasecretkey"
 _SECRET = re.compile(r"^[0-9A-Za-z]{32,}$")
 # A DNS host name: labels of letters, digits and inner hyphens, dot-separated, no scheme, port,
 # path or trailing dot.
@@ -105,6 +115,14 @@ def _kept_secret(path: Path, length_bytes: int) -> tuple[str, bool]:
     return value, True
 
 
+def searxng_settings(secret_key: str) -> str:
+    """SearXNG's settings.yml: the packaged template with ``secret_key`` in place."""
+    template = files("text_extraction").joinpath(SEARXNG_TEMPLATE).read_text(encoding="utf-8")
+    if template.count(SEARXNG_KEY_PLACEHOLDER) != 1:
+        raise SecretsError(f"{SEARXNG_TEMPLATE} must hold its key placeholder exactly once")
+    return template.replace(SEARXNG_KEY_PLACEHOLDER, secret_key)
+
+
 def ensure_secrets(directory: Path, valkey_host: str = "valkey") -> SecretsResult:
     """Create the missing secrets in ``directory`` and write the files derived from them."""
     password, _ = _kept_secret(directory / "valkey-password", 24)
@@ -126,6 +144,13 @@ def ensure_secrets(directory: Path, valkey_host: str = "valkey") -> SecretsResul
         }
     ]
     _write(directory / "api-keys.json", json.dumps(keys) + "\n", 0o600)
+
+    searxng_key, _ = _kept_secret(directory / "searxng-secret", 32)
+    searxng_dir = directory / "searxng"
+    searxng_dir.mkdir(exist_ok=True)
+    # The searxng user (977) reads the folder; the umask may have narrowed mkdir.
+    os.chmod(searxng_dir, 0o755)  # noqa: S103 - holds only the file SearXNG must read
+    _write(searxng_dir / "settings.yml", searxng_settings(searxng_key), 0o644)
     return SecretsResult(admin_key_created=admin_key if admin_created else None)
 
 

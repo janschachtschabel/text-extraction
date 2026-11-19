@@ -25,6 +25,11 @@
 # (default 8080, all interfaces); `127.0.0.1:8080` keeps it to the server itself, so that only
 # Traefik's HTTPS reaches it from outside.
 #
+# Web search (POST /v1/search, the MCP tool web_search, the playground's search) goes through the
+# service `searxng` (an unmodified SearXNG, AGPL-3.0, in its own container): on the network
+# `backend` only, no published port, its settings.yml rendered by `init` (only engines with an
+# official, free API). SEARCH_ENABLED=false in .env switches search off for the API.
+#
 # Every optional worker is on (OCR, transcription, PII, LLM). FEATURE_ENABLED=false in .env
 # (DOCLING_ENABLED, ASR_ENABLED, PII_ENABLED, LLM_ENABLED) switches a feature off for the API; its
 # worker still starts. The model services download once into their volumes on the first start
@@ -38,8 +43,9 @@
 # settings instead; tests/test_compose_files.py keeps them in step with docker-compose.build.yml.
 
 services:
-  # Creates the secrets on the first start (Valkey password, admin API key, the files derived from
-  # them) and keeps them on every later start; refuses a DOMAIN that is not a bare host name.
+  # Creates the secrets on the first start (Valkey password, admin API key, SearXNG's key, the
+  # files derived from them) and keeps them on every later start; refuses a DOMAIN that is not a
+  # bare host name.
   init:
     image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1}
     pull_policy: always
@@ -84,6 +90,47 @@ services:
       init:
         condition: service_completed_successfully
 
+  # Web search backend of the API (package 25): SearXNG, reached as http://searxng:8080 on the
+  # network `backend` only; it needs outbound internet for its engines (backend is not internal).
+  # Pinned to the newest tag that was at least 14 days old when it was chosen (the supply-chain
+  # rule of CONTRIBUTING.md). It reads only the folder searxng/ of the secrets volume (a volume
+  # subpath, Docker Engine 26 or later), where init renders settings.yml with a kept secret_key;
+  # the file is written again on every start, so edits there do not last. It runs as the image's
+  # user searxng (977) on a read-only root file system: its caches go to /tmp. Its start log warns
+  # that /etc/searxng is not owned by searxng:searxng (init's user owns it): harmless, the file is
+  # world-readable. The API does not wait for it: while it is down a search answers
+  # upstream_unavailable.
+  searxng:
+    image: searxng/searxng:2026.11.2-cccbc9e15
+    restart: unless-stopped
+    networks:
+      - backend
+    user: "977:977"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/searxng:uid=977,gid=977
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - type: volume
+        source: secrets
+        target: /etc/searxng
+        read_only: true
+        volume:
+          subpath: searxng
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
   # The public API, /mcp and the playground /ui on port 8080; the internal port 9090 is not
   # published.
   api:
@@ -110,6 +157,8 @@ services:
       # open to anyone who reaches the API.
       MCP_ENABLED: ${MCP_ENABLED:-true}
       UI_ENABLED: ${UI_ENABLED:-true}
+      # Web search through the searxng service below (SEARCH_URL defaults to it).
+      SEARCH_ENABLED: ${SEARCH_ENABLED:-true}
     read_only: true
     tmpfs:
       - /tmp
