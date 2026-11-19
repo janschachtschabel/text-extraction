@@ -22,9 +22,11 @@ sitemap's ``type_hint``, a link's text and region, or ``content`` by default), a
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
 strongest, unless that guess is ``content`` by default and a weaker source gives a reason other
 than a link text for a sitemap entry (AU3-R2: a link "Datenschutz" leaves a listed page
-content). The first link that names a URL sets its title (``title_from_link``); a crawled
-page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
-type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
+content). The first link that names a URL sets its title (``title_from_link``); the title of
+a feed or site API entry (``title_from_list``) beats a link text, and a crawled page's own title
+wins. An entry of a WordPress or Drupal list has the reason ``api``, which ranks like
+``sitemap``. A section has ``pages`` (the URL leaves below it), ``section_type`` (the type all
+of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
 ``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
 shown URLs of each kind. ``SiteTree.social`` lists the external social links of the crawled
@@ -137,8 +139,10 @@ class TreeNode:
     (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
     ``error_code`` its error's code, ``depth`` its link distance from the start page,
     ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL),
-    ``type_reason`` what a guessed type rests on, ``title_from_link`` that the title is a link's
-    text, ``blocked`` why the site's rules block it (none: no rule does, or it is not known).
+    ``type_reason`` what a guessed type rests on, ``title_from_list`` that it is a feed or API
+    entry's title,
+    ``title_from_link`` that it is a link's text, ``blocked`` why the site's rules block it
+    (none: no rule does, or it is not known).
     A section has ``pages`` (URL leaves below it), ``section_type`` (the type they all share,
     none if one has none or they differ) and ``section_guessed`` (any of them is guessed)."""
 
@@ -155,6 +159,7 @@ class TreeNode:
     type_guessed: bool = False
     type_reason: GuessReason | None = None
     title_from_link: bool = False
+    title_from_list: bool = False
     blocked: BlockReason | None = None
     pages: int = 0
     section_type: PageType | None = None
@@ -210,12 +215,15 @@ class _Found:
     type_guessed: bool = False
     type_reason: GuessReason | None = None
     title_from_link: bool = False
+    title_from_list: bool = False
     blocked: BlockReason | None = None
     from_sitemap: bool = False
 
     def merge(self, other: "_Found") -> None:
-        if not self.title:
+        # An entry's title from a feed or site API beats a link text (not a crawled page's).
+        if not self.title or (self.title_from_link and other.title_from_list):
             self.title, self.title_from_link = other.title, other.title_from_link
+            self.title_from_list = other.title_from_list
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL; between
             # guesses, a weaker source's reason beats a stronger source's bare default, but a
@@ -244,6 +252,9 @@ class _Found:
         self.lastmod = self.lastmod or other.lastmod
         self.blocked = self.blocked or other.blocked
         self.from_sitemap = self.from_sitemap or other.from_sitemap
+
+
+_API_SOURCES: Final = frozenset({"wordpress", "drupal"})
 
 
 class TreeBuilder:
@@ -302,6 +313,11 @@ class TreeBuilder:
                     # before the field has none and keeps the guess made here.
                     found.page_type, found.type_guessed = entry.type_guess, True
                     found.type_reason = found.type_reason or "default"
+                if site.sitemap.source in _API_SOURCES and found.page_type is not None:
+                    found.type_reason = "api"  # the site's own interface listed it
+                title = " ".join((entry.title or "").split())
+                if title:
+                    found.title, found.title_from_list = title, True
                 found.lastmod, found.from_sitemap = entry.lastmod, True
                 self._add(_ENTRY, found)
 
@@ -461,6 +477,7 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 type_guessed=found.type_guessed,
                 type_reason=found.type_reason,
                 title_from_link=found.title_from_link,
+                title_from_list=found.title_from_list,
                 blocked=found.blocked,
             )
         )

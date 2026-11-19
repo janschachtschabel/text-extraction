@@ -892,3 +892,102 @@ def test_judge_leaves_is_pure_and_apply_judgement_marks() -> None:
     assert (marked.blocked, marked.unchecked) == (2, ())
     late = judge_leaves(tree, {ORIGIN: rules}, deadline=time.monotonic() - 1)
     assert (late.reasons, late.cut) == ({}, frozenset({ORIGIN}))
+
+
+def _api_item(index: int, entries: list[dict[str, Any]], source: str = "wordpress") -> JobItem:
+    return sitemap_item(
+        index,
+        f"{ORIGIN}/wp-json/wp/v2/posts",
+        entries,
+        format="wordpress_posts" if source == "wordpress" else "drupal_nodes",
+        source=source,
+    )
+
+
+def test_api_entry_title_and_reason() -> None:
+    items = [_api_item(0, [{"loc": f"{ORIGIN}/fortbildung/", "title": "Fortbildung \u2013 Mathe"}])]
+
+    node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/fortbildung/"]
+
+    assert (node.kind, node.title, node.title_from_list, node.title_from_link) == (
+        "sitemap",
+        "Fortbildung \u2013 Mathe",
+        True,
+        False,
+    )
+    assert (node.page_type, node.type_guessed, node.type_reason) == ("event", True, "api")
+
+
+def test_a_drupal_entry_has_the_api_reason_and_a_urlset_entry_has_none_of_it() -> None:
+    items = [
+        _api_item(0, [{"loc": f"{ORIGIN}/drupal-seite/", "title": "Eins"}], source="drupal"),
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/zwei/"}]),
+    ]
+
+    nodes = _by_url(build_tree(items, max_urls=10))
+
+    assert nodes[f"{ORIGIN}/drupal-seite/"].type_reason == "api"
+    assert nodes[f"{ORIGIN}/zwei/"].type_reason == "default"
+    assert not nodes[f"{ORIGIN}/zwei/"].title_from_list
+
+
+def test_feed_title_beats_link_text() -> None:
+    entries = [{"loc": f"{ORIGIN}/thema-x/", "title": "Thema X ausführlich"}]
+    link_page = page_item(
+        1, f"{ORIGIN}/", depth=0, links=((f"{ORIGIN}/thema-x/", "depth", None, "Mehr"),)
+    )
+
+    for items in ([_api_item(0, entries), link_page], [link_page, _api_item(0, entries)]):
+        node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/thema-x/"]
+        assert (node.title, node.title_from_list, node.title_from_link) == (
+            "Thema X ausführlich",
+            True,
+            False,
+        )
+
+
+def test_crawled_title_wins() -> None:
+    items = [
+        _api_item(0, [{"loc": f"{ORIGIN}/thema-x/", "title": "Aus der Liste"}]),
+        page_item(1, f"{ORIGIN}/thema-x/", title="Eigener Titel", page_type="content"),
+    ]
+
+    node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/thema-x/"]
+
+    assert (node.kind, node.title, node.title_from_list) == ("page", "Eigener Titel", False)
+    assert (node.type_guessed, node.type_reason) == (False, None)
+
+
+def test_sitemap_and_api_one_node() -> None:
+    url = f"{ORIGIN}/thema-x/"
+    for first in (True, False):
+        parts = [
+            sitemap_item(0, f"{ORIGIN}/sitemap.xml", [{"loc": url}]),
+            _api_item(1, [{"loc": url, "title": "Titel der API"}]),
+        ]
+        tree = build_tree(parts if first else parts[::-1], max_urls=10)
+
+        [node] = [n for n in _leaves(tree) if n.url == url]
+
+        assert len(_leaves(tree)) == 1
+        assert (node.title, node.title_from_list, node.type_reason) == (
+            "Titel der API",
+            True,
+            "api",
+        )
+
+
+def test_a_link_text_does_not_beat_the_api_reason() -> None:
+    items = [
+        _api_item(0, [{"loc": f"{ORIGIN}/datenschutz-info/", "title": "Info"}]),
+        page_item(
+            1,
+            f"{ORIGIN}/",
+            depth=0,
+            links=((f"{ORIGIN}/datenschutz-info/", "depth", None, "Datenschutz"),),
+        ),
+    ]
+
+    node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/datenschutz-info/"]
+
+    assert (node.page_type, node.type_reason, node.title) == ("content", "api", "Info")

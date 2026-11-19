@@ -125,7 +125,8 @@ site run, or the progress view's detail area), so no refresh brings the tree bac
         cannot turn them (third audit U3); the title attribute holds the plain text. #}
         {%- if node.url and node.title %}
         {%- if node.title_from_link %}{% set isolated %}<bdi>{{ node.title }}</bdi>{% endset %}{% set shown = t("tree.link_title", title=node.title) %}{% set shown_html = t("tree.link_title", title=isolated) %}
-        {%- else %}{% set shown = node.title %}{% set shown_html = node.title %}{% endif %} <span class="title{% if node.title_from_link %} title-link{% endif %}" title="{{ shown }}">{{ shown_html }}</span>{% endif %}
+        {%- elif node.title_from_list %}{% set shown = node.title ~ " (" ~ t("tree.title_from_feed") ~ ")" %}{% set shown_html = node.title %}
+        {%- else %}{% set shown = node.title %}{% set shown_html = node.title %}{% endif %} <span class="title{% if node.title_from_link %} title-link{% elif node.title_from_list %} title-list{% endif %}" title="{{ shown }}">{{ shown_html }}</span>{% endif %}
         {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
         {%- if not node.url %} <span class="pages">{{ tn("tree.section_pages", node.pages) }}</span>{% endif %}</div>
         <div class="cell-type">
