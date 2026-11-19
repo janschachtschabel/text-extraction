@@ -222,8 +222,8 @@ async def test_urls_that_are_not_absolute_http_are_dropped(settings: Settings) -
             hit("javascript:alert(1)"),
             hit("https:///nohost"),
             hit("ftp://files.example/x"),
-            hit("http://ok.example/"),
-            hit("https://ok.example/"),
+            hit("http://ok.example/a"),
+            hit("https://ok.example/b"),
             {"title": "no url"},
         ]
     )
@@ -231,7 +231,7 @@ async def test_urls_that_are_not_absolute_http_are_dropped(settings: Settings) -
     envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
 
     assert envelope.data is not None
-    assert [h.url for h in envelope.data.results] == ["http://ok.example/", "https://ok.example/"]
+    assert [h.url for h in envelope.data.results] == ["http://ok.example/a", "https://ok.example/b"]
 
 
 @runs_async
@@ -244,6 +244,89 @@ async def test_results_are_cut_to_max_results(settings: Settings) -> None:
 
     assert envelope.data is not None
     assert [h.url for h in envelope.data.results] == [f"https://a.example/{i}" for i in range(3)]
+
+
+@runs_async
+async def test_the_top_hits_of_every_source_come_first(settings: Settings) -> None:
+    # SearXNG sorts by its score, which favours hits several engines found; the service lists
+    # each source's first hit, then each source's second, and so on (best position of a hit).
+    body = answer(
+        [
+            hit("https://both.example/", engines=["bing", "duckduckgo"], positions=[3, 2]),
+            hit("https://bing.example/1", engines=["bing"], positions=[1]),
+            hit("https://ddg.example/1", engines=["duckduckgo"], positions=[1]),
+            hit("https://wiki.example/", engines=["wikipedia"], positions=[1]),
+            hit("https://bing.example/2", engines=["bing"], positions=[2]),
+            hit("https://no-position.example/", engines=["mojeek"]),
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert [h.url for h in envelope.data.results] == [
+        "https://bing.example/1",
+        "https://ddg.example/1",
+        "https://wiki.example/",
+        "https://both.example/",
+        "https://bing.example/2",
+        "https://no-position.example/",
+    ]
+
+
+@runs_async
+async def test_the_ranking_comes_before_the_cut_to_max_results(settings: Settings) -> None:
+    body = answer(
+        [
+            hit("https://bing.example/2", engines=["bing"], positions=[2]),
+            hit("https://ddg.example/1", engines=["duckduckgo"], positions=[1]),
+        ]
+    )
+
+    envelope = await search(
+        SearchRequest(query="q", max_results=1), settings, serving(body).client(), None
+    )
+
+    assert envelope.data is not None
+    assert [h.url for h in envelope.data.results] == ["https://ddg.example/1"]
+
+
+@runs_async
+async def test_duplicates_are_merged_into_the_best_ranked_hit(settings: Settings) -> None:
+    # SearXNG merges only URLs that match without the scheme; www, a trailing slash, the
+    # fragment and utm_ parameters still split one page into several hits.
+    body = answer(
+        [
+            hit(
+                "https://www.Example.org/page/?utm_source=x&id=1#top",
+                engines=["bing"],
+                positions=[2],
+                title="First",
+                publishedDate=None,
+                score=1.0,
+            ),
+            hit(
+                "http://example.org/page?id=1",
+                engines=["duckduckgo"],
+                positions=[1],
+                title="Second",
+                publishedDate="2026-01-01",
+                score=3.0,
+            ),
+            hit("https://example.org/page?id=2", engines=["mojeek"], positions=[1]),
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    first, other = envelope.data.results
+    assert first.url == "http://example.org/page?id=1"
+    assert first.title == "Second"
+    assert first.sources == ["duckduckgo", "bing"]
+    assert first.published == "2026-01-01"
+    assert first.score == 3.0
+    assert other.url == "https://example.org/page?id=2"
 
 
 @runs_async
@@ -693,7 +776,8 @@ def test_search_settings_defaults() -> None:
         "crossref",
         "bing",
         "duckduckgo",
-        "wlo",
+        "mojeek",
+        "startpage",
     ]
 
 

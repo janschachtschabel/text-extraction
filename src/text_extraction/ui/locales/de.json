@@ -260,7 +260,7 @@
   "form.search_submit": "Suchen",
   "hint.search_query": "Die Wörter, nach denen gesucht wird, höchstens 500 Zeichen.",
   "hint.search_sources": "Kreuzen Sie die Quellen an, die gefragt werden; ohne Kreuz werden alle Quellen gefragt ({setting}).",
-  "hint.search_language": "Bing, DuckDuckGo, Wikipedia, Wikibooks, Wikiversity und Wikinews suchen in dieser Sprache; WLO hat nur deutsches Material. Vorbelegt mit der Sprache dieser Seite.",
+  "hint.search_language": "Bing, DuckDuckGo, Mojeek, Startpage, Wikipedia, Wikibooks, Wikiversity und Wikinews suchen in dieser Sprache. Vorbelegt mit der Sprache dieser Seite.",
   "hint.search_max_results": "Wie viele Treffer angezeigt werden, höchstens {max} ({setting}).",
   "hint.search_time_range": "Nur Treffer aus diesem Zeitraum, wo eine Quelle das unterstützt.",
   "hint.search_page": "Die Seite der Treffer, von 1 bis 10: 2 zeigt die nächsten Treffer.",

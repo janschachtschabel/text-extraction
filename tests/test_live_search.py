@@ -11,15 +11,12 @@ import httpx
 import pytest
 
 from tests.live import run_search
-from tests.live.run_search import Report, check_failure, check_hits, check_wlo, summarize
+from tests.live.run_search import Report, check_engines, check_failure, check_hits, summarize
 
 WIKI = {"url": "https://de.wikipedia.org/wiki/Photosynthese", "sources": ["wikipedia"]}
 ARXIV = {"url": "https://arxiv.org/abs/1234.5678", "sources": ["arxiv", "openalex"]}
-WLO = {
-    "url": "https://redaktion.openeduhub.net/edu-sharing/components/render/"
-    "0a1b2c3d-0000-4000-8000-000000000001",
-    "sources": ["wlo"],
-}
+BING = {"url": "https://www.example.org/bing", "sources": ["bing"]}
+DDG = {"url": "https://www.example.org/ddg", "sources": ["duckduckgo", "bing"]}
 
 
 def envelope(
@@ -282,7 +279,9 @@ def test_main_failed_mode_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert code == 0
 
 
-def wlo_report(service: FakeService, retries: int = 2) -> tuple[Report, list[float]]:
+def engines_report(
+    service: FakeService, engines: list[str], retries: int = 2
+) -> tuple[Report, list[float]]:
     pauses: list[float] = []
 
     async def sleep(seconds: float) -> None:
@@ -290,49 +289,79 @@ def wlo_report(service: FakeService, retries: int = 2) -> tuple[Report, list[flo
 
     async def run() -> Report:
         async with service.client() as client:
-            return await check_wlo(client, "Photosynthese", retries, 7.0, sleep)
+            return await check_engines(client, "Photosynthese", "de", engines, retries, 7.0, sleep)
 
     return asyncio.run(run()), pauses
 
 
-def test_a_wlo_render_page_hit_passes() -> None:
-    service = FakeService(lambda _b, _n: (200, envelope(WLO)))
+def by_engine(answers: dict[str, dict[str, Any]]) -> Answer:
+    return lambda body, _n: (200, answers[body["sources"][0]])
 
-    report, pauses = wlo_report(service)
+
+def test_every_engine_with_a_hit_of_its_own_passes() -> None:
+    service = FakeService(by_engine({"bing": envelope(BING), "duckduckgo": envelope(DDG)}))
+
+    report, pauses = engines_report(service, ["bing", "duckduckgo"])
 
     assert report.problems == []
     assert pauses == []
     assert service.bodies == [
-        ("rest", {"query": "Photosynthese", "sources": ["wlo"], "max_results": 10})
+        ("rest", {"query": "Photosynthese", "language": "de", "sources": [name], "max_results": 10})
+        for name in ("bing", "duckduckgo")
     ]
+
+
+def test_a_dead_engine_is_named_and_the_others_still_run() -> None:
+    blocked = {
+        "status": "failed",
+        "error": {
+            "code": "search_failed",
+            "retryable": True,
+            "details": [{"source": "startpage", "reason": "Suspended: CAPTCHA"}],
+        },
+    }
+    service = FakeService(by_engine({"startpage": blocked, "bing": envelope(BING)}))
+
+    report, pauses = engines_report(service, ["startpage", "bing"])
+
+    assert report.problems == ["startpage: no try of 3 had a hit"]
+    assert pauses == [7.0, 7.0]
+    first = report.calls[0]
+    assert "startpage: Suspended: CAPTCHA" in first.problems[0]
+    assert "no hit from startpage" in first.problems
+    assert [call.label for call in report.calls][-1] == "REST bing try 1"
 
 
 @pytest.mark.parametrize(
     ("answer", "problem"),
     [
-        (envelope(WIKI), "no titled hit from wlo"),
-        (envelope({**WLO, "url": "https://wirlernenonline.de/"}), "no titled hit from wlo"),
-        (envelope({**WLO, "title": ""}), "no titled hit from wlo"),
-        (envelope(WLO, status="partial"), "status partial"),
-        (DOWN, "status failed (search_failed)"),
+        (envelope(DDG), "no hit from mojeek"),
+        (envelope({**BING, "sources": ["mojeek"]}, status="partial"), "status partial"),
     ],
 )
-def test_a_wlo_search_without_a_render_page_hit_fails(answer: dict[str, Any], problem: str) -> None:
+def test_an_engine_without_a_clean_hit_fails(answer: dict[str, Any], problem: str) -> None:
     service = FakeService(lambda _b, _n: (200, answer))
 
-    report, pauses = wlo_report(service)
+    report, _ = engines_report(service, ["mojeek"], retries=0)
 
-    assert report.problems == ["no try of 3 had a hit from wlo"]
-    assert pauses == [7.0, 7.0]
-    assert [body["max_results"] for _, body in service.bodies] == [10, 11, 12]
-    assert any(problem in p for call in report.calls for p in call.problems)
+    assert report.problems == ["mojeek: no try of 1 had a hit"]
+    assert any(problem in p for p in report.calls[0].problems)
 
 
-def test_main_wlo_mode_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    service = FakeService(lambda _b, _n: (200, envelope(WLO)))
+def test_main_engines_mode_asks_the_scraping_engines_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hit_of = {name: envelope({**BING, "sources": [name]}) for name in run_search.SCRAPING_ENGINES}
+    service = FakeService(by_engine(hit_of))
     monkeypatch.setattr(run_search, "_transport", lambda: httpx.MockTransport(service.handle))
 
-    code = run_search.main(["--expect", "wlo", "--summary-out", str(tmp_path / "s.md")])
+    code = run_search.main(["--expect", "engines", "--summary-out", str(tmp_path / "s.md")])
 
     assert code == 0
-    assert "Web search, WLO only" in (tmp_path / "s.md").read_text()
+    assert [body["sources"] for _, body in service.bodies] == [
+        ["bing"],
+        ["duckduckgo"],
+        ["mojeek"],
+        ["startpage"],
+    ]
+    assert "Web search, each engine alone" in (tmp_path / "s.md").read_text()

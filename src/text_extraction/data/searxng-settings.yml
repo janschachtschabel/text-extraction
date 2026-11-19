@@ -7,14 +7,14 @@
 # placeholder, so an unrendered copy never runs with a known key.
 #
 # Merged over SearXNG's own settings.yml. SEARCH_SOURCES must name exactly the engines kept here
-# plus the engine this file adds (wlo) (tests/test_searxng_settings.py).
+# (tests/test_searxng_settings.py).
 
 use_default_settings:
   engines:
-    # Engines with an official, free API (ruling D2 a), plus bing and duckduckgo on Jan's choices
-    # of 2026-11-19 (rulings D6 and D7; google left out after it blocked the server): they are
-    # read by scraping, may block the server's address and then appear in sources_failed. Every
-    # other scraping engine stays off.
+    # Engines with an official, free API (ruling D2 a), plus bing, duckduckgo, mojeek and
+    # startpage on Jan's choices of 2026-11-19 (rulings D6 and D7; google left out after it
+    # blocked the server): they are read by scraping, may block the server's address and then
+    # appear in sources_failed. Every other scraping engine stays off.
     keep_only:
       - wikipedia
       - wikibooks
@@ -26,6 +26,8 @@ use_default_settings:
       - crossref
       - bing
       - duckduckgo
+      - mojeek
+      - startpage
 
 general:
   instance_name: text-extraction search
@@ -56,8 +58,7 @@ valkey:
   url: false
 
 # Merged by name into SearXNG's engine definitions. Several are disabled by default: each is
-# switched on here, so a search that names no engine reaches all of them. wlo is not one of
-# SearXNG's engines: it is added here (ruling D6).
+# switched on here, so a search that names no engine reaches all of them.
 engines:
   - name: wikipedia
     disabled: false
@@ -81,36 +82,10 @@ engines:
     disabled: false
   - name: duckduckgo
     disabled: false
-  # WirLernenOnline: German teaching material from the official, free, public search API of its
-  # edu-sharing repository (no key). Each hit links to the material's render page, which the
-  # service extracts through the same repository's REST API (package 22).
-  - name: wlo
-    engine: json_engine
-    shortcut: wlo
-    categories: [general]
+  # Not loaded by SearXNG's own settings (inactive): each is loaded and switched on here.
+  - name: mojeek
+    inactive: false
     disabled: false
-    # SearXNG's default is 3 s; the repository's search often takes longer. Below the 8 s cap.
-    timeout: 6.0
-    method: POST
-    headers:
-      Accept: application/json
-      Content-Type: application/json
-    search_url: >-
-      https://redaktion.openeduhub.net/edu-sharing/rest/search/v1/queries/-home-/mds_oeh/ngsearch?contentType=FILES&maxItems=10&skipCount={pageno}&propertyFilter=cclom:title&propertyFilter=cclom:general_description
-    # json_engine puts the query into the body as it is: a double quote or a backslash in it makes
-    # the body invalid, and WLO then appears in sources_failed.
-    request_body: '{{"criteria": [{{"property": "ngsearchword", "values": ["{query}"]}}]}}'
-    paging: true
-    page_size: 10
-    first_page_num: 0
-    results_query: nodes
-    url_query: ref/id
-    url_prefix: https://redaktion.openeduhub.net/edu-sharing/components/render/
-    title_query: properties/cclom:title/0
-    content_query: properties/cclom:general_description/0
-    about:
-      website: https://wirlernenonline.de/
-      official_api_documentation: https://redaktion.openeduhub.net/edu-sharing/swagger/
-      use_official_api: true
-      require_api_key: false
-      results: JSON
+  - name: startpage
+    inactive: false
+    disabled: false

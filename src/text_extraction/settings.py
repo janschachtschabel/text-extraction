@@ -406,7 +406,8 @@ class Settings(BaseSettings):
         "crossref",
         "bing",
         "duckduckgo",
-        "wlo",
+        "mojeek",
+        "startpage",
     ]
     search_allow_users: bool = True  # may non-admin keys search?
     # MCP endpoint (package 10, ruling P10-S9): FastMCP at /mcp on the public port, off by

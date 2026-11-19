@@ -9,9 +9,10 @@ dropped, both with one log line that carries no query. Errors never echo the que
 import hashlib
 import html
 import json
+import math
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 import structlog
@@ -121,6 +122,70 @@ def _hit(raw: Any) -> SearchHit | None:
     )
 
 
+def _rank(raw: Any) -> float:
+    """The best position the hit had in any source's own list (1 = a source's top hit); a hit
+    without positions ranks after every hit that has one."""
+    positions = raw.get("positions") if isinstance(raw, dict) else None
+    ranks = [
+        p
+        for p in (positions if isinstance(positions, list) else [])
+        if isinstance(p, int) and not isinstance(p, bool) and p > 0
+    ]
+    return float(min(ranks)) if ranks else math.inf
+
+
+def _page_key(url: str) -> str:
+    """One key per page: scheme, ``www.``, a trailing slash, the fragment and ``utm_`` parameters
+    do not matter, the case of the host neither."""
+    parts = urlsplit(url)
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:  # a port that is no number: kept as written
+        port = ":" + parts.netloc.rpartition(":")[2]
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    query = urlencode(
+        [
+            (k, v)
+            for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not k.startswith("utm_")
+        ]
+    )
+    return f"{host}{port}{parts.path.rstrip('/')}?{query}"
+
+
+def _merge(first: SearchHit, other: SearchHit) -> SearchHit:
+    """``first`` (the better ranked) with the sources of ``other`` added and its gaps filled."""
+    scores = [s for s in (first.score, other.score) if s is not None]
+    return first.model_copy(
+        update={
+            "sources": list(dict.fromkeys([*first.sources, *other.sources])),
+            "snippet": first.snippet or other.snippet,
+            "published": first.published or other.published,
+            "score": max(scores) if scores else None,
+        }
+    )
+
+
+def _ranked_hits(raw_results: list[Any]) -> list[SearchHit]:
+    """The hits in round-robin order across the sources (every source's first hit, then every
+    source's second, ...; SearXNG's order within a rank) with duplicates of a page merged."""
+    ranked: dict[str, tuple[float, int, SearchHit]] = {}
+    for index, raw in enumerate(raw_results):
+        hit = _hit(raw)
+        if hit is None:
+            continue
+        rank = _rank(raw)
+        key = _page_key(hit.url)
+        seen = ranked.get(key)
+        if seen is None:
+            ranked[key] = (rank, index, hit)
+        elif (rank, index) < seen[:2]:
+            ranked[key] = (rank, index, _merge(hit, seen[2]))
+        else:
+            ranked[key] = (seen[0], seen[1], _merge(seen[2], hit))
+    return [hit for _rank_, _index, hit in sorted(ranked.values(), key=lambda e: e[:2])]
+
+
 def _failures(raw: Any) -> list[SourceFailure]:
     failures: list[SourceFailure] = []
     if isinstance(raw, list):
@@ -135,11 +200,7 @@ def _map(body: Any, request: SearchRequest, engines: list[str]) -> Envelope[Sear
     if not isinstance(body, dict):
         return _failed("The search service answered in an unexpected format.")
     raw_results = body.get("results")
-    hits = [
-        hit
-        for raw in (raw_results if isinstance(raw_results, list) else [])
-        if (hit := _hit(raw)) is not None
-    ][: request.max_results]
+    hits = _ranked_hits(raw_results if isinstance(raw_results, list) else [])[: request.max_results]
     failures = _failures(body.get("unresponsive_engines"))
     suggestions = body.get("suggestions")
     # SearXNG reports an engine by the name it was asked for (``engines=``); compared in lower

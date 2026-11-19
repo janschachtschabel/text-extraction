@@ -16,7 +16,7 @@ your key may search (`features.search`) and how many hits one search may return
 
 ## The sources
 
-Every source is free. All but Bing and DuckDuckGo have an official API. Each hit names the sources
+Every source is free. All but Bing, DuckDuckGo, Mojeek and Startpage have an official API. Each hit names the sources
 that found it.
 
 | Source | What it finds | Limits |
@@ -31,13 +31,18 @@ that found it.
 | `crossref` | Scholarly works with a DOI from Crossref | Science only; metadata, often without a summary. |
 | `bing` | General web pages from Bing, in the language of `language` | No official API: SearXNG reads Bing's result pages (scraping). A search engine may block a server's address after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
 | `duckduckgo` | General web pages from DuckDuckGo | Scraping as with `bing`, with the same risk of a block. |
-| `wlo` | Teaching material from WirLernenOnline (WLO), through the official, free search API of its repository | German material only; `language` does not apply. Each hit links the material's page in the repository (`https://redaktion.openeduhub.net/edu-sharing/components/render/<id>`), whose text, licence and file the extraction reads through the repository's API. Search terms with a double quote (`"`) or a backslash make WLO fail. |
+| `mojeek` | General web pages from Mojeek, a search engine with its own index | Scraping as with `bing`, with the same risk of a block; a smaller index than Bing's. |
+| `startpage` | General web pages from Startpage, which passes on Google's results | Scraping as with `bing`, with the same risk of a block. |
 
-So German results come from Bing, DuckDuckGo and WLO, Wikipedia knowledge from the Wikimedia
-sources and science from OpenAlex, arXiv and Crossref. Google, Brave and Startpage stay off:
-Google blocked a server on its first day. An operator can switch Bing and DuckDuckGo off, or
-switch another engine on (see
-[More sources](#more-sources)).
+So German results come from Bing, DuckDuckGo, Mojeek and Startpage, Wikipedia knowledge from
+the Wikimedia sources and science from OpenAlex, arXiv and Crossref. Google and Brave stay off:
+Google blocked a server on its first day. An operator can switch the four scraped engines off, or
+switch another engine on (see [More sources](#more-sources)).
+
+When several sources are asked, the hits take turns: first every source's top hit, then every
+source's second hit, and so on. A page that several sources found (also as `http` and `https`,
+with or without `www.`, a trailing slash or `utm_` parameters) is listed once, at its best place,
+with all its sources.
 
 ## In the playground
 
@@ -90,6 +95,12 @@ dropped), its `title`, a `snippet` (or null), the `sources` that found it, `publ
 where the source has one) and SearXNG's `score`. `title` and `snippet` are plain text: the
 service drops the markup some sources hand on (Crossref's and OpenAlex's JATS tags, Wikipedia's
 highlights). `data.suggestions` lists other search terms.
+
+The hits are ordered by their place in each source's own list: every source's top hit comes
+first, then every source's second, and so on. A page found by several sources is one hit, at its
+best place, whose `sources` names all of them; the address counts as the same page without regard
+to `http` or `https`, a leading `www.`, a trailing slash, the `#` part or `utm_` parameters.
+`max_results` cuts the list after this ordering.
 
 When some sources did not answer, the answer is `partial`, and `data.sources_failed` names each
 with SearXNG's reason (such as a timeout or a refused connection). The hits then come from the
@@ -171,21 +182,22 @@ published: with an older image SearXNG gets no settings and does not start. If
 `docker compose logs init` shows `init_searxng_settings_failed`, remove the volume
 `searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's
 own address. The sources with an official API do not block a server; Mwmbl counts requests per
-address. Bing and DuckDuckGo may block the VPS's address after a while: they then appear in
+address. Bing, DuckDuckGo, Mojeek and Startpage may block the VPS's address after a while: they then appear in
 `sources_failed`, and the other sources still answer. Such an answer is `partial` and is not
 cached, so while a block lasts every search asks all sources again; leave a blocked engine out of
 `SEARCH_SOURCES` if that happens for long (see [More sources](#more-sources)).
 
 ### More sources
 
-To keep Bing and DuckDuckGo off, set `SEARCH_SOURCES` without them (for example
-`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,wlo`): the service then
+To keep the scraped engines off, set `SEARCH_SOURCES` without them (for example
+`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref`): the service then
 never asks them. A source outside `SEARCH_SOURCES` is refused with a 422.
 
-To switch on another SearXNG engine (such as `google` or `startpage`), at your own risk:
+To switch on another SearXNG engine (such as `google` or `brave`), at your own risk:
 
 1. Add its name to `use_default_settings.engines.keep_only` and to the `engines:` list (with
-   `disabled: false`) of SearXNG's `settings.yml`.
+   `disabled: false`, and `inactive: false` for an engine SearXNG does not load by default) of
+   SearXNG's `settings.yml`.
 2. Add its name to `SEARCH_SOURCES`, which names the engines the service may ask.
 
 Where the settings come from depends on the setup:
@@ -202,6 +214,6 @@ Where the settings come from depends on the setup:
   chart, or set `searxng.enabled=false` and `config.SEARCH_URL` to a SearXNG of your own.
 
 Scraping search engines gets the server's address blocked and goes against their terms. The
-project keeps Bing and DuckDuckGo on by default because German web results need them (rulings D6 and D7 in
+project keeps Bing, DuckDuckGo, Mojeek and Startpage on by default because German web results need them (rulings D6 and D7 in
 [architecture.md](../../architecture.md#web-search)); every other
 scraping engine stays off.
