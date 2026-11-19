@@ -252,10 +252,11 @@ API_SITE = [
     page_item(0, f"{ORIGIN}/", title="Home", depth=0, page_type="home"),
     sitemap_item(
         1,
-        f"{ORIGIN}/wp-json/wp/v2/posts",
+        f"{ORIGIN}/wp-json/wp/v2/events",
         [{"loc": f"{ORIGIN}/fortbildung/", "title": "Fortbildung \u2013 Mathe"}],
         format="wordpress_posts",
         source="wordpress",
+        type_hint="event",
     ),
 ]
 

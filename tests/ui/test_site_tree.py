@@ -894,18 +894,59 @@ def test_judge_leaves_is_pure_and_apply_judgement_marks() -> None:
     assert (late.reasons, late.cut) == ({}, frozenset({ORIGIN}))
 
 
-def _api_item(index: int, entries: list[dict[str, Any]], source: str = "wordpress") -> JobItem:
+def _api_item(
+    index: int,
+    entries: list[dict[str, Any]],
+    source: str = "wordpress",
+    *,
+    rest_base: str = "posts",
+    type_hint: str | None = "content",
+) -> JobItem:
+    """One page of an API list; its ``type_hint`` is what ``api_type_hint`` says of the list
+    (``content`` for WordPress's ``posts``)."""
     return sitemap_item(
         index,
-        f"{ORIGIN}/wp-json/wp/v2/posts",
+        f"{ORIGIN}/wp-json/wp/v2/{rest_base}",
         entries,
         format="wordpress_posts" if source == "wordpress" else "drupal_nodes",
         source=source,
+        type_hint=type_hint,
     )
 
 
+def test_api_entry_reason_from_its_guess() -> None:
+    """The reason of an API entry is its guess's: the URL beats the list's content type, and
+    the content type gives ``api`` where nothing stronger speaks."""
+    items = [
+        _api_item(0, [{"loc": f"{ORIGIN}/impressum/", "title": "Impressum"}], rest_base="pages"),
+        _api_item(
+            1,
+            [{"loc": f"{ORIGIN}/veranstaltung-x/", "title": "Sommerfest"}],
+            rest_base="events",
+            type_hint="event",
+        ),
+    ]
+
+    nodes = _by_url(build_tree(items, max_urls=10))
+
+    imprint, event = nodes[f"{ORIGIN}/impressum/"], nodes[f"{ORIGIN}/veranstaltung-x/"]
+    assert (imprint.page_type, imprint.type_reason) == ("imprint", "url")
+    assert (event.page_type, event.type_reason) == ("event", "api")
+
+
+def test_api_entry_title_counts_as_link_text() -> None:
+    """The title is the entry's link text, as in the stored ``type_guess``: a type word as
+    the title of a one-segment URL types it (reason ``link_text``)."""
+    items = [_api_item(0, [{"loc": f"{ORIGIN}/xyz/", "title": "Kontakt"}], type_hint=None)]
+
+    node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/xyz/"]
+
+    assert (node.page_type, node.type_reason) == ("contact", "link_text")
+
+
 def test_api_entry_title_and_reason() -> None:
-    items = [_api_item(0, [{"loc": f"{ORIGIN}/fortbildung/", "title": "Fortbildung \u2013 Mathe"}])]
+    entries = [{"loc": f"{ORIGIN}/fortbildung/", "title": "Fortbildung \u2013 Mathe"}]
+    items = [_api_item(0, entries, rest_base="events", type_hint="event")]
 
     node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/fortbildung/"]
 

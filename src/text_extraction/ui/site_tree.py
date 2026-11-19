@@ -305,16 +305,22 @@ class TreeBuilder:
                 if link.kind == "external":
                     self._add_social(link.url, link.category)
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
+            # An API list's entries are guessed as ``_read_api`` guessed them: with the title as
+            # link text and the list's content type as a hint whose reason is ``api``.
+            api = site.sitemap.source in _API_SOURCES
             for entry in site.sitemap.entries:
-                found = _guessed(entry.loc, sitemap_hint=site.sitemap.type_hint)
+                found = _guessed(
+                    entry.loc,
+                    link_text=(entry.title or "") if api else "",
+                    sitemap_hint=site.sitemap.type_hint,
+                    hint_reason="api" if api else "sitemap",
+                )
                 if entry.type_guess is not None:
                     # The sitemap item stored the guess (the same function), so the tree and the
                     # API agree; the reason still comes from the guess above. An item stored
                     # before the field has none and keeps the guess made here.
                     found.page_type, found.type_guessed = entry.type_guess, True
                     found.type_reason = found.type_reason or "default"
-                if site.sitemap.source in _API_SOURCES and found.page_type is not None:
-                    found.type_reason = "api"  # the site's own interface listed it
                 title = " ".join((entry.title or "").split())
                 if title:
                     found.title, found.title_from_list = title, True
@@ -407,9 +413,16 @@ def _guessed(
     link_text: str = "",
     region: str | None = None,
     sitemap_hint: PageType | None = None,
+    hint_reason: Literal["sitemap", "api"] = "sitemap",
 ) -> _Found:
     """A URL that was not crawled, with its guessed type and the reason (none if nothing says)."""
-    guess = guess_type(url, link_text=link_text, region=region, sitemap_hint=sitemap_hint)
+    guess = guess_type(
+        url,
+        link_text=link_text,
+        region=region,
+        sitemap_hint=sitemap_hint,
+        hint_reason=hint_reason,
+    )
     if guess is None:
         return _Found(url)
     return _Found(url, page_type=guess.type, type_guessed=True, type_reason=guess.reason)

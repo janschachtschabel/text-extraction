@@ -3662,8 +3662,11 @@ their own parameters; then each content type's list, 100 per page, a `wordpress_
 each), `drupal_index` (`/jsonapi`, then each `node--*` list, 50 per page, a `drupal_nodes` item
 each). Entries carry `title`; their type comes from the content type (reason `api`). RSS/Atom
 entries in ordinary sitemaps carry `title` too. The start page's result has `site.apis`. The tree
-shows an entry's title from the list (tooltip "title from the site's list") and the reason "from
-the site's interface"; a crawled page's own title and type still win.
+shows an entry's title from the list (tooltip "title from the site's list"); a CMS list entry's
+type and reason are those of `guess_type` with the title as link text and the list's content type
+as a hint of reason `api` (the stored `type_guess` is the same call), so the URL (`/impressum/`)
+or the title still beats "from the site's interface"; a crawled page's own title and type still
+win.
 
 Places. `metadata.places` (at most 5; `kind`, `name`, `street`, `postal_code`, `locality`,
 `region`, `country`, `latitude`, `longitude`) comes from the page's own schema.org items (Place,
