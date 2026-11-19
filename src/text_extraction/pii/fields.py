@@ -24,7 +24,7 @@ from typing import Any, Literal
 from text_extraction.convert import Link
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
-from text_extraction.metadata import PageMetadata
+from text_extraction.metadata import PageMetadata, Place
 from text_extraction.pii.html import HtmlParseFailed, HtmlText
 from text_extraction.pii.replace import Replacer
 from text_extraction.pii.spans import resolve
@@ -245,6 +245,10 @@ def _escaped_key(key: str) -> str:
     return key.replace("\\", "\\\\").replace(".", "\\.")
 
 
+_PLACE_TEXT_FIELDS = ("name", "street", "postal_code", "locality", "region", "country")
+_PLACE_ADDRESS_FIELDS = ("name", "street", "postal_code", "locality")
+
+
 class _Walk:
     """One pass over the strings of a result. ``handle`` gets each field and returns its
     resolved spans; with a ``replacer`` the walk writes the replacements and returns the
@@ -334,8 +338,30 @@ class _Walk:
                     for index, image in enumerate(metadata.images)
                 ],
                 "lrmi": self._lrmi("metadata.lrmi", metadata.lrmi),
+                "places": self._places(metadata.places),
             }
         )
+
+    def _places(self, places: list[Place]) -> list[Place]:
+        """The places with their text fields handled. Coordinates would pinpoint an address
+        the handling changed, so they go with it; a place left with nothing goes."""
+        handled: list[Place] = []
+        for index, place in enumerate(places):
+            update: dict[str, Any] = {}
+            for field_name in _PLACE_TEXT_FIELDS:
+                value = getattr(place, field_name)
+                new = self.optional(f"metadata.places[{index}].{field_name}", value)
+                if new != value:
+                    update[field_name] = new
+            if any(
+                update.get(name, getattr(place, name)) != getattr(place, name)
+                for name in _PLACE_ADDRESS_FIELDS
+            ):
+                update.update(latitude=None, longitude=None)
+            changed = place.model_copy(update=update)
+            if any(value for name, value in changed if name != "kind"):
+                handled.append(changed)
+        return handled
 
     def _link(self, index: int, link: Link) -> Link:
         text = self.text(f"links[{index}].text", link.text)

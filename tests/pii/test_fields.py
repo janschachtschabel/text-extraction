@@ -11,7 +11,7 @@ from text_extraction.extract_models import ExtractResult, ServerErrorInfo, Timin
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.licenses import License
 from text_extraction.media.types import MediaInfo
-from text_extraction.metadata import Image, PageMetadata
+from text_extraction.metadata import Image, PageMetadata, Place
 from text_extraction.pii.fields import (
     FAIL_CLOSED_MESSAGE,
     apply_pii,
@@ -829,3 +829,60 @@ def test_fail_closed_and_withheld_drop_the_server_errors() -> None:
     kept = fail_closed(nothing_else, None)
     assert kept.data is not None
     assert kept.data.server_errors == SERVER_ERRORS
+
+
+def place_result(*places: Place) -> ExtractResult:
+    return make_result(metadata=PageMetadata(places=list(places)))
+
+
+def test_place_street_masked_drops_coordinates() -> None:
+    place = Place(
+        kind="Place", name="Halle", street="Anna Schmidt Weg 1", locality="Erfurt",
+        latitude=50.98, longitude=11.03,
+    )  # fmt: skip
+    spans = {"metadata.places[0].street": [span(0, 12)]}
+
+    processed, _ = apply(place_result(place), spans)
+
+    assert processed.metadata is not None
+    (handled,) = processed.metadata.places
+    assert handled.street == "[PERSON] Weg 1"
+    assert (handled.name, handled.locality) == ("Halle", "Erfurt")
+    assert (handled.latitude, handled.longitude) == (None, None)
+
+
+def test_place_untouched_keeps_coordinates() -> None:
+    place = Place(kind="Place", name="Halle", locality="Erfurt", latitude=50.98, longitude=11.03)
+
+    processed, _ = apply(place_result(place), {})
+
+    assert processed.metadata is not None
+    assert processed.metadata.places == [place]
+
+
+def test_place_region_change_keeps_coordinates() -> None:
+    place = Place(kind="meta", region="Anna", latitude=50.98, longitude=11.03)
+
+    processed, _ = apply(place_result(place), {"metadata.places[0].region": [span(0, 4)]})
+
+    assert processed.metadata is not None
+    (handled,) = processed.metadata.places
+    assert (handled.region, handled.latitude) == ("[PERSON]", 50.98)
+
+
+def test_place_fields_are_named() -> None:
+    result = place_result(Place(kind="Place", street="A", country="DE"))
+    fields = {f.name for f in text_fields(result, ALL)}
+    assert {"metadata.places[0].street", "metadata.places[0].country"} <= fields
+
+
+def test_place_redacted_street_drops_coordinates() -> None:
+    place = Place(kind="Place", street="Anna", latitude=50.98, longitude=11.03)
+
+    processed, _ = apply(
+        place_result(place), {"metadata.places[0].street": [span(0, 4)]}, mode="redact"
+    )
+
+    assert processed.metadata is not None
+    (handled,) = processed.metadata.places
+    assert (handled.street, handled.latitude) == ("[REDACTED]", None)
