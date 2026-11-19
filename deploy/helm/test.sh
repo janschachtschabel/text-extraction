@@ -1101,8 +1101,22 @@ expect_contains "SearXNG NetworkPolicy limits both directions" "$searxng_policy"
 expect_contains "only the API pods reach SearXNG" "$searxng_policy" \
   "ingress: - from: - podSelector: matchLabels: app.kubernetes.io/name: text-extraction app.kubernetes.io/instance: $RELEASE ports: - port: 8080 protocol: TCP"
 expect_contains "SearXNG resolves names" "$searxng_policy" "- port: 53 protocol: UDP - port: 53 protocol: TCP"
-expect_contains "SearXNG reaches the engines over HTTP(S)" "$searxng_policy" "- port: 443 protocol: TCP - port: 80 protocol: TCP"
+expect_contains "SearXNG reaches the engines over HTTP(S), not the metadata endpoint" "$searxng_policy" \
+  "- to: - ipBlock: cidr: 0.0.0.0/0 except: - 169.254.169.254/32 ports: - port: 443 protocol: TCP - port: 80 protocol: TCP"
 expect_absent "no SearXNG NetworkPolicy while it is off" "$policies" "name: $SEARXNG"
+# The notes warn when the two switches disagree, and stay quiet about search by default.
+expect_contains "notes warn about search on without a SearXNG" \
+  "$(render_notes --set config.SEARCH_ENABLED=true)" 'WARNING: config.SEARCH_ENABLED is "true" but searxng.enabled is false'
+expect_absent "no warning with an own SEARCH_URL" \
+  "$(render_notes --set config.SEARCH_ENABLED=true --set config.SEARCH_URL=http://search.example:8080)" "WARNING: config.SEARCH_ENABLED"
+expect_contains "notes name an own SEARCH_URL" \
+  "$(render_notes --set config.SEARCH_ENABLED=true --set config.SEARCH_URL=http://search.example:8080)" \
+  "Web search is on (POST /v1/search, MCP tool web_search) through http://search.example:8080."
+expect_contains "notes point at SearXNG running while search is off" \
+  "$(render_notes --set searxng.enabled=true)" 'NOTE: searxng.enabled is true but config.SEARCH_ENABLED is not "true"'
+expect_contains "notes name the in-release SearXNG" \
+  "$(render_notes --set searxng.enabled=true --set config.SEARCH_ENABLED=true)" "through SearXNG $SEARXNG."
+expect_absent "notes say nothing about search by default" "$(render_notes)" "SEARCH_ENABLED"
 
 # --- Measured resources --------------------------------------------------------------------------
 

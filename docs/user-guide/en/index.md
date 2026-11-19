@@ -24,7 +24,7 @@ pages.
   pages with their metadata and licences, and reading the jobs.
 - [Structured data](structured-data.md): the strategies of `structured`, the LLM and its key, and
   chunking.
-- [MCP](mcp.md): the setup for Claude Code, Claude Desktop and other clients, and the 11 tools.
+- [MCP](mcp.md): the setup for Claude Code, Claude Desktop and other clients, and the 12 tools.
 - [Glossary](glossary.md): the terms of this guide and of the playground, in English and German.
 
 ## Use cases

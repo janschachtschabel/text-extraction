@@ -3240,8 +3240,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   each with `options`), `get_job`, `get_job_screenshot`, `service_info` (read only) and
   `cancel_job` (destructive). Package 25 adds a twelfth, `web_search` (`POST /v1/search`, read
   only and open world, no `options`: its arguments are the whole REST body; listed while search
-  is off, as the job tools are while jobs are off, and then answers the route's 400). A call validates its arguments, merges `options` under them (a key
-  given in both is `invalid_request`, "<key> is given twice."), holds the merged body to the
+  is off, as the job tools are while jobs are off, and then answers the route's 400). A call
+  validates its arguments, merges `options` under them (a key given in both is
+  `invalid_request`, "<key> is given twice."), holds the merged body to the
   route's body limit and validates it with the REST model, so extra fields, a user's
   `compliance: ignore`, an `evaluate` action or an XPath rule are refused exactly as REST refuses
   them. `extract_file` strips a `data:` prefix, ignores whitespace, refuses what is not base64 and

@@ -421,7 +421,8 @@ call directly, and the LLM endpoint, which the llm workers call):
 - The extract, browser, Docling, ASR, NLP and llm workers accept port 9090 from `networkPolicy.metricsFrom`
   only.
 - SearXNG (`searxng.enabled`) accepts port 8080 from the API pods of this release only, and its
-  egress is limited to DNS (53) and the web APIs of its engines (443, 80).
+  egress is limited to DNS (53) and the web APIs of its engines (443, 80, to any address except
+  the cloud metadata endpoint 169.254.169.254).
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
@@ -617,7 +618,10 @@ behind a ClusterIP Service and points the API pods' `SEARCH_URL` at it; `config.
 - **Pods.** User 977 (the image's `searxng`), read-only root file system, all capabilities
   dropped, `emptyDir` at `/tmp` (its caches) and `/var/cache/searxng`. Its start log warns that
   `/etc/searxng` is not owned by `searxng:searxng`: harmless, the ConfigMap is readable.
-- **Egress.** The engines need DNS and HTTPS to the web; with `networkPolicy.enabled` nothing else.
+- **Egress.** The engines need DNS and HTTPS to the web; with `networkPolicy.enabled` nothing else
+  (and never the cloud metadata endpoint 169.254.169.254).
+- **Notes.** `helm install` warns when `config.SEARCH_ENABLED` is `"true"` without
+  `searxng.enabled` or a `config.SEARCH_URL`, and when SearXNG runs while search is off.
 
 ## Local checks
 

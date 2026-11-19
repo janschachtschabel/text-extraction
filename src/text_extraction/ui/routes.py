@@ -21,6 +21,7 @@ from text_extraction.compliance import ComplianceMode, resolve_mode
 from text_extraction.errors import ServiceError
 from text_extraction.file_models import FILE_PART
 from text_extraction.ratelimit import check_rate_left, count_used
+from text_extraction.search.types import MAX_PAGE
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     envelope_error,
@@ -33,9 +34,12 @@ from text_extraction.ui.answers import (
     text_fields,
 )
 from text_extraction.ui.forms import (
+    DEFAULT_SEARCH_PAGE,
+    DEFAULT_SEARCH_RESULTS,
     OPERATIONS,
     REPEATED_FIELDS,
     SINGLE_OPERATIONS,
+    TIME_RANGE_CHOICES,
     FeatureOffer,
     OptionsError,
     access_offer,
@@ -155,6 +159,11 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "features": features,
         "search_sources": settings.search_sources,
         "search_max_results": settings.search_max_results,
+        # The form's presets: never more hits than SEARCH_MAX_RESULTS allows.
+        "search_results_preset": min(DEFAULT_SEARCH_RESULTS, settings.search_max_results),
+        "search_time_ranges": TIME_RANGE_CHOICES,
+        "search_first_page": DEFAULT_SEARCH_PAGE,
+        "search_max_page": MAX_PAGE,
     }
 
 

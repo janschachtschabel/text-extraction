@@ -99,7 +99,7 @@ services:
   # user searxng (977) on a read-only root file system: its caches go to /tmp. Its start log warns
   # that /etc/searxng is not owned by searxng:searxng (init's user owns it): harmless, the file is
   # world-readable. The API does not wait for it: while it is down a search answers
-  # upstream_unavailable.
+  # search_failed.
   searxng:
     image: searxng/searxng:2026.11.2-cccbc9e15
     restart: unless-stopped

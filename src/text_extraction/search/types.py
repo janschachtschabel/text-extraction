@@ -1,8 +1,11 @@
 """Request and answer models of the web search."""
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# The last result page a search may ask for.
+MAX_PAGE: Final = 10
 
 
 class SearchRequest(BaseModel):
@@ -16,7 +19,7 @@ class SearchRequest(BaseModel):
     language: str | None = Field(
         default=None, min_length=2, max_length=10, description="Language of the hits (ISO 639-1)."
     )
-    page: int = Field(default=1, ge=1, le=10, description="Result page.")
+    page: int = Field(default=1, ge=1, le=MAX_PAGE, description="Result page.")
     time_range: Literal["day", "month", "year"] | None = Field(
         default=None, description="Only hits from this period (where a source supports it)."
     )

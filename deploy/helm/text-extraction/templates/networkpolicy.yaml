@@ -34,7 +34,8 @@ spec:
 {{- end }}
 {{- if .Values.searxng.enabled }}
 # SearXNG accepts connections from the API pods of this release only (SEARCH_URL), and reaches
-# nothing but DNS and the web APIs of its engines.
+# nothing but DNS and the web APIs of its engines (HTTP(S) to any address except the cloud metadata
+# endpoint 169.254.169.254).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -63,7 +64,12 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    - ports:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
         - port: 443
           protocol: TCP
         - port: 80

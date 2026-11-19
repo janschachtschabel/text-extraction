@@ -16,15 +16,15 @@ sends no ``sources`` (every source is asked). -#}
   <input id="search-language" name="language" type="text" maxlength="10" spellcheck="false" autocomplete="off" aria-describedby="search-language-hint">
   <p class="hint" id="search-language-hint">{{ t("hint.search_language") }}</p>
   <label for="search-max-results">{{ t("form.search_max_results") }}</label>
-  <input id="search-max-results" name="max_results" type="number" min="1" max="{{ search_max_results }}" value="10" aria-describedby="search-max-results-hint">
+  <input id="search-max-results" name="max_results" type="number" min="1" max="{{ search_max_results }}" value="{{ search_results_preset }}" aria-describedby="search-max-results-hint">
   <p class="hint" id="search-max-results-hint">{{ t("hint.search_max_results", max=search_max_results, setting=code("SEARCH_MAX_RESULTS")) }}</p>
   <label for="search-time-range">{{ t("form.search_time_range") }}</label>
   <select id="search-time-range" name="time_range" aria-describedby="search-time-range-hint">
-    {% for value in ("", "day", "month", "year") %}<option value="{{ value }}"{% if not value %} selected{% endif %}>{{ t("form.search_time_range." ~ (value or "any")) }}</option>{% endfor %}
+    {% for value in search_time_ranges %}<option value="{{ value }}"{% if not value %} selected{% endif %}>{{ t("form.search_time_range." ~ (value or "any")) }}</option>{% endfor %}
   </select>
   <p class="hint" id="search-time-range-hint">{{ t("hint.search_time_range") }}</p>
   <label for="search-page">{{ t("form.search_page") }}</label>
-  <input id="search-page" name="page" type="number" min="1" max="10" value="1" aria-describedby="search-page-hint">
+  <input id="search-page" name="page" type="number" min="1" max="{{ search_max_page }}" value="{{ search_first_page }}" aria-describedby="search-page-hint">
   <p class="hint" id="search-page-hint">{{ t("hint.search_page") }}</p>
   <button type="submit">{{ t("form.search_submit") }}</button>
 </form>

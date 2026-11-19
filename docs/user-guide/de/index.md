@@ -26,7 +26,7 @@ auf Deutsch, mit denselben Seiten.
 - [Strukturierte Daten](structured-data.md): die Strategien von `structured`, das LLM und sein
   Schlüssel und das Chunking.
 - [MCP](mcp.md): die Einrichtung für Claude Code, Claude Desktop und andere Clients und die
-  11 Tools.
+  12 Tools.
 - [Glossar](glossary.md): die Begriffe dieser Anleitung und der Spielwiese, auf Englisch und
   Deutsch.
 

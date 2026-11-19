@@ -63,8 +63,10 @@ def test_a_private_backend_without_limiter_proxy_or_valkey() -> None:
     assert server["public_instance"] is False
     assert server["image_proxy"] is False
     assert settings["valkey"] == {"url": False}
-    # The container's port is never published; the file binds nothing public either.
-    assert server.get("bind_address", "127.0.0.1") == "127.0.0.1"
+    # The file leaves the bind address to the image (Granian reads GRANIAN_HOST and GRANIAN_PORT);
+    # SearXNG stays private because compose publishes no port and Helm's NetworkPolicy admits only
+    # the API.
+    assert "bind_address" not in server
     # No autocomplete requests to a scraping backend.
     assert settings["search"]["autocomplete"] == ""
 

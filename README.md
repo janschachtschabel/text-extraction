@@ -45,7 +45,7 @@ and a playground in English and German.
 - **Site rules.** robots.txt and the EU TDM opt-out (`enforce`, `report` or `ignore` per request),
   a few requests per host at a time, an honest user agent. For sites that allowed extraction by
   contract an admin can switch the checks off and use the unblock browser (see below).
-- **Interfaces.** A REST API with OpenAPI at `/docs`, jobs for long work, an MCP server with 11
+- **Interfaces.** A REST API with OpenAPI at `/docs`, jobs for long work, an MCP server with 12
   tools and a playground at `/ui` in English and German.
 - **Operations.** Docker Compose and a Helm chart; stateless pods with the state in Valkey;
   API keys with the roles `user` and `admin` and a rate limit per key; a result cache; an SSRF

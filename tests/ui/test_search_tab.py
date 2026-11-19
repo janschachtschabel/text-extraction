@@ -24,7 +24,8 @@ from tests.ui.test_jobs_views import job_items, jobs_of
 from text_extraction.app import create_public_app
 from text_extraction.fetch import Fetcher
 from text_extraction.pipeline import create_pipeline
-from text_extraction.ui.forms import feature_offer
+from text_extraction.search.types import MAX_PAGE
+from text_extraction.ui.forms import DEFAULT_SEARCH_PAGE, TIME_RANGE_CHOICES, feature_offer
 from text_extraction.ui.forward import forward
 from text_extraction.ui.i18n import CATALOGUES, LANGUAGE_HEADER, LANGUAGES, Language, translate
 
@@ -181,6 +182,26 @@ def test_tab_is_shown_with_features_search() -> None:
         "year",
     ]
     assert form.xpath(".//input[@name='page']")
+
+
+def test_form_presets_come_from_the_settings_and_the_form_constants() -> None:
+    # A SEARCH_MAX_RESULTS below the usual preset of 10 lowers the preset, so the form never
+    # offers more hits than the API takes; time ranges and result pages follow forms.py and
+    # the request model.
+    with running(search_max_results=5) as client:
+        app = login(client)
+
+    (form,) = app.xpath("//form[@id='search-form']")
+    (most,) = form.xpath(".//input[@name='max_results']")
+    assert (most.get("max"), most.get("value")) == ("5", "5")
+    options = [o.get("value") for o in form.xpath(".//select[@name='time_range']/option")]
+    assert tuple(options) == TIME_RANGE_CHOICES
+    (page,) = form.xpath(".//input[@name='page']")
+    assert (page.get("min"), page.get("max"), page.get("value")) == (
+        "1",
+        str(MAX_PAGE),
+        str(DEFAULT_SEARCH_PAGE),
+    )
 
 
 def test_tab_is_hidden_for_a_user_key_while_search_is_for_admins() -> None:
