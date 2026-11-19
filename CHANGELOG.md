@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-19
+
 ### Added
 
 - Site APIs and places (package 26). A site-structure crawl with `apis: true` (the default;
@@ -793,7 +795,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...v0.1.11
