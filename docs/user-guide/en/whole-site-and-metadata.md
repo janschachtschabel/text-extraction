@@ -206,7 +206,7 @@ Every item's result then has:
   `country`, `latitude`, `longitude`), read from its schema.org items (a place, a local business,
   an address, a geo position, an event's location) and its geo meta tags (`geo.position`, `ICBM`,
   `geo.placename`, `geo.region`). With `pii` their text is masked, and the coordinates are left out
-  when the address text was masked.
+  when the name or address text was masked.
 - `structured.values`: the fields of your schema, read from the page's JSON-LD, microdata, RDFa,
   OpenGraph and meta tags, with `sources` and `missing`. See
   [Structured data](structured-data.md).
@@ -235,7 +235,7 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
    the host, choose "How to read the site" ("Fast: sitemap first", the preset, or "Thorough: follow
    links"), and press "Read the site structure".
-2. Leave "Read feeds and CMS interfaces" ticked to include the entries of the site's feeds, WordPress and Drupal (`apis`).
+2. Leave "Read feeds and CMS interfaces" ticked: the crawl then also includes the pages the site lists in its feeds and through WordPress or Drupal (`apis`).
    The site tree appears at once in place of a job card and grows every few seconds while the
    crawl runs; your ticks, folds and filter stay. Its head shows the job's state, how many
    fetches are done so far, the failed ones, how long it has run (or took) and, while it runs,

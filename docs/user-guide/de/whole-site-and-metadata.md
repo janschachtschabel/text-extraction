@@ -216,7 +216,7 @@ Das Ergebnis jedes Eintrags enthält dann:
   `latitude`, `longitude`), gelesen aus ihren schema.org-Angaben (ein Ort, ein lokales Geschäft,
   eine Adresse, eine Geoposition, der Ort einer Veranstaltung) und ihren Geo-Meta-Tags
   (`geo.position`, `ICBM`, `geo.placename`, `geo.region`). Mit `pii` wird ihr Text maskiert, und die
-  Koordinaten entfallen, wenn der Adresstext maskiert wurde.
+  Koordinaten entfallen, wenn der Name oder der Adresstext maskiert wurde.
 - `structured.values`: die Felder Ihres Schemas, gelesen aus JSON-LD, Microdata, RDFa, OpenGraph
   und den Meta-Tags der Seite, mit `sources` und `missing`. Siehe
   [Strukturierte Daten](structured-data.md).
@@ -249,8 +249,8 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    Seitenzahl“, lassen Sie „Bereich“ beim Host, wählen Sie bei „So wird die Website gelesen“
    „Schnell: Sitemap zuerst“ (Voreinstellung) oder „Gründlich: Links folgen“, und klicken Sie auf
    „Website-Struktur lesen“.
-2. Lassen Sie „Feeds und CMS-Schnittstellen lesen“ angehakt, um die Einträge der Feeds, von
-   WordPress und von Drupal der Website einzubeziehen (`apis`).
+2. Lassen Sie „Feeds und CMS-Schnittstellen lesen“ angehakt: Dann bezieht der Crawl auch die
+   Seiten ein, die die Website in ihren Feeds und über WordPress oder Drupal auflistet (`apis`).
    Der Website-Baum erscheint sofort statt eines Job-Kastens und wächst alle paar Sekunden mit,
    solange der Crawl läuft; Ihre Häkchen, aufgeklappten Abschnitte und der Filter bleiben. Sein
    Kopf zeigt den Zustand des Jobs, wie viele Abrufe bisher erledigt sind, die fehlgeschlagenen,
