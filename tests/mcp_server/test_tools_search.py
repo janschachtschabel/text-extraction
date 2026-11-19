@@ -21,6 +21,7 @@ from tests.test_search_api import (
     serving,
 )
 from text_extraction.app import create_public_app
+from text_extraction.settings import Settings
 
 HIT = "https://en.wikipedia.org/wiki/Photosynthesis"
 
@@ -233,3 +234,50 @@ def test_many_hits_are_cut_to_the_answer_budget() -> None:
     assert "mcp_answer_truncated" in answer["data"]["warnings"]
     (hint,) = hints_of(result)
     assert f"results cut to {len(kept)} of 40" in hint
+
+
+def test_the_default_sources_are_listed_for_an_agent() -> None:
+    """With the shipped SEARCH_SOURCES, the tool names every engine an agent may ask (ruling D7)."""
+    sources = list(Settings.model_fields["search_sources"].default)
+    with running(serving(searx_answer()), search_sources=sources) as client:
+        tool = listed_tool(client)
+
+    description = tool["inputSchema"]["properties"]["sources"]["description"]
+    for engine in ("bing", "duckduckgo", "wikipedia", "openalex"):
+        assert engine in description
+    for engine in ("google", "wlo", "mojeek", "startpage"):  # blocked or dropped (ruling D7)
+        assert engine not in description
+    # The order of the hits and German hits are explained, so an agent need not guess them.
+    assert "top hit" in tool["description"]
+    assert "duplicate" in tool["description"]
+    assert '"de"' in tool["description"]
+
+
+def test_web_search_orders_and_merges_like_the_route() -> None:
+    """Top hits of every source first and one hit per page, as through REST (ruling D7)."""
+    answer_body = {
+        "query": "q",
+        "results": [
+            {"url": "https://both.example/", "engines": ["bing", "mojeek"], "positions": [3]},
+            {"url": "https://bing-top.example/", "engines": ["bing"], "positions": [1]},
+            {"url": "http://www.both.example", "engines": ["duckduckgo"], "positions": [2]},
+            {"url": "https://ddg-top.example/", "engines": ["duckduckgo"], "positions": [1]},
+        ],
+        "suggestions": [],
+        "unresponsive_engines": [],
+    }
+    sources = ["bing", "duckduckgo", "mojeek"]
+    body = {"query": "Photosynthese", "language": "de"}
+    with running(serving(answer_body), search_sources=sources, search_cache_seconds=0) as client:
+        rest = client.post("/v1/search", json=body, headers=USER).json()
+        result = call_tool(client, "web_search", body, headers=USER)
+
+    answer = envelope_of(result)
+    hits = answer["data"]["results"]
+    assert [hit["url"] for hit in hits] == [
+        "https://bing-top.example/",
+        "https://ddg-top.example/",
+        "https://both.example/",
+    ]
+    assert hits[2]["sources"] == ["duckduckgo", "bing", "mojeek"]
+    assert [hit["url"] for hit in rest["data"]["results"]] == [hit["url"] for hit in hits]

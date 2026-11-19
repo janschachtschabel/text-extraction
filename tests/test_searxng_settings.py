@@ -1,10 +1,9 @@
 """SearXNG's settings.yml as this project ships it (package 25): the template that
 ``text-extraction-init`` renders into the compose stack and the Helm chart mounts. The engines
-with an official, free API (ruling D2 a), google and bing, and the added json engine wlo (ruling
-D6) are on, SEARCH_SOURCES names exactly them, and the instance is a private backend of the API:
-JSON on, limiter, image proxy and Valkey off."""
+with an official, free API (ruling D2 a) and the scraping engines bing and duckduckgo (rulings D6
+and D7) are on, SEARCH_SOURCES names exactly them, and the instance is a
+private backend of the API: JSON on, limiter, image proxy and Valkey off."""
 
-import json
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -25,11 +24,12 @@ D2_ENGINES = [
     "arxiv",
     "crossref",
 ]
-# Jan's choice of 2026-11-19 (ruling D6): two scraping engines and WLO's official API.
-SCRAPING_ENGINES = ["google", "bing"]
+# Jan's choices of 2026-11-19 (rulings D6, D7): two scraping engines. google, mojeek and
+# startpage are left out (each blocked a server at once: "Suspended: access denied" or
+# "Suspended: CAPTCHA"), and so is the wlo json engine.
+SCRAPING_ENGINES = ["bing", "duckduckgo"]
 KEPT_ENGINES = D2_ENGINES + SCRAPING_ENGINES
-ALL_ENGINES = [*KEPT_ENGINES, "wlo"]
-WLO_RENDER = "https://redaktion.openeduhub.net/edu-sharing/components/render/"
+ALL_ENGINES = KEPT_ENGINES
 
 
 def _text() -> str:
@@ -58,36 +58,6 @@ def test_every_engine_is_switched_on() -> None:
     for name in ALL_ENGINES:
         assert engines[name]["disabled"] is False, name
     assert engines["wikipedia"]["display_type"] == ["list"]
-
-
-def test_wlo_asks_the_public_edu_sharing_search_and_links_render_pages() -> None:
-    wlo = {engine["name"]: engine for engine in _settings()["engines"]}["wlo"]
-    assert wlo["engine"] == "json_engine"
-    assert wlo["method"] == "POST"
-    assert wlo["headers"]["Content-Type"] == "application/json"
-    assert wlo["search_url"].startswith(
-        "https://redaktion.openeduhub.net/edu-sharing/rest/search/v1/queries/-home-/mds_oeh/"
-        "ngsearch?contentType=FILES&maxItems=10&skipCount={pageno}&"
-    )
-    # json_engine formats the body with str.format: doubled braces are the JSON's own.
-    fields = {
-        "query": "Photosynthese",
-        "lang": "de",
-        "pageno": 0,
-        "time_range": "",
-        "safe_search": "",
-    }
-    body = json.loads(wlo["request_body"].format(**fields))
-    assert body == {"criteria": [{"property": "ngsearchword", "values": ["Photosynthese"]}]}
-    # Page n skips (n - 1) * 10 hits, as maxItems is 10.
-    assert (wlo["paging"], wlo["page_size"], wlo["first_page_num"]) == (True, 10, 0)
-    assert wlo["results_query"] == "nodes"
-    assert (wlo["url_prefix"], wlo["url_query"]) == (WLO_RENDER, "ref/id")
-    assert wlo["title_query"] == "properties/cclom:title/0"
-    assert wlo["content_query"] == "properties/cclom:general_description/0"
-    assert wlo["about"]["use_official_api"] is True
-    # Longer than SearXNG's 3 s default, within the cap that keeps the search below its timeout.
-    assert 3.0 < wlo["timeout"] <= _settings()["outgoing"]["max_request_timeout"]
 
 
 def test_json_is_on() -> None:

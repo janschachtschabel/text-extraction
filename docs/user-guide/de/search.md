@@ -17,7 +17,7 @@ Suche höchstens liefert (`limits.search_max_results`).
 
 ## Die Quellen
 
-Jede Quelle ist kostenlos. Alle außer Google und Bing haben eine offizielle API. Jeder Treffer
+Jede Quelle ist kostenlos. Alle außer Bing und DuckDuckGo haben eine offizielle API. Jeder Treffer
 nennt die Quellen, die ihn gefunden haben.
 
 | Quelle | Was sie findet | Grenzen |
@@ -30,14 +30,19 @@ nennt die Quellen, die ihn gefunden haben.
 | `openalex` | Wissenschaftliche Werke (Artikel, Bücher, Datensätze) aus OpenAlex | Nur Wissenschaft; Titel oft englisch. |
 | `arxiv` | Preprints aus arXiv (Physik, Mathematik, Informatik und mehr) | Nur Wissenschaft, fast alles englisch. |
 | `crossref` | Wissenschaftliche Werke mit DOI aus Crossref | Nur Wissenschaft; Metadaten, oft ohne Zusammenfassung. |
-| `google` | Allgemeine Webseiten von Google, in der Sprache von `language` | Keine offizielle API: SearXNG liest die Ergebnisseiten von Google aus (Scraping). Google sperrt Server-Adressen nach einiger Zeit; die Quelle steht dann in `sources_failed`, und die Antwort ist `partial`. |
-| `bing` | Allgemeine Webseiten von Bing, in der Sprache von `language` | Scraping wie bei `google`, mit derselben Gefahr einer Sperre. |
-| `wlo` | Lehrmaterial aus WirLernenOnline (WLO), über die offizielle, freie Such-API seines Repositoriums | Nur deutsches Material; `language` gilt hier nicht. Jeder Treffer verlinkt die Seite des Materials im Repositorium (`https://redaktion.openeduhub.net/edu-sharing/components/render/<id>`), deren Text, Lizenz und Datei die Extraktion über die API des Repositoriums liest. Suchbegriffe mit einem doppelten Anführungszeichen (`"`) oder einem Backslash lassen WLO scheitern. |
+| `bing` | Allgemeine Webseiten von Bing, in der Sprache von `language` | Keine offizielle API: SearXNG liest die Ergebnisseiten von Bing aus (Scraping). Eine Suchmaschine kann die Adresse eines Servers nach einiger Zeit sperren; die Quelle steht dann in `sources_failed`, und die Antwort ist `partial`. |
+| `duckduckgo` | Allgemeine Webseiten von DuckDuckGo, in der Sprache von `language` | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre. |
 
-Deutsche Ergebnisse kommen also von Google, Bing und WLO, Wikipedia-Wissen aus den
-Wikimedia-Quellen und Wissenschaft aus OpenAlex, arXiv und Crossref. DuckDuckGo, Brave und
-Startpage bleiben aus. Ein Betreiber kann Google und Bing ausschalten oder eine weitere
-Suchmaschine einschalten (siehe [Weitere Quellen](#weitere-quellen)).
+Deutsche Ergebnisse kommen also von Bing und DuckDuckGo, Wikipedia-Wissen aus den
+Wikimedia-Quellen und Wissenschaft aus OpenAlex, arXiv und Crossref. Google, Mojeek, Startpage und
+Brave bleiben aus: Google hat einen Server schon am ersten Tag gesperrt, Mojeek und Startpage haben
+die Testserver sofort abgewiesen. Ein Betreiber kann Bing und DuckDuckGo ausschalten oder eine
+weitere Suchmaschine einschalten (siehe [Weitere Quellen](#weitere-quellen)).
+
+Werden mehrere Quellen gefragt, kommen die besten Treffer der Quellen zuerst: zuerst die Treffer,
+die in der Liste einer Quelle ganz oben stehen, dann die auf dem zweiten Platz und so weiter. Eine Seite, die mehrere Quellen gefunden haben
+(auch als `http` und `https`, mit oder ohne `www.`, Schrägstrich am Ende oder `utm_`-Parameter),
+steht nur einmal da, an ihrem besten Platz, mit allen ihren Quellen.
 
 ## In der Spielwiese
 
@@ -94,6 +99,16 @@ fallen weg), seinen `title`, einen `snippet` (oder null), die `sources`, die ihn
 reiner Text: Der Dienst entfernt die Auszeichnung, die manche Quellen mitliefern (die JATS-Tags von
 Crossref und OpenAlex, die Hervorhebungen von Wikipedia). `data.suggestions` listet andere
 Suchbegriffe.
+
+Die Treffer sind nach ihrem besten Platz in der eigenen Liste einer Quelle geordnet: Zuerst kommen
+die Treffer, die in der Liste einer Quelle ganz oben stehen, dann die auf dem zweiten Platz und so
+weiter; innerhalb eines Platzes zählt die Reihenfolge von SearXNG. Eine Seite, die mehrere Quellen
+gefunden haben, ist ein Treffer an ihrem besten Platz, dessen `sources` alle nennt, und ihre `url`
+ist die https-Adresse, wo eine der Quellen sie hat. Als dieselbe Seite gilt eine Adresse ohne
+Rücksicht auf `http` oder `https`, den Standard-Port, ein führendes `www.`, Groß- und
+Kleinschreibung des Hosts, einen Schrägstrich am Ende, die Reihenfolge der Abfrage,
+`utm_`-Parameter oder einen Teil nach `#` wie `#top` (eine Route wie `#/seite` zählt).
+`max_results` kürzt die Liste nach dieser Ordnung.
 
 Haben manche Quellen nicht geantwortet, ist die Antwort `partial`, und `data.sources_failed` nennt
 jede mit dem Grund von SearXNG (etwa eine Zeitüberschreitung oder eine abgelehnte Verbindung). Die
@@ -179,23 +194,24 @@ SearXNG keine Einstellungen und startet nicht. Zeigt `docker compose logs init` 
 `init_searxng_settings_failed`, löschen Sie das Volume `searxng-config` (es enthält nur diese
 Einstellungen) und spielen Sie neu ein. SearXNG fragt von der
 eigenen Adresse des VPS aus. Die Quellen mit offizieller API sperren keinen Server; Mwmbl zählt
-Anfragen pro Adresse. Google und Bing können die Adresse des VPS nach einiger Zeit sperren: Sie
+Anfragen pro Adresse. Bing und DuckDuckGo können die Adresse des VPS nach einiger Zeit sperren: Sie
 stehen dann in `sources_failed`, und die übrigen Quellen antworten weiter. Eine solche Antwort ist
 `partial` und kommt nicht in den Cache, solange die Sperre dauert, fragt also jede Suche wieder
-alle Quellen; lassen Sie Google und Bing aus `SEARCH_SOURCES` weg, wenn das lange anhält (siehe
+alle Quellen; lassen Sie eine gesperrte Suchmaschine aus `SEARCH_SOURCES` weg, wenn das lange anhält (siehe
 [Weitere Quellen](#weitere-quellen)).
 
 ### Weitere Quellen
 
-Um Google und Bing auszuschalten, setzen Sie `SEARCH_SOURCES` ohne sie (etwa
-`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,wlo`): Der Dienst fragt sie
+Um Bing und DuckDuckGo auszuschalten, setzen Sie `SEARCH_SOURCES` ohne sie (etwa
+`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref`): Der Dienst fragt sie
 dann nie. Eine Quelle außerhalb von `SEARCH_SOURCES` wird mit 422 abgelehnt.
 
-So schalten Sie eine weitere Suchmaschine von SearXNG ein (etwa `duckduckgo`), auf eigene
-Verantwortung:
+So schalten Sie eine weitere Suchmaschine von SearXNG ein (etwa `mojeek` oder `startpage`), auf
+eigene Verantwortung:
 
 1. Tragen Sie ihren Namen in `use_default_settings.engines.keep_only` und in die Liste `engines:`
-   (mit `disabled: false`) der `settings.yml` von SearXNG ein.
+   (mit `disabled: false`, und `inactive: false` bei einer Suchmaschine, die SearXNG nicht von
+   sich aus lädt) der `settings.yml` von SearXNG ein.
 2. Tragen Sie ihren Namen in `SEARCH_SOURCES` ein, das die Suchmaschinen nennt, die der Dienst
    fragen darf.
 
@@ -215,7 +231,7 @@ Woher die Einstellungen kommen, hängt von der Installation ab:
   eigenes SearXNG.
 
 Scraping von Suchmaschinen führt zur Sperre der Server-Adresse und verstößt gegen ihre
-Nutzungsbedingungen. Das Projekt lässt Google und Bing standardmäßig an, weil deutsche
-Web-Ergebnisse sie brauchen (Entscheidung D6 in
+Nutzungsbedingungen. Das Projekt lässt Bing und DuckDuckGo standardmäßig an, weil deutsche
+Web-Ergebnisse sie brauchen (Entscheidungen D6 und D7 in
 [architecture.md](../../architecture.md#web-search), Englisch); jede andere Scraping-Suchmaschine
 bleibt aus.

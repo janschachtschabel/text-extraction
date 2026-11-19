@@ -3708,7 +3708,8 @@ web search steps (PR label `live`, `tests/live/run_search.py`, unit-tested in
 read-only mount of the settings `init` rendered (`tests/live/compose.searxng.yml`) and a second
 API from source, then check REST and `web_search`: hits for "Photosynthese" (de) from Wikipedia on
 de.wikipedia.org and another source, http(s) URLs only, a cache hit on the second call, and,
-with SearXNG stopped, 200 `failed`/`search_failed` (retryable). image.yml (api variant) runs the
+with SearXNG stopped, 200 `failed`/`search_failed` (retryable); since D7 also each scraped engine
+asked alone (`--expect engines`). image.yml (api variant) runs the
 root file's `init` from the image just built into fresh volumes and its `searxng`
 (`tests/image/compose.searxng-check.yml`), and checks that SearXNG sees only `settings.yml` with
 a generated key and answers `/healthz` and a JSON search.
@@ -3753,6 +3754,33 @@ a generated key and answers `/healthz` and a JSON search.
   engines by default (`tests/test_searxng_settings.py`). The live check is
   `tests/live/run_search.py --expect wlo` (live.yml "Web search: WLO hits"); Google and Bing get
   no live check, because CI's addresses are blocked often.
+- **D7, DuckDuckGo instead of Google, no WLO, top hits first (Jan, 2026-11-19).** On the first
+  day of v0.1.15 Google answered the Hostinger server with "Suspended: access denied" (SearXNG's
+  suspension after a CAPTCHA or 403), while Bing answered. Jan chose "google out, wlo out,
+  duckduckgo, mojeek, startpage in", each tested live so that no dead source is shipped. The live
+  check (`tests/live/run_search.py --expect engines`, live.yml "Web search: each scraping engine
+  answers") asks each scraped engine alone from a GitHub runner, with up to three retries, and
+  needs `success` with a hit naming it. On its first run (PR #72, 2026-11-19) `bing` and
+  `duckduckgo` answered with 10 hits each, while `mojeek` answered "Suspended: access denied" and
+  `startpage` "Suspended: CAPTCHA" on the first request. So only `duckduckgo` is added: it
+  replaces D6's `google`, and `wlo` (D6 B) is removed; `keep_only`, the engine list and the
+  `SEARCH_SOURCES` default name the eight D2 engines plus `bing` and `duckduckgo`. Mojeek and
+  Startpage stay off with Google and Brave; an operator can switch them on as any other engine
+  (`inactive: false` as well, since SearXNG does not load them by default). DuckDuckGo is
+  scraped as well; the D6 notes on blocks apply.
+  Jan also asked that a search across several sources lists every source's top hits first and
+  drops duplicates. SearXNG orders by its score, which favours a page found by several engines,
+  and merges duplicates only on the full URL without the scheme. So the client reorders
+  (`_ranked_hits` in `search/client.py`): a hit's rank is its best position in any source's own
+  list (SearXNG's `positions`; none ranks last), hits are sorted by rank and then by SearXNG's
+  order. `positions` does not say which engine gave which place, so this is round-robin by place,
+  not strictly one hit per engine per round, and within a place SearXNG's score still puts pages
+  found by several engines first. Pages that differ only in scheme, the scheme's default port, a
+  leading `www.`, the case of the host, a trailing slash, the order of the query, `utm_`
+  parameters (any case) or a plain fragment are merged into the better ranked hit (sources united
+  in order, snippet and date filled, the higher score kept, the https address without
+  credentials preferred); a fragment route (`#/`, `#!`) keeps single-page-app pages apart.
+  Percent-encoding and IDN spellings are not unified. `max_results` cuts after this order.
 
 **Rulings of the build (R25-1 to R25-9).**
 

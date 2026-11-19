@@ -272,14 +272,15 @@ jobs:
           uv run python -m tests.live.run_search --base-url http://127.0.0.1:8081 \
             --expect hits --retries 3 --summary-out results/summary_web_search.md
 
-      # WLO (ruling D6), SearXNG's json engine against WLO's public edu-sharing search: a search
-      # that names only wlo answers success with a titled hit on a WLO render page. Up to three
-      # retries (tests/live/run_search.py --expect wlo).
-      - name: "Web search: WLO hits"
+      # The engines that scrape a search engine's result pages (rulings D6, D7: bing,
+      # duckduckgo), each asked alone in German: each must answer success with a hit of
+      # its own, so no dead source ships. Up to three retries per engine
+      # (tests/live/run_search.py --expect engines).
+      - name: "Web search: each scraping engine answers"
         if: ${{ !cancelled() && steps.search_setup.outcome == 'success' }}
         run: |
           uv run python -m tests.live.run_search --base-url http://127.0.0.1:8081 \
-            --expect wlo --retries 3 --summary-out results/summary_web_search_wlo.md
+            --expect engines --retries 3 --summary-out results/summary_web_search_engines.md
 
       # SearXNG stopped: a query that is not in the cache answers 200 failed / search_failed,
       # retryable, through REST and MCP (isError false), never a 5xx. Tried once.
