@@ -597,8 +597,7 @@ def _resolved(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(value, list):
             return [resolve(item) for item in value[:_MAX_VALUES_PER_PROPERTY]]
         ref = value.get("@id") if isinstance(value, dict) else None
-        target = by_id.get(ref) if isinstance(ref, str) else None
-        if target is None or set(value) != {"@id"}:
+        if not isinstance(ref, str) or (target := by_id.get(ref)) is None or set(value) != {"@id"}:
             return value
         referred.add(ref)
         return target

@@ -16,7 +16,9 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   feeds named in the start page's head (at most 3), the WordPress REST API and Drupal JSON:API as
   `sitemap` items (`source`, formats `wordpress_types`, `wordpress_posts`, `drupal_index`,
   `drupal_nodes`). Their entries carry `title` and a type from their content type (reason `api`),
-  and the tree shows both. The playground has the checkbox "Read feeds and CMS interfaces", the
+  and the tree shows both. A WordPress or Drupal interface that answers 401, 403, 404 or 410 is
+  `format: absent` with the warning `site_api_not_found`; an API answer over 4 MiB fails
+  `too_large`. The playground has the checkbox "Read feeds and CMS interfaces", the
   MCP site tool takes `apis` in `options`. The entries of RSS/Atom feeds in ordinary sitemaps carry
   `title` too. Every extraction's `metadata.places` lists up to 5 places the page names itself
   (schema.org Place, LocalBusiness, address, geo, an Event's location, geo meta tags); PII handling

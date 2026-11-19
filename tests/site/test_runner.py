@@ -2068,7 +2068,7 @@ async def test_api_401_and_html_200() -> None:
     assert data(locked).upstream_status == 401
     assert data(locked).warnings == ["site_api_not_found"]
     assert (sitemap_of(locked).format, sitemap_of(locked).source) == ("absent", "wordpress")
-    assert sitemap_of(locked).entries == sitemap_of(locked).children == []
+    assert (sitemap_of(locked).entries, sitemap_of(locked).children) == ([], [])
     assert login.result is not None
     assert login.result.status == "failed"
     assert login.result.error is not None
@@ -2284,7 +2284,7 @@ async def test_api_body_over_its_cap_fails_too_large(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(sitemap_items_module, "_read_api", no_parse)
     huge = b"[" + b"{}," * (API_MAX_BYTES // 3 + 1) + b"{}]"
-    answers = {
+    answers: dict[str, Answer] = {
         ROOT: page(ROOT, head=WP_HEAD),
         TYPES: fetched(TYPES, huge, content_type="application/json"),
     }
