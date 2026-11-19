@@ -4,7 +4,7 @@ Deutsch: [Suche](../de/search.md)
 
 Search the web for pages, then extract the hits you want. The service asks its own SearXNG, a
 search service that runs next to it as a separate container. SearXNG passes the query to a few
-free sources with an official API and returns their hits together. The search itself fetches no
+free sources and returns their hits together. The search itself fetches no
 page. You send the hits you pick to an extraction: one in the playground, through
 `POST /v1/extract` or with `extract_url`, several as a batch. This page covers the sources, the
 playground, REST, MCP, the errors and what an operator sets up.
@@ -16,7 +16,8 @@ your key may search (`features.search`) and how many hits one search may return
 
 ## The sources
 
-Only sources with an official, free API are on. Each hit names the sources that found it.
+Every source is free. All but Google and Bing have an official API. Each hit names the sources
+that found it.
 
 | Source | What it finds | Limits |
 | --- | --- | --- |
@@ -28,11 +29,14 @@ Only sources with an official, free API are on. Each hit names the sources that 
 | `openalex` | Scholarly works (articles, books, data sets) from OpenAlex | Science only; titles are often English. |
 | `arxiv` | Preprints from arXiv (physics, mathematics, computer science and more) | Science only, almost all English. |
 | `crossref` | Scholarly works with a DOI from Crossref | Science only; metadata, often without a summary. |
+| `google` | General web pages from Google, in the language of `language` | No official API: SearXNG reads Google's result pages (scraping). Google blocks server addresses after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
+| `bing` | General web pages from Bing, in the language of `language` | Scraping as with `google`, with the same risk of a block. |
+| `wlo` | Teaching material from WirLernenOnline (WLO), through the official, free search API of its repository | German material only; `language` does not apply. Each hit links the material's page in the repository (`https://redaktion.openeduhub.net/edu-sharing/components/render/<id>`), whose text, licence and file the extraction reads through the repository's API. Search terms with a double quote (`"`) or a backslash make WLO fail. |
 
-So the search is strong on Wikipedia knowledge and on science, and weak as a general German web
-search. Google, Bing, DuckDuckGo, Brave and Startpage stay off: SearXNG reaches them only by
-scraping their result pages, and they block server addresses after a while. An operator may still
-switch them on, at their own risk (see [More sources](#more-sources)).
+So German results come from Google, Bing and WLO, Wikipedia knowledge from the Wikimedia sources
+and science from OpenAlex, arXiv and Crossref. DuckDuckGo, Brave and Startpage stay off. An
+operator can switch Google and Bing off, or switch another engine on (see
+[More sources](#more-sources)).
 
 ## In the playground
 
@@ -42,8 +46,8 @@ the tab is missing, and the **Info** tab says why.
 
 1. Enter the "Search terms" (at most 500 characters).
 2. Optional: tick the "Sources" to ask. With none ticked, every source is asked.
-3. Optional: "Language (optional)" takes a language code such as `de` or `en`; empty means every
-   language. "Hits" is how many hits to show (10 by default, at most the service's
+3. Optional: "Language" is "All languages", "German" or "English". It is preset to the language
+   of the page, so on the German page the search asks for German hits. "Hits" is how many hits to show (10 by default, at most the service's
    `SEARCH_MAX_RESULTS`). "Time range" keeps hits from the last day, month or year, where a source
    supports it. "Result page" 2 shows the next hits.
 4. Press "Search".
@@ -164,16 +168,22 @@ start, with a key it creates once and keeps. This `init` comes with release 0.1.
 file follows the newest 0.1.x release, so deploy the new compose file only once 0.1.13 is
 published: with an older image SearXNG gets no settings and does not start. If
 `docker compose logs init` shows `init_searxng_settings_failed`, remove the volume
-`searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's own address. The eight sources are official APIs and do not block a
-server; only Mwmbl counts requests per address.
+`searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's
+own address. The sources with an official API do not block a server; Mwmbl counts requests per
+address. Google and Bing may block the VPS's address after a while: they then appear in
+`sources_failed`, and the other sources still answer.
 
 ### More sources
 
-To switch on another SearXNG engine (such as `google`, `bing` or `duckduckgo`), at your own risk:
+To keep Google and Bing off, set `SEARCH_SOURCES` without them (for example
+`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,wlo`): the service then
+never asks them. A source outside `SEARCH_SOURCES` is refused with a 422.
+
+To switch on another SearXNG engine (such as `duckduckgo`), at your own risk:
 
 1. Add its name to `use_default_settings.engines.keep_only` and to the `engines:` list (with
    `disabled: false`) of SearXNG's `settings.yml`.
-2. Add its name to `SEARCH_SOURCES`, which must name exactly the engines the settings keep.
+2. Add its name to `SEARCH_SOURCES`, which names the engines the service may ask.
 
 Where the settings come from depends on the setup:
 
@@ -188,5 +198,7 @@ Where the settings come from depends on the setup:
 - Helm: the ConfigMap holds the chart's `files/searxng-settings.yml`. Change it in a copy of the
   chart, or set `searxng.enabled=false` and `config.SEARCH_URL` to a SearXNG of your own.
 
-Scraping these search engines gets the server's address blocked and does not fit the project's
-rule to respect sites ([CLAUDE.md](../../../CLAUDE.md), rule 6), so they stay off by default.
+Scraping search engines gets the server's address blocked and goes against their terms. The
+project keeps Google and Bing on by default because German web results need them (ruling D6 in
+[architecture.md](../../architecture.md#web-search)); every other
+scraping engine stays off.

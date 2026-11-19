@@ -9,6 +9,18 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- Web search: three more sources (ruling D6, Jan's choice of 2026-11-19). `wlo` asks the
+  official, free search API of WirLernenOnline's repository (a SearXNG `json_engine`) and links
+  each material's render page, which the extraction reads through the repository's API; `google`
+  and `bing` give German web results, read by scraping, so they may block the server's address
+  and then appear in `sources_failed`. `SEARCH_SOURCES` names all eleven by default; leave out
+  `google,bing` to keep them unasked. live.yml checks WLO hits. The new sources reach a compose
+  install with the new image, as `init` renders SearXNG's settings from it.
+- Playground: the Search tab's language is a choice of "All languages", "German" and "English",
+  preset to the page's language, so the German page asks for German hits.
+
 ### Fixed
 
 - Web search: `title` and `snippet` are plain text. The tags some sources hand on (Crossref's and

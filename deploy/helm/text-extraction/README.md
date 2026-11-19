@@ -611,9 +611,11 @@ behind a ClusterIP Service and points the API pods' `SEARCH_URL` at it; `config.
 `config.SEARCH_URL` to a SearXNG of your own.
 
 - **Settings.** The ConfigMap holds the chart's `files/searxng-settings.yml`, a copy of the
-  service's `data/searxng-settings.yml`: only engines with an official, free API (`wikipedia`,
-  `wikibooks`, `wikiversity`, `wikinews`, `mwmbl`, `openalex`, `arxiv`, `crossref`, which
-  `SEARCH_SOURCES` names), JSON on, limiter, image proxy and Valkey off, every engine cut at 8 s.
+  service's `data/searxng-settings.yml`: the engines with an official, free API (`wikipedia`,
+  `wikibooks`, `wikiversity`, `wikinews`, `mwmbl`, `openalex`, `arxiv`, `crossref`), WLO's
+  search API (`wlo`) and the scraping engines `google` and `bing` (all of them in
+  `SEARCH_SOURCES`; set `config.SEARCH_SOURCES` without `google,bing` to keep those unasked),
+  JSON on, limiter, image proxy and Valkey off, every engine cut at 8 s.
 - **Key.** Its `secret_key` is a placeholder; the pods get the key as `SEARXNG_SECRET` from the
   Secret, which SearXNG prefers. SearXNG refuses to start with the placeholder.
 - **Pods.** User 977 (the image's `searxng`), read-only root file system, all capabilities

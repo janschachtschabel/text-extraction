@@ -4,8 +4,8 @@ English: [Search](../en/search.md)
 
 Durchsuchen Sie das Web nach Seiten und extrahieren Sie dann die Treffer, die Sie brauchen. Der
 Dienst fragt sein eigenes SearXNG, einen Suchdienst, der als eigener Container neben ihm läuft.
-SearXNG gibt die Anfrage an einige freie Quellen mit offizieller API weiter und liefert ihre
-Treffer gemeinsam zurück. Die Suche selbst holt keine Seite. Die Treffer, die Sie auswählen,
+SearXNG gibt die Anfrage an einige freie Quellen weiter und liefert ihre Treffer gemeinsam
+zurück. Die Suche selbst holt keine Seite. Die Treffer, die Sie auswählen,
 senden Sie an eine Extraktion: einen in der Spielwiese, über `POST /v1/extract` oder mit
 `extract_url`, mehrere als Batch. Diese Seite beschreibt die Quellen, die Spielwiese, REST, MCP,
 die Fehler und was ein Betreiber einrichtet.
@@ -17,8 +17,8 @@ Suche höchstens liefert (`limits.search_max_results`).
 
 ## Die Quellen
 
-Eingeschaltet sind nur Quellen mit einer offiziellen, freien API. Jeder Treffer nennt die Quellen,
-die ihn gefunden haben.
+Jede Quelle ist kostenlos. Alle außer Google und Bing haben eine offizielle API. Jeder Treffer
+nennt die Quellen, die ihn gefunden haben.
 
 | Quelle | Was sie findet | Grenzen |
 | --- | --- | --- |
@@ -30,12 +30,14 @@ die ihn gefunden haben.
 | `openalex` | Wissenschaftliche Werke (Artikel, Bücher, Datensätze) aus OpenAlex | Nur Wissenschaft; Titel oft englisch. |
 | `arxiv` | Preprints aus arXiv (Physik, Mathematik, Informatik und mehr) | Nur Wissenschaft, fast alles englisch. |
 | `crossref` | Wissenschaftliche Werke mit DOI aus Crossref | Nur Wissenschaft; Metadaten, oft ohne Zusammenfassung. |
+| `google` | Allgemeine Webseiten von Google, in der Sprache von `language` | Keine offizielle API: SearXNG liest die Ergebnisseiten von Google aus (Scraping). Google sperrt Server-Adressen nach einiger Zeit; die Quelle steht dann in `sources_failed`, und die Antwort ist `partial`. |
+| `bing` | Allgemeine Webseiten von Bing, in der Sprache von `language` | Scraping wie bei `google`, mit derselben Gefahr einer Sperre. |
+| `wlo` | Lehrmaterial aus WirLernenOnline (WLO), über die offizielle, freie Such-API seines Repositoriums | Nur deutsches Material; `language` gilt hier nicht. Jeder Treffer verlinkt die Seite des Materials im Repositorium (`https://redaktion.openeduhub.net/edu-sharing/components/render/<id>`), deren Text, Lizenz und Datei die Extraktion über die API des Repositoriums liest. Suchbegriffe mit einem doppelten Anführungszeichen (`"`) oder einem Backslash lassen WLO scheitern. |
 
-Stark ist die Suche also bei Wikipedia-Wissen und Wissenschaft, schwach als allgemeine deutsche
-Websuche. Google, Bing, DuckDuckGo, Brave und Startpage bleiben aus: SearXNG erreicht sie nur,
-indem es ihre Ergebnisseiten ausliest (Scraping), und sie sperren Server-Adressen nach einiger
-Zeit. Ein Betreiber kann sie trotzdem einschalten, auf eigene Verantwortung (siehe
-[Weitere Quellen](#weitere-quellen)).
+Deutsche Ergebnisse kommen also von Google, Bing und WLO, Wikipedia-Wissen aus den
+Wikimedia-Quellen und Wissenschaft aus OpenAlex, arXiv und Crossref. DuckDuckGo, Brave und
+Startpage bleiben aus. Ein Betreiber kann Google und Bing ausschalten oder eine weitere
+Suchmaschine einschalten (siehe [Weitere Quellen](#weitere-quellen)).
 
 ## In der Spielwiese
 
@@ -46,8 +48,8 @@ Nutzer-Schlüssel angemeldet, fehlt der Tab, und der Tab **Info** sagt, warum.
 1. Geben Sie die „Suchbegriffe“ ein (höchstens 500 Zeichen).
 2. Optional: Kreuzen Sie die „Quellen“ an, die gefragt werden. Ohne Kreuz werden alle Quellen
    gefragt.
-3. Optional: „Sprache (optional)“ nimmt einen Sprachcode wie `de` oder `en`; leer heißt jede
-   Sprache. „Treffer“ ist die Zahl der angezeigten Treffer (10 als Standard, höchstens
+3. Optional: „Sprache“ ist „Alle Sprachen“, „Deutsch“ oder „Englisch“. Vorbelegt ist die Sprache
+   der Seite, auf der deutschen Seite fragt die Suche also nach deutschen Treffern. „Treffer“ ist die Zahl der angezeigten Treffer (10 als Standard, höchstens
    `SEARCH_MAX_RESULTS` des Dienstes). „Zeitraum“ behält Treffer aus dem letzten Tag, Monat oder
    Jahr, wo eine Quelle das unterstützt. „Ergebnisseite“ 2 zeigt die nächsten Treffer.
 4. Klicken Sie auf „Suchen“.
@@ -176,18 +178,23 @@ Compose-Datei also erst ein, wenn 0.1.13 veröffentlicht ist: Mit einem älteren
 SearXNG keine Einstellungen und startet nicht. Zeigt `docker compose logs init` die Meldung
 `init_searxng_settings_failed`, löschen Sie das Volume `searxng-config` (es enthält nur diese
 Einstellungen) und spielen Sie neu ein. SearXNG fragt von der
-eigenen Adresse des VPS aus. Die acht Quellen sind offizielle APIs und sperren keinen Server; nur
-Mwmbl zählt Anfragen pro Adresse.
+eigenen Adresse des VPS aus. Die Quellen mit offizieller API sperren keinen Server; Mwmbl zählt
+Anfragen pro Adresse. Google und Bing können die Adresse des VPS nach einiger Zeit sperren: Sie
+stehen dann in `sources_failed`, und die übrigen Quellen antworten weiter.
 
 ### Weitere Quellen
 
-So schalten Sie eine weitere Suchmaschine von SearXNG ein (etwa `google`, `bing` oder
-`duckduckgo`), auf eigene Verantwortung:
+Um Google und Bing auszuschalten, setzen Sie `SEARCH_SOURCES` ohne sie (etwa
+`wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,wlo`): Der Dienst fragt sie
+dann nie. Eine Quelle außerhalb von `SEARCH_SOURCES` wird mit 422 abgelehnt.
+
+So schalten Sie eine weitere Suchmaschine von SearXNG ein (etwa `duckduckgo`), auf eigene
+Verantwortung:
 
 1. Tragen Sie ihren Namen in `use_default_settings.engines.keep_only` und in die Liste `engines:`
    (mit `disabled: false`) der `settings.yml` von SearXNG ein.
-2. Tragen Sie ihren Namen in `SEARCH_SOURCES` ein, das genau die Suchmaschinen nennen muss, die
-   die Einstellungen behalten.
+2. Tragen Sie ihren Namen in `SEARCH_SOURCES` ein, das die Suchmaschinen nennt, die der Dienst
+   fragen darf.
 
 Woher die Einstellungen kommen, hängt von der Installation ab:
 
@@ -204,6 +211,8 @@ Woher die Einstellungen kommen, hängt von der Installation ab:
   Kopie des Charts, oder setzen Sie `searxng.enabled=false` und `config.SEARCH_URL` auf ein
   eigenes SearXNG.
 
-Scraping dieser Suchmaschinen führt zur Sperre der Server-Adresse und passt nicht zur Regel des
-Projekts, Websites zu respektieren ([CLAUDE.md](../../../CLAUDE.md), Regel 6); darum bleiben sie
-standardmäßig aus.
+Scraping von Suchmaschinen führt zur Sperre der Server-Adresse und verstößt gegen ihre
+Nutzungsbedingungen. Das Projekt lässt Google und Bing standardmäßig an, weil deutsche
+Web-Ergebnisse sie brauchen (Entscheidung D6 in
+[architecture.md](../../architecture.md#web-search), Englisch); jede andere Scraping-Suchmaschine
+bleibt aus.
