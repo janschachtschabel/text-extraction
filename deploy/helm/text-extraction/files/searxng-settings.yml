@@ -1,7 +1,7 @@
 # SearXNG settings of the text-extraction stack (package 25). SearXNG runs as its own, unmodified
 # container (searxng/searxng, AGPL-3.0) and answers only the API's JSON requests.
 #
-# text-extraction-init renders this file into the secrets volume (searxng/settings.yml) on every
+# text-extraction-init renders this file into the volume searxng-config (settings.yml) on every
 # start, with the placeholder secret_key replaced by a generated key it keeps; the Helm chart mounts
 # it from a ConfigMap and sets the key through SEARXNG_SECRET. SearXNG refuses to start with the
 # placeholder, so an unrendered copy never runs with a known key.

@@ -17,12 +17,19 @@ Files in ``--secrets-dir`` (default ``/secrets``):
 - ``api-keys.json`` (0600): the admin key's SHA-256 in the shape of ``API_KEYS``, read through
   ``API_KEYS_FILE`` (merged with ``API_KEYS`` from ``.env``).
 - ``searxng-secret`` (0600): SearXNG's ``server.secret_key``, 64 hex characters, created once.
-- ``searxng/settings.yml`` (0644 in a 0755 folder; SearXNG runs as its own user): the packaged
-  ``data/searxng-settings.yml`` with the placeholder key replaced by ``searxng-secret``. The
-  ``searxng`` service mounts only this folder (a volume subpath), never the other secrets.
 
-The derived files (``valkey.conf``, ``valkey-url``, ``api-keys.json``, ``searxng/settings.yml``)
-are written again from the kept secrets on every start: the same content, unless a new image
+In ``--searxng-dir`` (default ``/searxng``, the volume ``searxng-config``, which the ``searxng``
+service mounts read-only at ``/etc/searxng``; it never sees the secrets volume):
+
+- ``settings.yml`` (0644 in a 0755 folder; SearXNG runs as its own user): the packaged
+  ``data/searxng-settings.yml`` with the placeholder key replaced by ``searxng-secret``.
+
+When that folder cannot be written (a new image run by an old compose file without the volume,
+where ``/searxng`` is part of the read-only root), the command logs a warning and still exits 0:
+only the search is then broken, not every service that waits for ``init``.
+
+The derived files (``valkey.conf``, ``valkey-url``, ``api-keys.json``, ``settings.yml``) are
+written again from the kept secrets on every start: the same content, unless a new image
 brings a new SearXNG template, which so reaches the volume with the kept key. A ``DOMAIN``
 in the environment must be a bare host name: the Traefik labels take it unchanged, and
 ``https://...`` there breaks the route without an error at deploy time, so the command exits 1.
@@ -51,6 +58,7 @@ from text_extraction.logging import configure_logging
 _log = structlog.get_logger(__name__)
 
 DEFAULT_SECRETS_DIR = Path("/secrets")
+DEFAULT_SEARXNG_DIR = Path("/searxng")
 SEARXNG_TEMPLATE = "data/searxng-settings.yml"
 # The template's secret_key; SearXNG refuses to start with it.
 SEARXNG_KEY_PLACEHOLDER = "ultrasecretkey"
@@ -67,6 +75,7 @@ class SecretsError(Exception):
 @dataclass(frozen=True)
 class SecretsResult:
     admin_key_created: str | None  # the plain key, only on the run that created it
+    searxng_problem: str | None = None  # why SearXNG's settings could not be written
 
 
 def domain_problem(domain: str) -> str | None:
@@ -123,8 +132,23 @@ def searxng_settings(secret_key: str) -> str:
     return template.replace(SEARXNG_KEY_PLACEHOLDER, secret_key)
 
 
-def ensure_secrets(directory: Path, valkey_host: str = "valkey") -> SecretsResult:
-    """Create the missing secrets in ``directory`` and write the files derived from them."""
+def _write_searxng_settings(searxng_dir: Path, secret_key: str) -> str | None:
+    """Render SearXNG's settings into ``searxng_dir``; the reason when that fails, else None."""
+    try:
+        searxng_dir.mkdir(exist_ok=True)
+        # The searxng user (977) reads the folder; the umask may have narrowed it.
+        os.chmod(searxng_dir, 0o755)  # noqa: S103 - holds only the file SearXNG must read
+        _write(searxng_dir / "settings.yml", searxng_settings(secret_key), 0o644)
+    except OSError as error:
+        return f"{searxng_dir}: {error.strerror or type(error).__name__}"
+    return None
+
+
+def ensure_secrets(
+    directory: Path, valkey_host: str = "valkey", searxng_dir: Path | None = None
+) -> SecretsResult:
+    """Create the missing secrets in ``directory`` and write the files derived from them;
+    SearXNG's settings go to ``searxng_dir`` (none are written without it)."""
     password, _ = _kept_secret(directory / "valkey-password", 24)
     admin_key, admin_created = _kept_secret(directory / "admin-key", 32)
 
@@ -146,12 +170,10 @@ def ensure_secrets(directory: Path, valkey_host: str = "valkey") -> SecretsResul
     _write(directory / "api-keys.json", json.dumps(keys) + "\n", 0o600)
 
     searxng_key, _ = _kept_secret(directory / "searxng-secret", 32)
-    searxng_dir = directory / "searxng"
-    searxng_dir.mkdir(exist_ok=True)
-    # The searxng user (977) reads the folder; the umask may have narrowed mkdir.
-    os.chmod(searxng_dir, 0o755)  # noqa: S103 - holds only the file SearXNG must read
-    _write(searxng_dir / "settings.yml", searxng_settings(searxng_key), 0o644)
-    return SecretsResult(admin_key_created=admin_key if admin_created else None)
+    problem = None if searxng_dir is None else _write_searxng_settings(searxng_dir, searxng_key)
+    return SecretsResult(
+        admin_key_created=admin_key if admin_created else None, searxng_problem=problem
+    )
 
 
 def _configure_logging() -> None:
@@ -175,6 +197,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         default=DEFAULT_SECRETS_DIR,
         help="Directory of the secrets volume (default /secrets).",
+    )
+    parser.add_argument(
+        "--searxng-dir",
+        type=Path,
+        default=DEFAULT_SEARXNG_DIR,
+        help="Directory of SearXNG's config volume (default /searxng).",
     )
     parser.add_argument(
         "--valkey-host",
@@ -202,11 +230,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         _log.error("init_domain_invalid", reason=problem)
         sys.exit(1)
     try:
-        result = ensure_secrets(args.secrets_dir, args.valkey_host)
+        result = ensure_secrets(args.secrets_dir, args.valkey_host, args.searxng_dir)
     except (SecretsError, OSError) as error:
         reason = str(error) if isinstance(error, SecretsError) else error.strerror
         _log.error("init_secrets_failed", secrets_dir=str(args.secrets_dir), reason=reason)
         sys.exit(1)
+    if result.searxng_problem:
+        _log.warning(
+            "init_searxng_settings_failed",
+            reason=result.searxng_problem,
+            note="SearXNG gets no settings, so the web search fails; the compose file needs the "
+            "volume searxng-config mounted at /searxng (docker-compose.yml of this release).",
+        )
     if result.admin_key_created:
         # Shown once, on purpose: the log is where a Docker panel user finds it.
         _log.warning(

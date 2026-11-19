@@ -44,8 +44,8 @@
 
 services:
   # Creates the secrets on the first start (Valkey password, admin API key, SearXNG's key, the
-  # files derived from them) and keeps them on every later start; refuses a DOMAIN that is not a
-  # bare host name.
+  # files derived from them) and keeps them on every later start; renders SearXNG's settings into
+  # the volume searxng-config; refuses a DOMAIN that is not a bare host name.
   init:
     image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1}
     pull_policy: always
@@ -62,6 +62,7 @@ services:
       - no-new-privileges:true
     volumes:
       - secrets:/secrets
+      - searxng-config:/searxng
 
   valkey:
     image: valkey/valkey:9.1-alpine
@@ -93,13 +94,13 @@ services:
   # Web search backend of the API (package 25): SearXNG, reached as http://searxng:8080 on the
   # network `backend` only; it needs outbound internet for its engines (backend is not internal).
   # Pinned to the newest tag that was at least 14 days old when it was chosen (the supply-chain
-  # rule of CONTRIBUTING.md). It reads only the folder searxng/ of the secrets volume (a volume
-  # subpath, Docker Engine 26 or later), where init renders settings.yml with a kept secret_key;
-  # the file is written again on every start, so edits there do not last. It runs as the image's
-  # user searxng (977) on a read-only root file system: its caches go to /tmp. Its start log warns
-  # that /etc/searxng is not owned by searxng:searxng (init's user owns it): harmless, the file is
-  # world-readable. The API does not wait for it: while it is down a search answers
-  # search_failed.
+  # rule of CONTRIBUTING.md). It reads only its own volume searxng-config, never the secrets:
+  # init renders settings.yml there with a secret_key it keeps in the secrets volume. The file is
+  # written again on every start, so edits there do not last; `restart: true` restarts SearXNG
+  # whenever init ran again. It runs as the image's user searxng (977) on a read-only root file
+  # system: its caches go to /tmp. Its start log warns that /etc/searxng is not owned by
+  # searxng:searxng (init's user owns it): harmless, the file is world-readable. The API does not
+  # wait for it: while it is down a search answers search_failed.
   searxng:
     image: searxng/searxng:2026.11.2-cccbc9e15
     restart: unless-stopped
@@ -115,15 +116,11 @@ services:
     cap_drop:
       - ALL
     volumes:
-      - type: volume
-        source: secrets
-        target: /etc/searxng
-        read_only: true
-        volume:
-          subpath: searxng
+      - searxng-config:/etc/searxng:ro
     depends_on:
       init:
         condition: service_completed_successfully
+        restart: true
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 10s
@@ -598,6 +595,7 @@ networks:
 
 volumes:
   secrets:
+  searxng-config:
   valkey-data:
   docling-models:
   asr-models:

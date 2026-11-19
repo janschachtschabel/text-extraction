@@ -111,7 +111,7 @@ the page needs it (`auto`, the default), never (`fast`) or always (`browser`). S
 Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
 optional workers for OCR, transcription, personal data and the LLM (their first start downloads
 about 3 GB of models), a Valkey (with a password) for the shared state and SearXNG for the web
-search (Docker Engine 26.0 or later). The root `docker-compose.yml` runs the published images and
+search. The root `docker-compose.yml` runs the published images and
 needs no variables: its service `init` creates the Valkey password and an admin API key on the
 first start.
 

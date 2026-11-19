@@ -161,14 +161,16 @@ Die übrigen Einstellungen (`SEARCH_TIMEOUT_SECONDS`, `SEARCH_MAX_RESULTS`, `SEA
 SearXNG läuft als unveränderter, eigener Container und hat keinen veröffentlichten Port: Nur die
 API erreicht es. Seine Lizenz ist die AGPL-3.0; der Dienst importiert nie seinen Code.
 
-### Docker Engine 26 und Hostinger
+### Hostinger und die Reihenfolge der Releases
 
-Die `docker-compose.yml` im Hauptordner gibt SearXNG nur einen Ordner des Volumes `secrets` (ein
-Volume-Subpath), sodass es die anderen Geheimnisse nie sieht. Das braucht Docker Engine 26.0 oder
-neuer: Prüfen Sie es mit `docker version` (auf einem Hostinger-VPS in der Web-Konsole). Der Dienst
-`init` schreibt die Einstellungen von SearXNG bei jedem Start in diesen Ordner, mit einem
-Schlüssel, den er einmal erzeugt und behält. Dieses `init` kommt mit dem Release, das die Suche
-bringt: Spielen Sie das neue Release vor der neuen Compose-Datei ein. SearXNG fragt von der
+Die `docker-compose.yml` im Hauptordner gibt SearXNG ein eigenes Volume, `searxng-config`, sodass
+es die anderen Geheimnisse nie sieht. Der Dienst `init` schreibt die Einstellungen von SearXNG bei
+jedem Start in dieses Volume, mit einem Schlüssel, den er einmal erzeugt und behält. Dieses `init`
+kommt mit Release 0.1.13. Die Compose-Datei folgt dem neuesten 0.1.x-Release, spielen Sie die neue
+Compose-Datei also erst ein, wenn 0.1.13 veröffentlicht ist: Mit einem älteren Image bekommt
+SearXNG keine Einstellungen und startet nicht. Zeigt `docker compose logs init` die Meldung
+`init_searxng_settings_failed`, löschen Sie das Volume `searxng-config` (es enthält nur diese
+Einstellungen) und spielen Sie neu ein. SearXNG fragt von der
 eigenen Adresse des VPS aus. Die acht Quellen sind offizielle APIs und sperren keinen Server; nur
 Mwmbl zählt Anfragen pro Adresse.
 

@@ -120,7 +120,7 @@ Siehe [Website-Regeln](docs/user-guide/de/site-rules.md) und
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
 Browser-Worker, die optionalen Worker für OCR, Transkription, personenbezogene Daten und das LLM
 (ihr erster Start lädt etwa 3 GB Modelle), ein Valkey (mit Passwort) für den gemeinsamen Zustand
-und SearXNG für die Websuche (Docker Engine 26.0 oder neuer). Die `docker-compose.yml` im
+und SearXNG für die Websuche. Die `docker-compose.yml` im
 Hauptordner startet die veröffentlichten Images und braucht keine Variablen: Ihr Dienst `init`
 legt beim ersten Start das Valkey-Passwort und einen Admin-API-Schlüssel an.
 

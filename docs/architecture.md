@@ -3699,16 +3699,22 @@ egress proxy refuses every engine's host. Hits from a real network are Jan's che
 - **R25-6 `SEARCH_URL` is the operator's.** The SSRF guard does not apply; the client has
   `trust_env=False` (no proxy from the environment) and follows no redirect.
 - **R25-7 init renders the settings with a kept key.** The root compose file's `init` keeps
-  `searxng-secret` (64 hex characters) and writes `searxng/settings.yml` (0644 in a 0755 folder,
-  as SearXNG runs as uid 977) from the packaged template on every start, like `valkey.conf`, so a
+  `searxng-secret` (64 hex characters) in the volume `secrets` and writes `settings.yml` into the
+  volume `searxng-config` (0644 in a 0755 folder, as SearXNG runs as uid 977) from the packaged template on every start, like `valkey.conf`, so a
   new image brings its template (whose engines must match the image's `SEARCH_SOURCES` default).
   The template keeps SearXNG's placeholder `ultrasecretkey`, which SearXNG refuses outside debug,
   so an unrendered copy fails closed. Helm passes the key as `SEARXNG_SECRET` from a Secret
   (generated once, kept by `lookup`) and keeps the template in a ConfigMap; the build file
   generates a random `SEARXNG_SECRET` on each start.
-- **R25-8 subpath volume.** `searxng` mounts only the folder `searxng/` of the volume `secrets`
-  (`volume.subpath`, Docker Engine 26.0 or later), read-only, so it never sees the other secrets;
-  a volume of its own would be created root-owned and break init (uid 10001). It runs as 977 on a
+- **R25-8 a volume of its own.** `searxng` mounts only the volume `searxng-config`, read-only
+  at `/etc/searxng`, so it never sees the secrets. `init` mounts it at `/searxng`, which the API
+  image creates owned by 10001 (as `/secrets`), so a fresh volume takes that owner and init can
+  write it. When it cannot (an old compose file without the volume), init logs
+  `init_searxng_settings_failed` and still exits 0, so only the search breaks. The first build
+  used a subpath of the volume `secrets`; that needs Docker Engine 26, and an older daemon would
+  have mounted every secret into SearXNG. `searxng` depends on `init` with `restart: true`, so a
+  re-rendered template is picked up. The search needs the images of 0.1.13 or later (Hostinger
+  rule 8: publish the release before the compose file is deployed). It runs as 977 on a
   read-only root with tmpfs `/tmp` and `/var/cache/searxng`, no capabilities, only on `backend`,
   with no published port; SearXNG's own settings switch the limiter, the public-instance mode,
   the image proxy, autocomplete and Valkey off and cut every engine at 8 s

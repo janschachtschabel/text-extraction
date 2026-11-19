@@ -21,7 +21,6 @@ FILES = (
     "valkey-url",
     "api-keys.json",
     "searxng-secret",
-    "searxng/settings.yml",
 )
 
 
@@ -101,7 +100,7 @@ def test_second_run_keeps_the_secrets(tmp_path: Path) -> None:
 def test_derived_files_are_rebuilt_from_the_kept_secrets(tmp_path: Path) -> None:
     init_secrets.ensure_secrets(tmp_path)
     expected = {name: (tmp_path / name).read_text() for name in FILES}
-    for name in ("valkey.conf", "valkey-url", "api-keys.json", "searxng/settings.yml"):
+    for name in ("valkey.conf", "valkey-url", "api-keys.json"):
         (tmp_path / name).unlink()
 
     init_secrets.ensure_secrets(tmp_path)
@@ -109,50 +108,102 @@ def test_derived_files_are_rebuilt_from_the_kept_secrets(tmp_path: Path) -> None
     assert {name: (tmp_path / name).read_text() for name in FILES} == expected
 
 
-def _searxng_key(directory: Path) -> str:
-    settings = yaml.safe_load((directory / "searxng/settings.yml").read_text())
+@pytest.fixture
+def dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """The secrets volume and SearXNG's own config volume (``/secrets``, ``/searxng``)."""
+    secrets_dir, searxng_dir = tmp_path / "secrets", tmp_path / "searxng"
+    secrets_dir.mkdir()
+    searxng_dir.mkdir()
+    return secrets_dir, searxng_dir
+
+
+def _ensure(dirs: tuple[Path, Path]) -> init_secrets.SecretsResult:
+    return init_secrets.ensure_secrets(dirs[0], searxng_dir=dirs[1])
+
+
+def _searxng_key(searxng_dir: Path) -> str:
+    settings = yaml.safe_load((searxng_dir / "settings.yml").read_text())
     return str(settings["server"]["secret_key"])
 
 
-def test_searxng_settings_carry_a_generated_key(tmp_path: Path) -> None:
-    init_secrets.ensure_secrets(tmp_path)
+def test_searxng_settings_carry_a_generated_key(dirs: tuple[Path, Path]) -> None:
+    secrets_dir, searxng_dir = dirs
+    result = _ensure(dirs)
 
-    key = _searxng_key(tmp_path)
+    assert result.searxng_problem is None
+    key = _searxng_key(searxng_dir)
     assert re.fullmatch(r"[0-9a-f]{64}", key)
-    assert (tmp_path / "searxng-secret").read_text().strip() == key
+    assert (secrets_dir / "searxng-secret").read_text().strip() == key
     # The packaged template, with nothing changed but the placeholder.
     template = files("text_extraction").joinpath("data/searxng-settings.yml").read_text("utf-8")
-    rendered = (tmp_path / "searxng/settings.yml").read_text()
+    rendered = (searxng_dir / "settings.yml").read_text()
     assert rendered == template.replace("ultrasecretkey", key)
 
 
-def test_searxng_key_differs_from_the_other_secrets(tmp_path: Path) -> None:
-    init_secrets.ensure_secrets(tmp_path)
+def test_searxng_volume_holds_only_its_settings(dirs: tuple[Path, Path]) -> None:
+    secrets_dir, searxng_dir = dirs
+    _ensure(dirs)
 
-    others = {(tmp_path / n).read_text().strip() for n in ("valkey-password", "admin-key")}
-    assert _searxng_key(tmp_path) not in others
+    # SearXNG mounts only its own volume: no secret of the stack, not even its key's file.
+    assert sorted(p.name for p in searxng_dir.iterdir()) == ["settings.yml"]
+    assert not (secrets_dir / "searxng").exists()
 
 
-def test_second_run_keeps_the_searxng_key(tmp_path: Path) -> None:
-    init_secrets.ensure_secrets(tmp_path)
-    key = _searxng_key(tmp_path)
-    (tmp_path / "searxng/settings.yml").write_text("stale: true\n")
+def test_searxng_key_differs_from_the_other_secrets(dirs: tuple[Path, Path]) -> None:
+    secrets_dir, searxng_dir = dirs
+    _ensure(dirs)
 
-    init_secrets.ensure_secrets(tmp_path)
+    others = {(secrets_dir / n).read_text().strip() for n in ("valkey-password", "admin-key")}
+    assert _searxng_key(searxng_dir) not in others
+
+
+def test_second_run_keeps_the_searxng_key(dirs: tuple[Path, Path]) -> None:
+    searxng_dir = dirs[1]
+    _ensure(dirs)
+    key = _searxng_key(searxng_dir)
+    (searxng_dir / "settings.yml").write_text("stale: true\n")
+
+    _ensure(dirs)
 
     # Rendered again from the template on every start, so an updated template arrives, with the
     # kept key.
-    assert _searxng_key(tmp_path) == key
+    assert _searxng_key(searxng_dir) == key
 
 
-def test_searxng_files_are_readable_by_the_searxng_user(tmp_path: Path) -> None:
-    init_secrets.ensure_secrets(tmp_path)
+def test_searxng_files_are_readable_by_the_searxng_user(dirs: tuple[Path, Path]) -> None:
+    secrets_dir, searxng_dir = dirs
+    searxng_dir.chmod(0o700)
+    _ensure(dirs)
 
-    # SearXNG runs as its own user (977) and gets only the folder searxng/ (a volume subpath);
-    # the key it is rendered from stays with the app user.
-    assert _mode(tmp_path / "searxng") == 0o755
-    assert _mode(tmp_path / "searxng/settings.yml") == 0o644
-    assert _mode(tmp_path / "searxng-secret") == 0o600
+    # SearXNG runs as its own user (977) on a volume that init's user owns; the key it is
+    # rendered from stays with the app user.
+    assert _mode(searxng_dir) == 0o755
+    assert _mode(searxng_dir / "settings.yml") == 0o644
+    assert _mode(secrets_dir / "searxng-secret") == 0o600
+
+
+def test_without_a_searxng_folder_only_the_key_is_kept(tmp_path: Path) -> None:
+    result = init_secrets.ensure_secrets(tmp_path)
+
+    assert result.searxng_problem is None
+    assert (tmp_path / "searxng-secret").is_file()
+    assert not (tmp_path / "searxng").exists()
+
+
+def test_an_unwritable_searxng_folder_does_not_stop_the_stack(tmp_path: Path) -> None:
+    # A new image with an old compose file has no searxng-config volume: /searxng is then part
+    # of the read-only root. The other secrets must still be written, or no service starts.
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    blocked = tmp_path / "searxng"
+    blocked.write_text("a file where the folder should be\n")
+
+    result = init_secrets.ensure_secrets(secrets_dir, searxng_dir=blocked)
+
+    assert result.searxng_problem is not None
+    assert str(blocked) in result.searxng_problem
+    created = sorted(p.name for p in secrets_dir.iterdir())
+    assert created == sorted(FILES)
 
 
 def test_valkey_host_option(tmp_path: Path) -> None:
@@ -189,11 +240,13 @@ def test_main_creates_the_secrets_and_logs_the_key_once(
 ) -> None:
     monkeypatch.delenv("DOMAIN", raising=False)
 
+    searxng_dir = tmp_path / "searxng"
+    arguments = ["--secrets-dir", str(tmp_path), "--searxng-dir", str(searxng_dir)]
     with pytest.raises(SystemExit) as first:
-        init_secrets.main(["--secrets-dir", str(tmp_path)])
+        init_secrets.main(arguments)
     first_out = capsys.readouterr().out
     with pytest.raises(SystemExit) as second:
-        init_secrets.main(["--secrets-dir", str(tmp_path)])
+        init_secrets.main(arguments)
     second_out = capsys.readouterr().out
 
     admin_key = (tmp_path / "admin-key").read_text().strip()
@@ -206,6 +259,28 @@ def test_main_creates_the_secrets_and_logs_the_key_once(
     assert password not in first_out + second_out
     searxng_key = (tmp_path / "searxng-secret").read_text().strip()
     assert searxng_key not in first_out + second_out
+    assert _searxng_key(searxng_dir) == searxng_key
+
+
+def test_main_writes_the_other_secrets_when_searxng_settings_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("DOMAIN", raising=False)
+    blocked = tmp_path / "searxng"
+    blocked.write_text("not a folder\n")
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+
+    with pytest.raises(SystemExit) as exited:
+        init_secrets.main(["--secrets-dir", str(secrets_dir), "--searxng-dir", str(blocked)])
+
+    assert exited.value.code == 0
+    assert "init_searxng_settings_failed" in capsys.readouterr().out
+    assert (secrets_dir / "valkey-url").is_file()
+
+
+def test_main_defaults_to_the_searxng_mount_point() -> None:
+    assert str(init_secrets.DEFAULT_SEARXNG_DIR) == "/searxng"
 
 
 def test_main_show_admin_key(

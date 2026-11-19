@@ -524,6 +524,12 @@ jobs:
           jq -e '.services | .["browser-worker"].image | contains("/text-extraction-browser:")' compose.json
           jq -e '.services.api.ports == [{"mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp"}]' compose.json
           jq -e '.networks.default.name == "text-extraction-web"' compose.json
+          # SearXNG reads only its own volume, never the secrets; init writes it and restarts it.
+          jq -e '.services.searxng.volumes == [{"type": "volume", "source": "searxng-config",
+              "target": "/etc/searxng", "read_only": true, "volume": {}}]
+            and .services.searxng.depends_on.init.restart == true
+            and ([.services[] | .volumes // [] | .[] | select(.source == "searxng-config") | .target]
+              | sort == ["/etc/searxng", "/searxng"])' compose.json
           TEXT_EXTRACTION_VERSION=0.1 API_PORT=127.0.0.1:8080 DOMAIN=api.example.org docker compose config --format json \
             | jq -e '.services.api.image == "ghcr.io/janschachtschabel/text-extraction:0.1"
               and .services.api.ports[0].host_ip == "127.0.0.1"

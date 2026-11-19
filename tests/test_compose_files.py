@@ -14,6 +14,7 @@ import yaml
 ROOT_DIR = Path(__file__).resolve().parent.parent
 ROOT_FILE = ROOT_DIR / "docker-compose.yml"
 BUILD_FILE = ROOT_DIR / "docker-compose.build.yml"
+DOCKERFILE = ROOT_DIR / "Dockerfile"
 IMAGE = re.compile(
     r"^ghcr\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?"
     r":\$\{TEXT_EXTRACTION_VERSION:-[0-9]+\.[0-9]+\}$"
@@ -137,7 +138,8 @@ def test_init_writes_the_secrets_volume() -> None:
     init = _root_services()["init"]
     assert init["command"] == ["text-extraction-init"]
     assert init["restart"] == "no"
-    assert init["volumes"] == ["secrets:/secrets"]
+    # SearXNG's settings go to a volume of their own; the key stays in `secrets`.
+    assert init["volumes"] == ["secrets:/secrets", "searxng-config:/searxng"]
     assert init["environment"]["DOMAIN"] == "${DOMAIN:-}"
     assert "depends_on" not in init
 
@@ -191,18 +193,24 @@ def test_searxng_is_on_the_backend_network_only() -> None:
     assert "networks" not in _build_services()["searxng"]
 
 
-def test_searxng_reads_only_its_folder_of_the_secrets_volume() -> None:
+def test_searxng_reads_only_its_own_config_volume() -> None:
+    # A volume of its own, never the secrets volume: a volume subpath needs Docker Engine 26, and
+    # an older daemon would mount every secret into SearXNG.
     searxng = _root_services()["searxng"]
-    assert searxng["volumes"] == [
-        {
-            "type": "volume",
-            "source": "secrets",
-            "target": "/etc/searxng",
-            "read_only": True,
-            "volume": {"subpath": "searxng"},
-        }
-    ]
-    assert searxng["depends_on"] == {"init": {"condition": "service_completed_successfully"}}
+    assert searxng["volumes"] == ["searxng-config:/etc/searxng:ro"]
+    assert "subpath" not in _text()
+    mounting = sorted(
+        name
+        for name, service in _root_services().items()
+        for volume in service.get("volumes", [])
+        if str(volume).startswith("searxng-config:")
+    )
+    assert mounting == ["init", "searxng"]
+    assert "searxng-config" in _load(ROOT_FILE)["volumes"]
+    # restart: a redeploy that runs init again (a new template) restarts SearXNG too.
+    assert searxng["depends_on"] == {
+        "init": {"condition": "service_completed_successfully", "restart": True}
+    }
     assert searxng["restart"] == "unless-stopped"
     assert "environment" not in searxng
     assert "env_file" not in searxng
@@ -260,4 +268,16 @@ def test_app_service_matches_the_build_file(name: str) -> None:
 
 
 def test_same_volumes_as_the_build_file_plus_secrets() -> None:
-    assert set(_load(ROOT_FILE)["volumes"]) == set(_load(BUILD_FILE)["volumes"]) | {"secrets"}
+    assert set(_load(ROOT_FILE)["volumes"]) == set(_load(BUILD_FILE)["volumes"]) | {
+        "secrets",
+        "searxng-config",
+    }
+
+
+def test_the_api_image_owns_the_mount_points_of_init() -> None:
+    # A fresh named volume takes the owner of the image's folder it is mounted on, so init (uid
+    # 10001) can write both volumes (the Hostinger rule for volumes of a non-root service).
+    runtime = DOCKERFILE.read_text(encoding="utf-8").split(" AS runtime\n", 1)[1]
+    runtime = runtime.split("\nFROM ", 1)[0]
+    assert "install -d -o 10001 -g 10001 /secrets /searxng" in runtime
+    assert "\nUSER 10001\n" in runtime

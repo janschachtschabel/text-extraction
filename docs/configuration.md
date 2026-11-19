@@ -127,7 +127,7 @@ Keep these out of ConfigMaps, images and logs.
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 | `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
 | `LLM_API_KEY` | API key of the LLM endpoint (`LLM_BASE_URL`). A request header `X-LLM-Api-Key` wins over it. The llm workers send it; the API pods need it too, only to know whether there is one. Empty counts as unset. Never logged, never in a repr, never in an answer. | `workers.llm.apiKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none and never renders the key as a literal); rendered into the API pods and the llm worker container only, and only with `workers.llm.enabled`. docker compose: `.env` (every service). |
-| `SEARXNG_SECRET` | SearXNG's `server.secret_key` (web search, package 25). Read by the SearXNG container only, never by this service; SearXNG prefers it over the key in its `settings.yml` and refuses to start with the placeholder `ultrasecretkey`. | `searxng.secret.existingSecret` + `.existingSecretKey`, or a Secret the chart generates once and keeps (default); rendered into the SearXNG pods only, and only with `searxng.enabled`. The root `docker-compose.yml`: `init` generates it into the volume `secrets` (`searxng-secret`) and writes it into `searxng/settings.yml`. `docker-compose.build.yml`: a fresh random key on every start of `searxng`. |
+| `SEARXNG_SECRET` | SearXNG's `server.secret_key` (web search, package 25). Read by the SearXNG container only, never by this service; SearXNG prefers it over the key in its `settings.yml` and refuses to start with the placeholder `ultrasecretkey`. | `searxng.secret.existingSecret` + `.existingSecretKey`, or a Secret the chart generates once and keeps (default); rendered into the SearXNG pods only, and only with `searxng.enabled`. The root `docker-compose.yml`: `init` generates it into the volume `secrets` (`searxng-secret`) and writes it into `settings.yml` in the volume `searxng-config`. `docker-compose.build.yml`: a fresh random key on every start of `searxng`. |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -297,12 +297,16 @@ services apart from `init` (a test keeps the two in step).
 - Every service except the one-shot ones restarts `unless-stopped`.
 - **Web search (package 25):** the service `searxng` runs SearXNG's own image (pinned tag, no
   published port, only on `backend`, read-only root, user 977, all capabilities dropped). It
-  mounts only the folder `searxng/` of the volume `secrets` (a volume subpath: Docker Engine 26.0
-  or later), where `init` renders `settings.yml` from the image's `data/searxng-settings.yml` on
-  every start, with the kept key `searxng-secret`; edits to that file do not survive the next
-  start. The folder comes from the `init` of the first release with package 25: with an older
-  image it is missing and `searxng` does not start (release before deploy). The API does not wait for SearXNG; while it is down a
-  search answers `search_failed`. `SEARCH_ENABLED=false` in `.env` switches the search off; scale
+  mounts only its own volume `searxng-config`, read-only at `/etc/searxng`, never the secrets:
+  `init` renders `settings.yml` there from the image's `data/searxng-settings.yml` on every
+  start, with the key `searxng-secret` that it keeps in the volume `secrets`. Edits to that file
+  do not survive the next start, and `searxng` restarts whenever `init` ran again
+  (`restart: true`). The search needs 0.1.13 or later (the `/searxng` mount point and the `init`
+  that writes it): with an older image `searxng` gets no settings and does not start, so publish
+  0.1.13 before deploying this compose file. When `init` logs `init_searxng_settings_failed`,
+  it could not write the volume (the other secrets are written, the stack starts): remove the
+  volume `searxng-config` (it holds only the settings) and deploy again. The API does not wait
+  for SearXNG; while it is down a search answers `search_failed`. `SEARCH_ENABLED=false` in `.env` switches the search off; scale
   the service away with `--scale searxng=0`.
 
 ## Response times
@@ -833,10 +837,10 @@ A search is one hit of the key's rate limit. An answer is `partial` when some so
 answer (`data.sources_failed` names each with SearXNG's reason), even when the others found no
 hit, and `failed` / `search_failed` when SearXNG is unreachable, too slow or answers no JSON, or
 when every source asked did not answer (then `error.details` lists each as `{"source",
-"reason"}`). `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the
-SearXNG container, not of this service: the root compose file's `init` keeps it in the volume
-`secrets` (`searxng-secret`) and renders `searxng/settings.yml` from it on every start; Helm keeps
-it in a Secret (see [Secrets](#secrets)).
+"reason"}`). `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the SearXNG
+container, not of this service: the root compose file's `init` keeps it in the volume `secrets`
+(`searxng-secret`) and renders `settings.yml` in the volume `searxng-config` from it on every
+start; Helm keeps it in a Secret (see [Secrets](#secrets)).
 
 ## UI
 

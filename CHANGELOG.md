@@ -52,9 +52,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `SEARCH_URL=http://searxng:8080`, `SEARCH_TIMEOUT_SECONDS=10`, `SEARCH_MAX_RESULTS=50`,
   `SEARCH_CACHE_SECONDS=3600`, `SEARCH_SOURCES` (the eight sources), `SEARCH_ALLOW_USERS=true`.
   `SEARCH_ENABLED=false` in `.env` switches the search off.
-- The root `docker-compose.yml` mounts a subfolder of the volume `secrets` into `searxng` (a
-  volume subpath): it needs Docker Engine 26.0 or later, and the new release's `init`, which
-  creates that folder. Release the images before deploying the new compose file.
+- The root `docker-compose.yml` gives `searxng` a volume of its own, `searxng-config`, into which
+  `init` renders SearXNG's settings; the key stays in the volume `secrets`. It needs the images
+  of 0.1.13 or later (the `/searxng` mount point and the `init` that writes it): publish 0.1.13
+  before deploying the new compose file, or `searxng` gets no settings and does not start. If
+  `init` then logs `init_searxng_settings_failed`, remove the volume `searxng-config` (it holds
+  only these settings) and deploy again.
 
 ## [0.1.12] - 2026-11-10
 
