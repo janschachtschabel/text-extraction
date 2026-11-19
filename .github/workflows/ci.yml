@@ -299,6 +299,14 @@ jobs:
           helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
           --set workers.asr.enabled=true --set workers.nlp.enabled=true --set workers.llm.enabled=true
           --set workers.nlp.autoscaling.hpa.enabled=true --set workers.llm.autoscaling.hpa.enabled=true
+      - name: helm lint (SearXNG and web search on, policies)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set searxng.enabled=true
+          --set config.SEARCH_ENABLED=true --set networkPolicy.enabled=true
+      - name: helm lint (SearXNG with an existing key Secret)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set searxng.enabled=true
+          --set searxng.secret.existingSecret=searxng-key
       - name: helm lint (MCP and UI on)
         run: helm lint --strict deploy/helm/text-extraction --set mcp.enabled=true --set ui.enabled=true
       - name: helm lint (MCP and UI on, open service behind an ingress)

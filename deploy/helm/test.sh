@@ -1058,6 +1058,52 @@ expect_absent "no ALLOWED_HOSTS note under api_key" "$(render_notes)" "$hosts_no
 expect_absent "no ALLOWED_HOSTS note with *" \
   "$(render_notes --set config.AUTH_MODE=none --set 'config.ALLOWED_HOSTS=*')" "$hosts_note"
 
+# --- Web search: SearXNG (package 25, ruling D3 a) ------------------------------------------------
+
+SEARXNG="$RELEASE-text-extraction-searxng"
+# Off by default: no SearXNG objects, search off, the API keeps the code's SEARCH_URL.
+expect_absent "no SearXNG by default" "$on" "name: $SEARXNG"
+expect_contains "search off by default" "$(document "$on" ConfigMap "$API")" 'SEARCH_ENABLED: "false"'
+expect_values "API keeps the code's SEARCH_URL by default" "$api" SEARCH_URL ""
+searxng_on="$(render --set searxng.enabled=true --set config.SEARCH_ENABLED=true "${all_workers[@]}")"
+searxng="$(document "$searxng_on" Deployment "$SEARXNG")"
+flat_searxng="$(flat "$searxng")"
+if [[ -n "$searxng" ]]; then pass "searxng.enabled renders the SearXNG Deployment"; else fail "no SearXNG Deployment with searxng.enabled"; fi
+expect_contains "SearXNG runs the pinned image" "$searxng" 'image: "searxng/searxng:2026.11.2-cccbc9e15"'
+expect_contains "SearXNG runs as the image's user searxng" "$flat_searxng" "fsGroup: 977 runAsGroup: 977 runAsNonRoot: true runAsUser: 977"
+expect_contains "SearXNG has a read-only root" "$flat_searxng" "allowPrivilegeEscalation: false capabilities: drop: - ALL readOnlyRootFilesystem: true"
+expect_contains "SearXNG reads its key from the Secret" "$flat_searxng" \
+  "- name: SEARXNG_SECRET valueFrom: secretKeyRef: name: $SEARXNG-secret key: SEARXNG_SECRET"
+expect_contains "SearXNG mounts its settings read-only" "$flat_searxng" "- name: settings mountPath: /etc/searxng readOnly: true"
+expect_contains "SearXNG writes its caches to /tmp" "$flat_searxng" "- name: tmp mountPath: /tmp"
+expect_contains "SearXNG gets a writable cache folder" "$flat_searxng" "- name: cache mountPath: /var/cache/searxng"
+expect_contains "SearXNG probes /healthz" "$flat_searxng" "httpGet: path: /healthz port: http"
+expect_contains "the settings come from the ConfigMap" "$flat_searxng" "configMap: name: $SEARXNG"
+searxng_settings="$(document "$searxng_on" ConfigMap "$SEARXNG")"
+expect_contains "the ConfigMap holds the packaged settings" "$searxng_settings" "keep_only:"
+# The key stays out of the ConfigMap: SEARXNG_SECRET wins over the placeholder.
+expect_contains "the ConfigMap holds only the placeholder key" "$searxng_settings" 'secret_key: "ultrasecretkey"'
+expect_contains "the chart creates the key Secret" "$(document "$searxng_on" Secret "$SEARXNG-secret")" "SEARXNG_SECRET:"
+expect_contains "the SearXNG Service is a ClusterIP on 8080" "$(flat "$(document "$searxng_on" Service "$SEARXNG")")" \
+  "type: ClusterIP ports: - name: http port: 8080 targetPort: http"
+expect_values "the API asks the in-cluster SearXNG" "$(document "$searxng_on" Deployment "$API")" SEARCH_URL \
+  "http://$SEARXNG:8080"
+expect_values "only the API pods get SEARCH_URL" "$searxng_on" SEARCH_URL "http://$SEARXNG:8080"
+expect_contains "config.SEARCH_ENABLED reaches the ConfigMap" "$(document "$searxng_on" ConfigMap "$API")" 'SEARCH_ENABLED: "true"'
+searxng_own_secret="$(render --set searxng.enabled=true --set searxng.secret.existingSecret=my-searxng)"
+expect_absent "an existing Secret replaces the chart's" "$searxng_own_secret" "name: $SEARXNG-secret"
+expect_contains "SearXNG reads the existing Secret" "$(flat "$(document "$searxng_own_secret" Deployment "$SEARXNG")")" \
+  "secretKeyRef: name: my-searxng key: SEARXNG_SECRET"
+# Only the API pods reach SearXNG; SearXNG reaches DNS and the engines' web APIs only.
+searxng_policies="$(render --set searxng.enabled=true --set networkPolicy.enabled=true)"
+searxng_policy="$(flat "$(document "$searxng_policies" NetworkPolicy "$SEARXNG")")"
+expect_contains "SearXNG NetworkPolicy limits both directions" "$searxng_policy" "policyTypes: - Ingress - Egress"
+expect_contains "only the API pods reach SearXNG" "$searxng_policy" \
+  "ingress: - from: - podSelector: matchLabels: app.kubernetes.io/name: text-extraction app.kubernetes.io/instance: $RELEASE ports: - port: 8080 protocol: TCP"
+expect_contains "SearXNG resolves names" "$searxng_policy" "- port: 53 protocol: UDP - port: 53 protocol: TCP"
+expect_contains "SearXNG reaches the engines over HTTP(S)" "$searxng_policy" "- port: 443 protocol: TCP - port: 80 protocol: TCP"
+expect_absent "no SearXNG NetworkPolicy while it is off" "$policies" "name: $SEARXNG"
+
 # --- Measured resources --------------------------------------------------------------------------
 
 # Requests and limits from the load runs (docs/configuration.md, "Resource baselines"): request =

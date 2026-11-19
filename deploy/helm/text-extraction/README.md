@@ -35,11 +35,13 @@ requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playg
 | ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`) or at `minReplicaCount: 0`. |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
-| NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
+| NetworkPolicy (Valkey, API, each worker pool, SearXNG) | `networkPolicy.enabled` | Ingress only, SearXNG also egress. See [Network policies](#network-policies). |
 | Service `<release>-text-extraction` | always | Public port `http` 8080. |
 | Service `<release>-text-extraction-internal` | always | Port `internal` 9090 (`/health`, `/ready`, `/metrics`). Cluster-internal only. |
 | Secret `<release>-text-extraction-keys` | `secrets.apiKeys` set and no `secrets.existingSecret` | Holds `API_KEYS`. |
 | Valkey Deployment, Service, optional PVC | `valkey.enabled` | `redis://<release>-text-extraction-valkey:6379/0`. |
+| SearXNG Deployment, ClusterIP Service and ConfigMap `<release>-text-extraction-searxng` | `searxng.enabled` | The web search backend of the API pods (`SEARCH_URL=http://<release>-text-extraction-searxng:8080`). See [Web search (SearXNG)](#web-search-searxng). |
+| Secret `<release>-text-extraction-searxng-secret` | `searxng.enabled` and no `searxng.secret.existingSecret` | Holds `SEARXNG_SECRET`, generated once (64 alphanumeric characters) and kept across upgrades. |
 | Ingress | `ingress.enabled` | Routes to the public Service port 8080 only. |
 | HorizontalPodAutoscaler | `autoscaling.enabled` | CPU utilisation. Replaces `replicaCount`. |
 | PodDisruptionBudget `<release>-text-extraction` and `<release>-text-extraction-worker-<pool>` | `podDisruptionBudget.enabled` | `maxUnavailable` (default 1) for the API pods and for each enabled worker pool, only for a component with more than one replica (`replicaCount`, or the HPA's or KEDA's minimum). |
@@ -327,6 +329,13 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `ingress.annotations` | `{}` | The controller's settings. A sync request waits up to 120 s without `wait_seconds` (150 s with unblock mode and requests that combine it with `pii` and LLM work, see item 4 of [docs/handover.md](../../../docs/handover.md); with MCP or the playground at least `MCP_WAIT_SECONDS` + 70 s too), and uploads reach `DOCUMENT_MAX_BYTES` + 192 KiB (`workers.asr.uploadMaxBytes` for media). For ingress-nginx, which cuts at 60 s and 1m by default: `nginx.ingress.kubernetes.io/proxy-read-timeout: "120"`, `nginx.ingress.kubernetes.io/proxy-send-timeout: "120"` (both `"150"` with unblock mode) and `nginx.ingress.kubernetes.io/proxy-body-size: "40m"`, as in [values-production.example.yaml](values-production.example.yaml). |
 | `ingress.hosts` | one example host, path `/` | List of `host` with `paths` (`path`, `pathType`). |
 | `ingress.tls` | `[]` | |
+| `searxng.enabled` | `false` | Deploy SearXNG for web search and point the API pods' `SEARCH_URL` at it (a `config.SEARCH_URL` entry is then ignored). Search itself is `config.SEARCH_ENABLED` (`"false"`). |
+| `searxng.image.repository` / `tag` / `pullPolicy` | `searxng/searxng` / `2026.11.2-cccbc9e15` / `IfNotPresent` | The tag the compose files run. |
+| `searxng.replicaCount` | `1` | |
+| `searxng.secret.existingSecret` | `""` | Your own Secret with SearXNG's `server.secret_key`; without it the chart generates one. |
+| `searxng.secret.existingSecretKey` | `SEARXNG_SECRET` | Key inside that Secret (also used for the chart-managed one). |
+| `searxng.podSecurityContext` / `securityContext` | user 977, read-only root, all capabilities dropped | The image's own user `searxng`. |
+| `searxng.resources` | requests 100m / 256Mi, limits 1 / 768Mi | Not measured yet. |
 | `valkey.enabled` | `true` | Deploy a single-replica Valkey. |
 | `valkey.image.repository` / `tag` / `pullPolicy` | `valkey/valkey` / `9.1-alpine` / `IfNotPresent` | |
 | `valkey.auth.enabled` | `true` | Valkey requires a password. |
@@ -411,6 +420,8 @@ call directly, and the LLM endpoint, which the llm workers call):
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
 - The extract, browser, Docling, ASR, NLP and llm workers accept port 9090 from `networkPolicy.metricsFrom`
   only.
+- SearXNG (`searxng.enabled`) accepts port 8080 from the API pods of this release only, and its
+  egress is limited to DNS (53) and the web APIs of its engines (443, 80).
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
@@ -589,6 +600,25 @@ URLs while they are on. Their settings are the `config.MCP_*` and `config.UI_*` 
   line without a principal and the inner `/v1/...` line with it. An MCP call logs its access line
   and one `mcp_tool_call` line (tool, outcome, duration, job id); tool arguments are never logged.
 
+## Web search (SearXNG)
+
+`searxng.enabled=true` runs SearXNG (the unmodified official image, AGPL-3.0, in pods of its own)
+behind a ClusterIP Service and points the API pods' `SEARCH_URL` at it; `config.SEARCH_ENABLED:
+"true"` then switches `POST /v1/search` and the MCP tool `web_search` on. Both are off by default
+(the root `docker-compose.yml` runs SearXNG and search on). Without `searxng.enabled`, set
+`config.SEARCH_URL` to a SearXNG of your own.
+
+- **Settings.** The ConfigMap holds the chart's `files/searxng-settings.yml`, a copy of the
+  service's `data/searxng-settings.yml`: only engines with an official, free API (`wikipedia`,
+  `wikibooks`, `wikiversity`, `wikinews`, `mwmbl`, `openalex`, `arxiv`, `crossref`, which
+  `SEARCH_SOURCES` names), JSON on, limiter, image proxy and Valkey off, every engine cut at 8 s.
+- **Key.** Its `secret_key` is a placeholder; the pods get the key as `SEARXNG_SECRET` from the
+  Secret, which SearXNG prefers. SearXNG refuses to start with the placeholder.
+- **Pods.** User 977 (the image's `searxng`), read-only root file system, all capabilities
+  dropped, `emptyDir` at `/tmp` (its caches) and `/var/cache/searxng`. Its start log warns that
+  `/etc/searxng` is not owned by `searxng:searxng`: harmless, the ConfigMap is readable.
+- **Egress.** The engines need DNS and HTTPS to the web; with `networkPolicy.enabled` nothing else.
+
 ## Local checks
 
 ```bash
@@ -598,6 +628,7 @@ docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --s
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.llm.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set mcp.enabled=true --set ui.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set searxng.enabled=true --set config.SEARCH_ENABLED=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction -f text-extraction/values-production.example.yaml
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
