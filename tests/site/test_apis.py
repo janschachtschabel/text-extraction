@@ -85,6 +85,7 @@ from text_extraction.site.apis import (  # noqa: E402
     parse_wordpress_types,
     path_matches,
     wordpress_list_url,
+    wordpress_types_url,
 )
 
 ROOT = "https://ex.org/wp-json/"
@@ -243,3 +244,41 @@ def test_api_type_hint() -> None:
     assert api_type_hint("wordpress_posts", wordpress_list_url(ROOT, "events")) == "event"
     assert api_type_hint("drupal_nodes", "https://ex.org/jsonapi/node/event?x=1") == "event"
     assert api_type_hint("drupal_index", "https://ex.org/jsonapi") is None
+
+
+# --- plain permalinks: a ``?rest_route=/`` root ----------------------------------------------
+
+PLAIN = "https://ex.org/?rest_route=/"
+
+
+def test_detect_plain_permalink_root() -> None:
+    found = detect('<link rel="https://api.w.org/" href="https://ex.org/?rest_route=/">')
+    assert found.wordpress == PLAIN
+
+
+def test_rest_route_list_and_types_urls() -> None:
+    assert wordpress_types_url(PLAIN) == "https://ex.org/?rest_route=/wp/v2/types"
+    assert wordpress_types_url(ROOT) == "https://ex.org/wp-json/wp/v2/types"
+    assert wordpress_list_url(PLAIN, "posts") == (
+        "https://ex.org/?rest_route=/wp/v2/posts&per_page=100&_fields=link,title,modified_gmt"
+    )
+    assert wordpress_list_url(PLAIN, "posts", 2) == (
+        "https://ex.org/?rest_route=/wp/v2/posts&per_page=100&_fields=link,title,modified_gmt"
+        "&page=2"
+    )
+    types = parse_wordpress_types(dump(wp_types()), wordpress_types_url(PLAIN), path_prefix=None)
+    assert [c.url for c in types.children] == [
+        wordpress_list_url(PLAIN, base) for base in ("posts", "pages", "events")
+    ]
+
+
+def test_rest_route_next_page() -> None:
+    first = posts(items(100), url=wordpress_list_url(PLAIN, "posts"), total_pages=3)
+    assert [c.url for c in first.children] == [wordpress_list_url(PLAIN, "posts", 2)]
+    second = posts(items(100), url=wordpress_list_url(PLAIN, "posts", 2), total_pages=3)
+    assert [c.url for c in second.children] == [wordpress_list_url(PLAIN, "posts", 3)]
+
+
+def test_rest_route_type_hint() -> None:
+    assert api_type_hint("wordpress_posts", wordpress_list_url(PLAIN, "events")) == "event"
+    assert api_type_hint("wordpress_posts", wordpress_list_url(PLAIN, "events", 2)) == "event"

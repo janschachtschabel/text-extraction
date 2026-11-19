@@ -2106,6 +2106,37 @@ async def test_api_caps() -> None:
     assert second.result.status == "partial"
 
 
+@scenario
+async def test_wordpress_plain_permalinks_chain() -> None:
+    """A WordPress site without pretty permalinks names its REST root as ``?rest_route=/``."""
+    head = f'<link rel="https://api.w.org/" href="{SITE}/?rest_route=/">'
+    types = f"{SITE}/?rest_route=/wp/v2/types"
+    fields = "per_page=100&_fields=link,title,modified_gmt"
+    first = f"{SITE}/?rest_route=/wp/v2/events&{fields}"
+    second = f"{first}&page=2"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=head),
+            types: as_json(types, wp_types(("tribe_events", "events"))),
+            first: as_json(first, wp_posts(1, base="kalender"), total_pages=2),
+            second: as_json(second, wp_posts(2, base="kalender"), total_pages=2),
+        }
+    )
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, types, first, second]
+    assert all(item.result is not None and item.result.status == "success" for item in items)
+    for item in items[2:]:
+        listed = sitemap_of(item)
+        assert (len(listed.entries), listed.type_hint) == (100, "event")
+        assert all(entry.type_guess == "event" for entry in listed.entries)
+    assert sitemap_of(items[3]).entries[0].loc == f"{SITE}/kalender/post-100/"
+
+
 class CappingFetcher(FakeFetcher):
     """A fake fetcher that honours ``max_bytes`` and ``truncate`` as the real one does."""
 

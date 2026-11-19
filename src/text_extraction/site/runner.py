@@ -65,6 +65,7 @@ from text_extraction.pipeline import LINKS_TRUNCATED_WARNING, Pipeline
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
+from text_extraction.site.apis import wordpress_types_url
 from text_extraction.site.follow import judge_links, unique_candidates
 from text_extraction.site.sitemap_items import (
     _SIZE_MARGIN,
@@ -188,7 +189,7 @@ def _api_candidates(apis: SiteApis, *, add: bool) -> list[Candidate]:
         node = SiteNode(
             role="sitemap", depth=0, parent=0, source="wordpress", api="wordpress_types"
         )
-        nodes.append((f"{apis.wordpress}wp/v2/types", node))
+        nodes.append((wordpress_types_url(apis.wordpress), node))
     if apis.drupal is not None:
         node = SiteNode(role="sitemap", depth=0, parent=0, source="drupal", api="drupal_index")
         nodes.append((apis.drupal, node))

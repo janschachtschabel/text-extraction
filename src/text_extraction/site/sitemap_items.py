@@ -41,8 +41,9 @@ not the other way round:
 - **API lists** (package 26): a sitemap item with ``node.api`` (appended by the start page) is
   fetched as a sitemap but to at most ``API_MAX_BYTES`` (4 MiB, a larger answer fails
   ``too_large``: JSON is parsed whole), skips the guess logic, fails on a status other than 2xx
-  as a sitemap does, and is parsed by ``site/apis.py`` on the same pool under the same deadline (a 200 that
-  is no JSON fails ``conversion_failed``); grants, parts and warnings are a sitemap's. A
+  as a sitemap does, and is parsed by ``site/apis.py`` on the same pool under the same deadline
+  (a 200 that is no JSON fails ``conversion_failed``); grants, parts and warnings are a
+  sitemap's. A
   WordPress types or Drupal index item lists one child per content type (``scope: path``: only
   types whose name matches the path prefix), one level deeper; a list page's one child is its
   next page at its own depth (``page`` + 1), so ``SITE_MAX_SITEMAP_FILES`` ends the chain.

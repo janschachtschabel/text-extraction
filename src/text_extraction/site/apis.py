@@ -9,7 +9,7 @@ page's own site host count.
 import html
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -36,6 +36,7 @@ __all__ = [
     "parse_wordpress_types",
     "path_matches",
     "wordpress_list_url",
+    "wordpress_types_url",
 ]
 
 # The most bytes of one API answer that are read: it is parsed whole (JSON has no partial
@@ -43,6 +44,7 @@ __all__ = [
 API_MAX_BYTES = 4 * 1024 * 1024
 MAX_FEEDS = 3
 WP_PER_PAGE = 100
+WP_NAMESPACE = "wp/v2"
 DRUPAL_PAGE_LIMIT = 50
 MAX_API_TYPES = 50
 EXCLUDED_WP_TYPES = frozenset(
@@ -61,6 +63,7 @@ EXCLUDED_WP_TYPES = frozenset(
 _TAG = re.compile(r"<[^>]*>")
 _MIN_PREFIX_MATCH = 5
 _WORDPRESS_REL = "https://api.w.org/"
+_REST_ROUTE = "rest_route"
 _FEED_TYPES = frozenset({"application/rss+xml", "application/atom+xml"})
 _LINK_HEADER_ITEM = re.compile(r"<([^>]*)>([^,<]*)")
 _REL_PARAM = re.compile(r'rel\s*=\s*(?:"([^"]*)"|([^\s;,]+))', re.IGNORECASE)
@@ -142,10 +145,32 @@ def _load(body: bytes) -> object | None:
     return loaded
 
 
-def wordpress_list_url(api_root: str, rest_base: str, page: int = 1) -> str:
+def _wordpress_url(api_root: str, route: str, params: Sequence[tuple[str, str]] = ()) -> str:
+    """The address of ``route`` (``wp/v2/posts``) under a REST root, with ``params`` as their own
+    query parameters. A root of plain permalinks (``https://ex.org/?rest_route=/``) carries the
+    route in ``rest_route``; any other root carries it in the path (``.../wp-json/``)."""
+    parts = urlsplit(api_root)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if any(key == _REST_ROUTE for key, _ in query):
+        query = [(key, f"/{route}" if key == _REST_ROUTE else value) for key, value in query]
+        return parts._replace(query=urlencode([*query, *params], safe="/,")).geturl()
+    path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
+    return parts._replace(path=path + route, query=urlencode([*query, *params], safe="/,")).geturl()
+
+
+def wordpress_types_url(api_root: str) -> str:
+    """The REST address of the site's post types (``wp/v2/types``)."""
+    return _wordpress_url(api_root, "wp/v2/types")
+
+
+def wordpress_list_url(
+    api_root: str, rest_base: str, page: int = 1, *, namespace: str = WP_NAMESPACE
+) -> str:
     """The REST address of one page of a post type's list (``page`` is left out for the first)."""
-    url = f"{api_root}wp/v2/{rest_base}?per_page={WP_PER_PAGE}&_fields=link,title,modified_gmt"
-    return url if page == 1 else f"{url}&page={page}"
+    params = [("per_page", str(WP_PER_PAGE)), ("_fields", "link,title,modified_gmt")]
+    if page != 1:
+        params.append(("page", str(page)))
+    return _wordpress_url(api_root, f"{namespace.strip('/')}/{rest_base}", params)
 
 
 def path_matches(name: str, path_prefix: str) -> bool:
@@ -211,7 +236,7 @@ def _next_wordpress_url(url: str, page: int) -> str | None:
     except ValueError:
         return None
     query.append(("page", str(page + 1)))
-    return parts._replace(query=urlencode(query, safe=",")).geturl()
+    return parts._replace(query=urlencode(query, safe="/,")).geturl()
 
 
 def parse_wordpress_posts(
@@ -331,15 +356,27 @@ def parse_drupal_nodes(
     return parsed
 
 
-_WP_BASE = re.compile(r"/wp/v2/(?P<base>[^/?#]+)")
 _DRUPAL_TYPE = re.compile(r"node--(?P<name>[^/?#&=]+)|/node/(?P<seg>[^/?#]+)")
+
+
+def _wordpress_route(url: str) -> str:
+    """The REST route of a list address (its ``rest_route``, else its path): the post type's
+    ``rest_base`` is its last segment."""
+    try:
+        parts = urlsplit(url)
+        for key, value in parse_qsl(parts.query):
+            if key == _REST_ROUTE:
+                return value
+    except ValueError:
+        return ""
+    return parts.path
 
 
 def api_type_hint(api: ApiFormat, url: str) -> PageType | None:
     """The page type a list's post type says about its items, else None."""
     if api == "wordpress_posts":
-        match = _WP_BASE.search(urlsplit(url).path)
-        return post_type_hint(match["base"]) if match else None
+        base = _wordpress_route(url).rstrip("/").rsplit("/", 1)[-1]
+        return post_type_hint(base) if base else None
     if api == "drupal_nodes":
         match = _DRUPAL_TYPE.search(url)
         name = (match["name"] or match["seg"]) if match else None
