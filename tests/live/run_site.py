@@ -147,13 +147,14 @@ def _site(item: dict[str, Any]) -> dict[str, Any]:
 def _sitemap_state(items: Sequence[dict[str, Any]]) -> str:
     """`listed` when robots.txt named a sitemap or a sitemap that was not guessed exists,
     `guessed` when only a sitemap guessed at /sitemap.xml, /sitemap_index.xml or /wp-sitemap.xml
-    exists, else `none` (no sitemap found)."""
+    exists, else `none` (no sitemap found). Feed and site API items do not count."""
     sites = [_site(item) for item in items]
     present = [
         info
         for site in sites
         if site.get("role") == "sitemap"
         and (info := site.get("sitemap") or {}).get("format") not in (None, "absent")
+        and info.get("source") not in API_SOURCES  # a feed or a site API is no sitemap
     ]
     if not present:
         return "none"

@@ -567,3 +567,15 @@ def test_a_poll_is_retried_once_on_a_transport_error() -> None:
 
     assert report == tally(START, JOB, ITEMS)
     assert report.error is None
+
+
+def test_feed_and_api_items_do_not_count_as_a_sitemap() -> None:
+    items = [
+        robots(0),
+        sitemap(1, 0, format="absent", guessed=True),
+        sitemap(2, 2, format="rss", source="feed", titled=True, prefix="f"),
+        sitemap(3, 4, format="wordpress_posts", source="wordpress", titled=True, prefix="w"),
+        page(4, [], page_type="home"),
+    ]
+
+    assert tally(START, JOB, items).sitemap == "none"
