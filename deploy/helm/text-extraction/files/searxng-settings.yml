@@ -88,6 +88,8 @@ engines:
     shortcut: wlo
     categories: [general]
     disabled: false
+    # SearXNG's default is 3 s; the repository's search often takes longer. Below the 8 s cap.
+    timeout: 6.0
     method: POST
     headers:
       Accept: application/json

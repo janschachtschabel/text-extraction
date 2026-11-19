@@ -180,7 +180,10 @@ SearXNG keine Einstellungen und startet nicht. Zeigt `docker compose logs init` 
 Einstellungen) und spielen Sie neu ein. SearXNG fragt von der
 eigenen Adresse des VPS aus. Die Quellen mit offizieller API sperren keinen Server; Mwmbl zählt
 Anfragen pro Adresse. Google und Bing können die Adresse des VPS nach einiger Zeit sperren: Sie
-stehen dann in `sources_failed`, und die übrigen Quellen antworten weiter.
+stehen dann in `sources_failed`, und die übrigen Quellen antworten weiter. Eine solche Antwort ist
+`partial` und kommt nicht in den Cache, solange die Sperre dauert, fragt also jede Suche wieder
+alle Quellen; lassen Sie Google und Bing aus `SEARCH_SOURCES` weg, wenn das lange anhält (siehe
+[Weitere Quellen](#weitere-quellen)).
 
 ### Weitere Quellen
 

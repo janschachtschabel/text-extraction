@@ -86,6 +86,8 @@ def test_wlo_asks_the_public_edu_sharing_search_and_links_render_pages() -> None
     assert wlo["title_query"] == "properties/cclom:title/0"
     assert wlo["content_query"] == "properties/cclom:general_description/0"
     assert wlo["about"]["use_official_api"] is True
+    # Longer than SearXNG's 3 s default, within the cap that keeps the search below its timeout.
+    assert 3.0 < wlo["timeout"] <= _settings()["outgoing"]["max_request_timeout"]
 
 
 def test_json_is_on() -> None:

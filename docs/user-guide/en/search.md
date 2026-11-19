@@ -171,7 +171,9 @@ published: with an older image SearXNG gets no settings and does not start. If
 `searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's
 own address. The sources with an official API do not block a server; Mwmbl counts requests per
 address. Google and Bing may block the VPS's address after a while: they then appear in
-`sources_failed`, and the other sources still answer.
+`sources_failed`, and the other sources still answer. Such an answer is `partial` and is not
+cached, so while a block lasts every search asks all sources again; leave Google and Bing out of
+`SEARCH_SOURCES` if that happens for long (see [More sources](#more-sources)).
 
 ### More sources
 
