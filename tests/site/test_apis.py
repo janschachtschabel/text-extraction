@@ -282,3 +282,24 @@ def test_rest_route_next_page() -> None:
 def test_rest_route_type_hint() -> None:
     assert api_type_hint("wordpress_posts", wordpress_list_url(PLAIN, "events")) == "event"
     assert api_type_hint("wordpress_posts", wordpress_list_url(PLAIN, "events", 2)) == "event"
+
+
+def test_wordpress_types_use_their_rest_namespace() -> None:
+    types = {
+        "post": {"slug": "post", "rest_base": "posts", "rest_namespace": "wp/v2"},
+        "kurs": {"slug": "kurs", "rest_base": "kurse", "rest_namespace": "lms/v1"},
+        "odd": {"slug": "odd", "rest_base": "odds", "rest_namespace": 7},
+    }
+    parsed = parse_wordpress_types(dump(types), ROOT, path_prefix=None)
+    assert [c.url for c in parsed.children] == [
+        wordpress_list_url(ROOT, "posts"),
+        "https://ex.org/wp-json/lms/v1/kurse?per_page=100&_fields=link,title,modified_gmt",
+        wordpress_list_url(ROOT, "odds"),
+    ]
+    plain = parse_wordpress_types(dump(types), PLAIN, path_prefix=None)
+    assert plain.children[1].url == (
+        "https://ex.org/?rest_route=/lms/v1/kurse&per_page=100&_fields=link,title,modified_gmt"
+    )
+    assert api_type_hint("wordpress_posts", plain.children[1].url) == api_type_hint(
+        "wordpress_posts", parsed.children[1].url
+    )

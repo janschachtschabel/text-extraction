@@ -3662,8 +3662,8 @@ Flow. The start page's signals come from its head (`<link rel="alternate">` of t
 (`robots`, `guess`, `feed`, `wordpress`, `drupal`) and a format: `wordpress_types`
 (`wp-json/wp/v2/types`, or `?rest_route=/wp/v2/types` on a site with plain permalinks, whose
 list addresses then carry the route in `rest_route` and `per_page`, `_fields` and `page` as
-their own parameters; then each content type's list, 100 per page, a `wordpress_posts` item
-each), `drupal_index` (`/jsonapi`, then each `node--*` list, 50 per page, a `drupal_nodes` item
+their own parameters; then each content type's list under its `rest_namespace`, `wp/v2` when
+it names none, 100 per page, a `wordpress_posts` item each), `drupal_index` (`/jsonapi`, then each `node--*` list, 50 per page, a `drupal_nodes` item
 each). Entries carry `title`; their type comes from the content type (reason `api`). RSS/Atom
 entries in ordinary sitemaps carry `title` too. The start page's result has `site.apis`. The tree
 shows an entry's title from the list (tooltip "title from the site's list"); a CMS list entry's

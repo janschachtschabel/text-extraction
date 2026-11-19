@@ -64,6 +64,8 @@ _TAG = re.compile(r"<[^>]*>")
 _MIN_PREFIX_MATCH = 5
 _WORDPRESS_REL = "https://api.w.org/"
 _REST_ROUTE = "rest_route"
+# A REST namespace (``wp/v2``, ``lms/v1``): path segments, none of them ``.`` or ``..``.
+_NAMESPACE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 _FEED_TYPES = frozenset({"application/rss+xml", "application/atom+xml"})
 _LINK_HEADER_ITEM = re.compile(r"<([^>]*)>([^,<]*)")
 _REL_PARAM = re.compile(r'rel\s*=\s*(?:"([^"]*)"|([^\s;,]+))', re.IGNORECASE)
@@ -189,7 +191,8 @@ def path_matches(name: str, path_prefix: str) -> bool:
 
 
 def parse_wordpress_types(body: bytes, api_root: str, *, path_prefix: str | None) -> ParsedSitemap:
-    """The post types of ``wp/v2/types`` as children, each the first page of its list."""
+    """The post types of ``wp/v2/types`` as children, each the first page of its list (under the
+    type's ``rest_namespace``, ``wp/v2`` when it names none)."""
     data = _load(body)
     if not isinstance(data, dict):
         return _invalid("wordpress_types")
@@ -208,7 +211,11 @@ def parse_wordpress_types(body: bytes, api_root: str, *, path_prefix: str | None
         if len(parsed.children) >= MAX_API_TYPES:
             parsed.truncated = True
             break
-        child = SitemapChild(url=wordpress_list_url(api_root, rest_base), crawl="listed")
+        namespace = value.get("rest_namespace")
+        if not isinstance(namespace, str) or not _NAMESPACE.fullmatch(namespace):
+            namespace = WP_NAMESPACE  # older WordPress names none: its core types' namespace
+        url = wordpress_list_url(api_root, rest_base, namespace=namespace)
+        child = SitemapChild(url=url, crawl="listed")
         parsed.children.append(child)
     return parsed
 
