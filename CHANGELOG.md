@@ -11,6 +11,16 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Added
 
+- Site APIs and places (package 26). A site-structure crawl with `apis: true` (the default;
+  `SITE_APIS_ENABLED` is the operator's switch, `/v1/info` lists `site_apis`) reads the RSS/Atom
+  feeds named in the start page's head (at most 3), the WordPress REST API and Drupal JSON:API as
+  `sitemap` items (`source`, formats `wordpress_types`, `wordpress_posts`, `drupal_index`,
+  `drupal_nodes`). Their entries carry `title` and a type from their content type (reason `api`),
+  and the tree shows both. The playground has the checkbox "Read feeds and CMS interfaces", the
+  MCP site tool takes `apis` in `options`. The entries of RSS/Atom feeds in ordinary sitemaps carry
+  `title` too. Every extraction's `metadata.places` lists up to 5 places the page names itself
+  (schema.org Place, LocalBusiness, address, geo, an Event's location, geo meta tags); PII handling
+  covers their text.
 - MCP agent usability (package 24). Each tool's `options` description lists the fields it takes
   with a short hint, so an agent finds `pii`, `ocr`, `compliance`, `screenshot` and the others
   without the API docs. `GET /v1/info` and `service_info` list the features the caller's key can

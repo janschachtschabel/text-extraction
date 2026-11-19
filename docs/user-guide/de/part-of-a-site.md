@@ -107,7 +107,7 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   Jede URL des Baums zeigt ihren Seitentyp, etwa „Inhalt“, „Übersicht“, „Veranstaltung“,
   „Lernmaterial“ oder „Impressum“ (siehe
   [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien)),
-  und die Zeile „Typen:“ über dem Baum (mit JavaScript die Filter-Schaltflächen) zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
+  und die Zeile „Typen:“ über dem Baum (mit JavaScript die Filter-Schaltflächen) zählt sie. Ein Eintrag aus einem Feed oder einer CMS-Liste („Feeds und CMS-Schnittstellen lesen“) zeigt den Titel aus dieser Liste (Tooltip „Titel aus der Liste der Website“) und für seinen geschätzten Typ den Grund „aus der Schnittstelle der Website“. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
   eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Jede andere URL wurde nicht
   gelesen; deshalb wird ihr Typ geschätzt und als „geschätzt“ markiert, mit dem Grund: „aus der
   URL“ (die URL-Regeln, unter anderem Autorenseiten (`author`, `autor`: „Übersicht“), weitere

@@ -21,7 +21,7 @@ and a playground in English and German.
 - **Metadata.** Title, description, authors, dates, language, images, canonical URL, keywords,
   schema.org and LRMI fields, the licence (Creative Commons and others, with its source and
   confidence), the page type (such as `content`, `listing` or `imprint`) and the links with their
-  category.
+  category, and the places it names (address and coordinates).
 - **Documents.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG (its text), HTML, plain text and Markdown, by URL or
   as an upload (up to 20 MB, PDFs up to 100 pages). With the OCR worker (Docling) also scans,
   images (PNG, JPEG, TIFF, WebP, BMP) and OpenDocument files (ODT, ODS, ODP). The bytes decide the
@@ -168,7 +168,8 @@ selectors or patterns, or with an LLM, and `chunking` splits the content into ch
 ## Site structure
 
 `POST /v1/site-structure` maps a site, its sitemaps and its link graph, as a job, and a batch then
-extracts the pages you pick: see [Part of a site](docs/user-guide/en/part-of-a-site.md) and
+extracts the pages you pick. The crawl also reads the feeds and the WordPress and Drupal content
+lists a site publishes (`apis`): see [Part of a site](docs/user-guide/en/part-of-a-site.md) and
 [A whole site and its metadata](docs/user-guide/en/whole-site-and-metadata.md).
 
 ## MCP

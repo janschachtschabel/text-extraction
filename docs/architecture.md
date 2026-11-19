@@ -3615,6 +3615,49 @@ could not learn or use well:
   site items (the required `timings` and `compliance` stay), and `next_offset` reads on. The UI's
   live tree keeps reading the full view.
 
+**Package 26: site APIs as link sources and places in the metadata (2026-11-19, Jan).** A site
+that publishes its content lists (RSS/Atom feeds, the WordPress REST API, Drupal JSON:API) names
+pages that neither sitemap nor links show, with titles and content types. The crawl reads them as
+sitemaps (`site/apis.py`, the start page's item only) and every extraction lists the places its
+page names itself.
+
+- **R26-1** Request field `apis: bool = True` in `SiteOptions` (also the MCP site tool's
+  `options` and the UI form, checkbox "Read feeds and CMS interfaces", on). `SITE_APIS_ENABLED=false`
+  makes the crawl ignore it (no warning); `/v1/info` lists the feature `site_apis`.
+- **R26-2** Caps: each API list page counts as a sitemap file (`SITE_MAX_SITEMAP_FILES`), each
+  entry as a sitemap entry (`SITE_MAX_SITEMAP_URLS`). A 401/403/404 answer fails that item
+  (`target_http_error`, not retryable) and the crawl goes on. robots.txt, the TDM checks and the
+  per-host pauses apply to these fetches as to any other.
+- **R26-3** `scope: path`: only content types whose name matches a segment of the start URL's
+  path prefix (`path_matches`; `/veranstaltungen/` matches `veranstaltung`); `scope: host`: all
+  content types except `EXCLUDED_WP_TYPES`.
+- **R26-4** `discovery: sitemap_first` is unchanged: the APIs do not count as a sitemap.
+- **R26-5** Only `/v1/site-structure`; `/v1/extract` listing link lists stay as in package 21.
+- **R26-6** Only the start page (item 0) reports signals and appends API items; at most
+  `MAX_FEEDS = 3` feeds, each on the start page's site host.
+- **R26-7** API entries whose host is not the crawl's site host (`site_host`) are dropped (not
+  counted).
+- **R26-8** Places under PII handling: the text of a place is masked like other metadata text;
+  the coordinates are dropped when the name, street, postal code or locality changed.
+- **R26-9** In `scope: path` a start path of `/` keeps all content types.
+- **R26-10** API items depend only on `apis`, not on `sitemaps`.
+
+Flow. The start page's signals come from its head (`<link rel="alternate">` of type RSS or Atom;
+`<link rel="https://api.w.org/">` or the `Link` header for WordPress; drupalSettings,
+`data-drupal` or the generator for Drupal). Each source becomes a `sitemap` item with `source`
+(`robots`, `guess`, `feed`, `wordpress`, `drupal`) and a format: `wordpress_types`
+(`wp-json/wp/v2/types`, then each content type's list, 100 per page, a `wordpress_posts` item
+each), `drupal_index` (`/jsonapi`, then each `node--*` list, 50 per page, a `drupal_nodes` item
+each). Entries carry `title`; their type comes from the content type (reason `api`). RSS/Atom
+entries in ordinary sitemaps carry `title` too. The start page's result has `site.apis`. The tree
+shows an entry's title from the list (tooltip "title from the site's list") and the reason "from
+the site's interface"; a crawled page's own title and type still win.
+
+Places. `metadata.places` (at most 5; `kind`, `name`, `street`, `postal_code`, `locality`,
+`region`, `country`, `latitude`, `longitude`) comes from the page's own schema.org items (Place,
+LocalBusiness, `address`, `geo`, an Event's `location`) and the geo meta tags (`geo.position`,
+`ICBM`, `geo.placename`, `geo.region`). The playground shows one "Place" row each.
+
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
