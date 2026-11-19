@@ -24,6 +24,8 @@ pages.
   pages with their metadata and licences, and reading the jobs.
 - [Structured data](structured-data.md): the strategies of `structured`, the LLM and its key, and
   chunking.
+- [Search](search.md): the web search through the service's SearXNG, its sources and their
+  limits, and extracting the hits.
 - [MCP](mcp.md): the setup for Claude Code, Claude Desktop and other clients, and the 12 tools.
 - [Glossary](glossary.md): the terms of this guide and of the playground, in English and German.
 
@@ -35,6 +37,7 @@ pages.
 - Map a whole site and read the metadata of its pages:
   [A whole site and its metadata](whole-site-and-metadata.md).
 - Read structured data and chunks: [Structured data](structured-data.md).
+- Find pages on a topic and extract them: [Search](search.md).
 - Use the MCP server: [MCP](mcp.md).
 - Extract a site that allowed it by contract: [Site rules](site-rules.md#maximum-extraction).
 

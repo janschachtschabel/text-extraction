@@ -210,6 +210,25 @@ curl -H "Authorization: Bearer $KEY" -F file=@report.pdf -F format=markdown \
   -F 'chunking={"strategy": "markdown", "size": 800}' http://localhost:8080/v1/extract/file
 ```
 
+## `POST /v1/search`
+
+A web search through the service's SearXNG (when the operator switched it on, `SEARCH_ENABLED`).
+See [Search](search.md) for the sources and the answer.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `query` | string, 1 to 500 characters | required | The search terms. |
+| `max_results` | integer, 1 to `SEARCH_MAX_RESULTS` | `10` | Most hits to return. |
+| `language` | string, 2 to 10 characters | unset | A language code such as `de` or `en`: hits in that language, where a source supports it. Unset: every language. |
+| `page` | integer, 1 to 10 | `1` | The result page: `2` returns the next hits. |
+| `time_range` | `day`, `month` or `year` | unset | Only hits from the last day, month or year, where a source supports it. |
+| `sources` | list of strings | unset | The sources to ask, from `SEARCH_SOURCES` (in any case). Unset: every source. An empty list, an empty name or another name answers 422. |
+
+<!-- request: POST /v1/search -->
+```json
+{"query": "photosynthesis", "language": "en", "max_results": 10, "sources": ["wikipedia", "arxiv"]}
+```
+
 ## Option objects
 
 ### `pii`

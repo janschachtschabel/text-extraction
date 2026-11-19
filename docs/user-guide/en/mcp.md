@@ -5,8 +5,9 @@ Deutsch: [MCP](../de/mcp.md)
 With `MCP_ENABLED=true` (Helm `mcp.enabled=true`; Docker Compose switches it on for the API) the
 service is an MCP server at `https://<host>/mcp` (streamable HTTP, stateless, JSON answers). An
 AI assistant such as Claude then extracts pages, files, sites and structured data with the 12
-tools of the server, and finds pages with its web search. This page covers the setup, the
-authentication, the tools, the job pattern, long content, errors and example prompts.
+tools of the server, and finds pages with its web search ([Search](search.md)). This page covers
+the setup, the authentication, the tools, the job pattern, long content, errors and example
+prompts.
 
 ## Setup
 

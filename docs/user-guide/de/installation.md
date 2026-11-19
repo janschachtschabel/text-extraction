@@ -44,9 +44,11 @@ uv run pre-commit install    # install the git hooks
 ## Docker Compose
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM) und ein
-Valkey mit Passwort. Es schaltet den Browser-Modus, OCR, die Transkription, die Behandlung
-personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein. Es gibt zwei
+Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM), ein
+Valkey mit Passwort und SearXNG für die Websuche. Es schaltet den Browser-Modus, OCR, die
+Transkription, die Behandlung personenbezogener Daten, das LLM, die Websuche, den MCP-Server und
+die Spielwiese ein. Die `docker-compose.yml` im Hauptordner braucht für SearXNG Docker Engine 26.0
+oder neuer; wie man die Suche ausschaltet, steht unter [Suche](search.md). Es gibt zwei
 Compose-Dateien:
 
 - `docker-compose.yml` startet die veröffentlichten Images von

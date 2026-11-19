@@ -1,0 +1,200 @@
+# Suche
+
+English: [Search](../en/search.md)
+
+Durchsuchen Sie das Web nach Seiten und extrahieren Sie dann die Treffer, die Sie brauchen. Der
+Dienst fragt sein eigenes SearXNG, einen Suchdienst, der als eigener Container neben ihm läuft.
+SearXNG gibt die Anfrage an einige freie Quellen mit offizieller API weiter und liefert ihre
+Treffer gemeinsam zurück. Die Suche selbst holt keine Seite. Die Treffer, die Sie auswählen,
+senden Sie an eine Extraktion: einen in der Spielwiese, über `POST /v1/extract` oder mit
+`extract_url`, mehrere als Batch. Diese Seite beschreibt die Quellen, die Spielwiese, REST, MCP,
+die Fehler und was ein Betreiber einrichtet.
+
+Die Suche gibt es, wenn der Betreiber sie eingeschaltet hat (`SEARCH_ENABLED`). Die
+`docker-compose.yml` im Hauptordner tut das von sich aus. Im Helm-Chart ist sie aus.
+`GET /v1/info` sagt, ob Ihr Schlüssel suchen darf (`features.search`) und wie viele Treffer eine
+Suche höchstens liefert (`limits.search_max_results`).
+
+## Die Quellen
+
+Eingeschaltet sind nur Quellen mit einer offiziellen, freien API. Jeder Treffer nennt die Quellen,
+die ihn gefunden haben.
+
+| Quelle | Was sie findet | Grenzen |
+| --- | --- | --- |
+| `wikipedia` | Den Wikipedia-Artikel zu den Suchbegriffen, aus der Wikipedia der Sprache `language` | Höchstens ein Treffer pro Suche: Die Quelle fragt nach dem Artikel, der am besten zu den Begriffen passt, nicht nach einer Liste von Artikeln. |
+| `wikibooks` | Lehrbücher und ihre Kapitel auf Wikibooks | Bücher nur zu manchen Themen. |
+| `wikiversity` | Lernmaterial und Kursseiten auf Wikiversity | Klein, ungleichmäßig abgedeckt. |
+| `wikinews` | Nachrichtenartikel auf Wikinews | Klein; wenige Themen. |
+| `mwmbl` | Allgemeine Webseiten aus Mwmbl, einer freien, gemeinnützigen Suchmaschine mit eigenem Index | Kleiner Index, vor allem englische Seiten; deutsche Bildungsseiten fehlen oft. Ohne Schlüssel erlaubt Mwmbl etwa 1.000 Anfragen im Monat von einer IP-Adresse; der Cache schont dieses Kontingent. |
+| `openalex` | Wissenschaftliche Werke (Artikel, Bücher, Datensätze) aus OpenAlex | Nur Wissenschaft; Titel oft englisch. |
+| `arxiv` | Preprints aus arXiv (Physik, Mathematik, Informatik und mehr) | Nur Wissenschaft, fast alles englisch. |
+| `crossref` | Wissenschaftliche Werke mit DOI aus Crossref | Nur Wissenschaft; Metadaten, oft ohne Zusammenfassung. |
+
+Stark ist die Suche also bei Wikipedia-Wissen und Wissenschaft, schwach als allgemeine deutsche
+Websuche. Google, Bing, DuckDuckGo, Brave und Startpage bleiben aus: SearXNG erreicht sie nur,
+indem es ihre Ergebnisseiten ausliest (Scraping), und sie sperren Server-Adressen nach einiger
+Zeit. Ein Betreiber kann sie trotzdem einschalten, auf eigene Verantwortung (siehe
+[Weitere Quellen](#weitere-quellen)).
+
+## In der Spielwiese
+
+Der Tab **Suche** erscheint nur, wenn Ihr Schlüssel suchen darf. Er steht vor dem Tab **Info**.
+Ist die Suche Admin-Schlüsseln vorbehalten (`SEARCH_ALLOW_USERS=false`) und sind Sie mit einem
+Nutzer-Schlüssel angemeldet, fehlt der Tab, und der Tab **Info** sagt, warum.
+
+1. Geben Sie die „Suchbegriffe“ ein (höchstens 500 Zeichen).
+2. Optional: Kreuzen Sie die „Quellen“ an, die gefragt werden. Ohne Kreuz werden alle Quellen
+   gefragt.
+3. Optional: „Sprache (optional)“ nimmt einen Sprachcode wie `de` oder `en`; leer heißt jede
+   Sprache. „Treffer“ ist die Zahl der angezeigten Treffer (10 als Standard, höchstens
+   `SEARCH_MAX_RESULTS` des Dienstes). „Zeitraum“ behält Treffer aus dem letzten Tag, Monat oder
+   Jahr, wo eine Quelle das unterstützt. „Ergebnisseite“ 2 zeigt die nächsten Treffer.
+4. Klicken Sie auf „Suchen“.
+
+Das Ergebnis beginnt mit einer Statuszeile und der Zahl der Treffer. Ein Hinweis nennt die
+Quellen, die nicht geantwortet haben, falls es welche gibt, und „Vorschläge:“ listet andere
+Suchbegriffe, die SearXNG vorschlägt. Jeder Treffer zeigt seinen Titel als Link (er öffnet sich in
+einem neuen Tab), seine URL, einen Ausschnitt, „Gefunden von“ mit seinen Quellen und, wo eine
+Quelle eines hat, sein Datum („Veröffentlicht“).
+
+Um Treffer zu extrahieren, kreuzen Sie sie an (oder klicken Sie auf „Alle auswählen“; „Keine
+auswählen“ entfernt jedes Kreuz), wählen Sie unter der Liste das Format und die Optionen, und
+klicken Sie auf „Auswahl extrahieren“. Die angekreuzten URLs werden ein Batch, der unter den
+Treffern mit seinem Fortschritt erscheint, wie im Website-Baum (siehe
+[Ein Teil einer Website](part-of-a-site.md#in-der-spielwiese)). Ist nichts angekreuzt, sagt das
+Formular „Geben Sie mindestens eine URL an.“ und startet nichts. „Als curl“ und „Rohes JSON“ am
+Ende zeigen die Suchanfrage und ihre ganze Antwort.
+
+## Mit REST
+
+`POST /v1/search` nimmt die Suchbegriffe und liefert die Treffer im Ergebnis-Envelope. Jedes Feld
+steht in [Parameter](parameters.md#post-v1search).
+
+<!-- request: POST /v1/search -->
+```json
+{"query": "Photosynthese", "language": "de", "max_results": 20, "sources": ["wikipedia", "wikibooks", "openalex"]}
+```
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"query": "Photosynthese", "language": "de", "max_results": 20}' \
+  http://localhost:8080/v1/search
+# 200 {"status": "success", "data": {"query": "Photosynthese", "results": [
+#   {"url": "https://de.wikipedia.org/wiki/Photosynthese", "title": "Photosynthese",
+#    "snippet": "...", "sources": ["wikipedia"], "published": null, "score": 1.0}, ...],
+#  "suggestions": [], "sources_failed": [], "cache": "miss"}, ...}
+```
+
+Jeder Treffer in `data.results` hat seine `url` (immer http oder https; andere Links von SearXNG
+fallen weg), seinen `title`, einen `snippet` (oder null), die `sources`, die ihn gefunden haben,
+`published` (ein Datum, wo die Quelle eines hat) und SearXNGs `score`. `data.suggestions` listet
+andere Suchbegriffe.
+
+Haben manche Quellen nicht geantwortet, ist die Antwort `partial`, und `data.sources_failed` nennt
+jede mit dem Grund von SearXNG (etwa eine Zeitüberschreitung oder eine abgelehnte Verbindung). Die
+Treffer kommen dann von den übrigen Quellen. Eine Quelle, die ohne Treffer geantwortet hat, ist
+kein Ausfall.
+
+Der Dienst behält eine `success`-Antwort für `SEARCH_CACHE_SECONDS` (standardmäßig eine Stunde) in
+seinem Cache. Dieselben Suchbegriffe mit derselben Sprache, Seite, demselben Zeitraum, denselben
+Quellen und demselben `max_results` kommen dann aus dem Cache (`data.cache: "hit"`). Eine
+`partial`-Antwort wird nicht behalten, die nächste Suche fragt also neu. Eine Suche zählt einmal
+gegen die Ratenbegrenzung Ihres Schlüssels.
+
+Um die Seiten zu lesen, senden Sie die URLs an eine Extraktion, zum Beispiel als Batch:
+
+<!-- request: POST /v1/batch -->
+```json
+{"urls": ["https://de.wikipedia.org/wiki/Photosynthese", "https://de.wikipedia.org/wiki/Chlorophyll"], "format": "markdown"}
+```
+
+Wie man einen Batch liest, steht in [Ein Teil einer Website](part-of-a-site.md#die-seiten-extrahieren).
+
+## Mit MCP
+
+Das Tool `web_search` nimmt die Felder von `POST /v1/search` als Argumente (`query` ist Pflicht)
+und antwortet mit demselben Envelope. Es hat keine `options`. Seine Beschreibung nennt die Quellen
+und die höchste Trefferzahl des Dienstes, damit ein Assistent sie nicht raten muss. Danach liest
+`extract_url` einen Treffer und `batch_extract` mehrere. Ein Assistent verkettet sie von selbst:
+
+```json
+{"name": "web_search", "arguments": {"query": "Photosynthese", "language": "de", "max_results": 5}}
+{"name": "batch_extract", "arguments": {"urls": ["https://de.wikipedia.org/wiki/Photosynthese"]}}
+```
+
+Das Tool ist auch dann gelistet, wenn die Suche aus ist; ein Aufruf liefert dann die 400 der
+Route. Die Einrichtung und die anderen Tools beschreibt [MCP](mcp.md).
+
+## Fehler
+
+| Antwort | Bedeutung |
+| --- | --- |
+| 200, `status: partial` | Manche Quellen haben nicht geantwortet; `data.sources_failed` nennt sie. Die Treffer sind da. |
+| 200, `status: failed`, `search_failed`, `retryable: true` | SearXNG ist nicht erreichbar oder hat nicht innerhalb von `SEARCH_TIMEOUT_SECONDS` (standardmäßig 10 s) geantwortet, oder keine Quelle hat einen Treffer geliefert und mindestens eine hat nicht geantwortet. Versuchen Sie es später noch einmal. |
+| 200, `status: failed`, `search_failed`, `retryable: false` | SearXNG hat die Anfrage abgelehnt, weil sein JSON-Format aus ist: eine Einstellung des Betreibers (`search.formats` in SearXNGs `settings.yml`). |
+| 200, `status: success`, keine Treffer | Alle Quellen haben geantwortet, und keine hatte einen Treffer. Versuchen Sie andere Wörter, eine andere Sprache oder mehr Quellen. |
+| 400 `invalid_request` | Die Suche ist in diesem Dienst aus (`SEARCH_ENABLED=false`). |
+| 403 `forbidden` | Die Suche ist Admin-Schlüsseln vorbehalten (`SEARCH_ALLOW_USERS=false`), und Ihr Schlüssel ist ein Nutzer-Schlüssel. |
+| 422 `invalid_request` | Der Body ist falsch: keine `query`, `max_results` über `SEARCH_MAX_RESULTS`, eine Quelle außerhalb von `SEARCH_SOURCES` (die Meldung listet die erlaubten), ein leerer Name oder `sources: []` (lassen Sie `sources` weg, um alle Quellen zu fragen). |
+| 429 `rate_limited` | Die Ratenbegrenzung Ihres Schlüssels ist aufgebraucht. |
+
+## Für Betreiber
+
+### Ein- und ausschalten
+
+Die `docker-compose.yml` im Hauptordner startet den Dienst `searxng` und schaltet die Suche ein.
+`SEARCH_ENABLED=false` in `.env` schaltet sie für die API aus; um auch den Container zu sparen,
+starten Sie den Stack mit `--scale searxng=0`. `docker-compose.build.yml` tut dasselbe.
+
+Im Helm-Chart ist beides aus. `searxng.enabled=true` startet SearXNG im Release und richtet
+`SEARCH_URL` darauf; `config.SEARCH_ENABLED: "true"` schaltet die Suche ein. Ohne
+`searxng.enabled` setzen Sie `config.SEARCH_URL` auf ein eigenes SearXNG. Siehe das
+[Helm-Chart](../../../deploy/helm/text-extraction/README.md#web-search-searxng) (Englisch).
+
+Die übrigen Einstellungen (`SEARCH_TIMEOUT_SECONDS`, `SEARCH_MAX_RESULTS`, `SEARCH_CACHE_SECONDS`,
+`SEARCH_SOURCES`, `SEARCH_ALLOW_USERS`) stehen in der
+[Konfigurationsreferenz](../../configuration.md#web-search) (Englisch).
+
+SearXNG läuft als unveränderter, eigener Container und hat keinen veröffentlichten Port: Nur die
+API erreicht es. Seine Lizenz ist die AGPL-3.0; der Dienst importiert nie seinen Code.
+
+### Docker Engine 26 und Hostinger
+
+Die `docker-compose.yml` im Hauptordner gibt SearXNG nur einen Ordner des Volumes `secrets` (ein
+Volume-Subpath), sodass es die anderen Geheimnisse nie sieht. Das braucht Docker Engine 26.0 oder
+neuer: Prüfen Sie es mit `docker version` (auf einem Hostinger-VPS in der Web-Konsole). Der Dienst
+`init` schreibt die Einstellungen von SearXNG bei jedem Start in diesen Ordner, mit einem
+Schlüssel, den er einmal erzeugt und behält. Dieses `init` kommt mit dem Release, das die Suche
+bringt: Spielen Sie das neue Release vor der neuen Compose-Datei ein. SearXNG fragt von der
+eigenen Adresse des VPS aus. Die acht Quellen sind offizielle APIs und sperren keinen Server; nur
+Mwmbl zählt Anfragen pro Adresse.
+
+### Weitere Quellen
+
+So schalten Sie eine weitere Suchmaschine von SearXNG ein (etwa `google`, `bing` oder
+`duckduckgo`), auf eigene Verantwortung:
+
+1. Tragen Sie ihren Namen in `use_default_settings.engines.keep_only` und in die Liste `engines:`
+   (mit `disabled: false`) der `settings.yml` von SearXNG ein.
+2. Tragen Sie ihren Namen in `SEARCH_SOURCES` ein, das genau die Suchmaschinen nennen muss, die
+   die Einstellungen behalten.
+
+Woher die Einstellungen kommen, hängt von der Installation ab:
+
+- `docker-compose.yml` im Hauptordner: `init` schreibt die Einstellungen bei jedem Start neu, aus
+  der Kopie im Image des Dienstes (`src/text_extraction/data/searxng-settings.yml`); eine Änderung im
+  Volume geht also beim nächsten Start verloren. Betreiben Sie ein eigenes SearXNG mit Ihren
+  Einstellungen und setzen Sie `SEARCH_URL` darauf (und lassen Sie das des Stacks mit
+  `--scale searxng=0` weg), oder binden Sie, wo Bind-Mounts erlaubt sind (nicht bei Hostinger),
+  in einer Compose-Override-Datei eine eigene `settings.yml` unter `/etc/searxng/settings.yml` des
+  Dienstes `searxng` ein, mit einem eigenen `secret_key`.
+- `docker-compose.build.yml`: Es bindet `src/text_extraction/data/searxng-settings.yml` aus dem
+  Checkout ein. Ändern Sie diese Datei und starten Sie `searxng` neu.
+- Helm: Die ConfigMap enthält die `files/searxng-settings.yml` des Charts. Ändern Sie sie in einer
+  Kopie des Charts, oder setzen Sie `searxng.enabled=false` und `config.SEARCH_URL` auf ein
+  eigenes SearXNG.
+
+Scraping dieser Suchmaschinen führt zur Sperre der Server-Adresse und passt nicht zur Regel des
+Projekts, Websites zu respektieren ([CLAUDE.md](../../../CLAUDE.md), Regel 6); darum bleiben sie
+standardmäßig aus.

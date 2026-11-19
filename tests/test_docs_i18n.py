@@ -24,11 +24,12 @@ from text_extraction.file_models import FileForm
 from text_extraction.job_models import BatchRequest
 from text_extraction.mcp_server.server import TOOL_ROUTES
 from text_extraction.pii.types import ENTITY_TYPES
+from text_extraction.search.types import SearchRequest
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
 from text_extraction.structured.types import StructuredStrategy
 from text_extraction.ui.i18n import CATALOGUES, LANGUAGES, Language, help_url
-from text_extraction.ui.routes import TABS
+from text_extraction.ui.routes import SEARCH_TAB, TABS
 
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "user-guide"
@@ -44,6 +45,7 @@ USE_CASE_PAGES = (
     "part-of-a-site",
     "whole-site-and-metadata",
     "structured-data",
+    "search",
     "mcp",
 )
 # The README sections that moved into the guide: each keeps its heading and one paragraph with a
@@ -68,6 +70,7 @@ REQUEST_MODELS: Mapping[str, type[BaseModel]] = {
     "POST /v1/site-structure": SiteStructureRequest,
     "POST /v1/screenshot": ScreenshotRequest,
     "POST /v1/extract/file": FileForm,
+    "POST /v1/search": SearchRequest,
 }
 
 # Backticked UPPER_SNAKE names that are not settings: shell variables of the examples, variables
@@ -485,12 +488,13 @@ def test_readme_has_no_moved_section(readme: Path) -> None:
 
 @pytest.mark.parametrize("language", LANGUAGES)
 def test_every_help_link_has_its_page(language: Language) -> None:
-    """The help link of every tab opens a guide page that exists in the tab's language."""
+    """The help link of every tab, the Search tab included, opens a guide page that exists in the
+    tab's language."""
     settings = Settings(auth_mode="none")  # the default UI_DOCS_BASE_URL
     prefix = f"{settings.ui_docs_base_url}/"
     assert settings.ui_docs_base_url.endswith("/" + GUIDE.relative_to(ROOT).as_posix())
     missing = []
-    for tab in TABS:
+    for tab in (*TABS, SEARCH_TAB):
         url = help_url(settings, language, tab.help_page)
         assert url.startswith(prefix)
         if not (GUIDE / url.removeprefix(prefix)).is_file():

@@ -127,6 +127,7 @@ Keep these out of ConfigMaps, images and logs.
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 | `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
 | `LLM_API_KEY` | API key of the LLM endpoint (`LLM_BASE_URL`). A request header `X-LLM-Api-Key` wins over it. The llm workers send it; the API pods need it too, only to know whether there is one. Empty counts as unset. Never logged, never in a repr, never in an answer. | `workers.llm.apiKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none and never renders the key as a literal); rendered into the API pods and the llm worker container only, and only with `workers.llm.enabled`. docker compose: `.env` (every service). |
+| `SEARXNG_SECRET` | SearXNG's `server.secret_key` (web search, package 25). Read by the SearXNG container only, never by this service; SearXNG prefers it over the key in its `settings.yml` and refuses to start with the placeholder `ultrasecretkey`. | `searxng.secret.existingSecret` + `.existingSecretKey`, or a Secret the chart generates once and keeps (default); rendered into the SearXNG pods only, and only with `searxng.enabled`. The root `docker-compose.yml`: `init` generates it into the volume `secrets` (`searxng-secret`) and writes it into `searxng/settings.yml`. `docker-compose.build.yml`: a fresh random key on every start of `searxng`. |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -294,6 +295,15 @@ services apart from `init` (a test keeps the two in step).
   (`text-extraction-init` and the `/secrets` mount point came with 0.1.8), an older one fails at
   `init`.
 - Every service except the one-shot ones restarts `unless-stopped`.
+- **Web search (package 25):** the service `searxng` runs SearXNG's own image (pinned tag, no
+  published port, only on `backend`, read-only root, user 977, all capabilities dropped). It
+  mounts only the folder `searxng/` of the volume `secrets` (a volume subpath: Docker Engine 26.0
+  or later), where `init` renders `settings.yml` from the image's `data/searxng-settings.yml` on
+  every start, with the kept key `searxng-secret`; edits to that file do not survive the next
+  start. The folder comes from the `init` of the first release with package 25: with an older
+  image it is missing and `searxng` does not start (release before deploy). The API does not wait for SearXNG; while it is down a
+  search answers `search_failed`. `SEARCH_ENABLED=false` in `.env` switches the search off; scale
+  the service away with `--scale searxng=0`.
 
 ## Response times
 
@@ -801,21 +811,31 @@ annotations for ingress-nginx.
 
 ## Web search
 
-Package 25: `POST /v1/search` and the `search` MCP tool query a self-hosted SearXNG (an
-unmodified container of its own, never imported) over its JSON API. The service never fetches the
-hits; the caller extracts the ones it wants. SearXNG must have the `json` format enabled
+Package 25: `POST /v1/search` and the MCP tool `web_search` query a self-hosted SearXNG (an
+unmodified container of its own, AGPL-3.0, never imported) over its JSON API. The service never
+fetches the hits; the caller extracts the ones it wants. SearXNG must have the `json` format enabled
 (`search.formats` in its `settings.yml`), or it answers 403 and the search fails with
-`search_failed`.
+`search_failed` (not retryable: a setting of SearXNG). The design and its rulings are in
+[architecture.md](architecture.md#web-search); the user guide's
+[Search](user-guide/en/search.md) page covers the sources and their limits.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SEARCH_ENABLED` | `false` | Serve the search route and tool. Off: `400` `invalid_request`. The root compose files switch it on together with their `searxng` service; Helm: `searxng.enabled`. |
-| `SEARCH_URL` | `http://searxng:8080` | Base URL of SearXNG (http or https with a host; a trailing slash is dropped). It is the operator's endpoint, so the SSRF guard does not apply to it. Anything else makes the service exit with code 2. |
-| `SEARCH_TIMEOUT_SECONDS` | `10` | Time a search may take before it answers `failed` / `search_failed`, retryable. 1 to 120. |
-| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`; more is `422`. 1 to 200. |
-| `SEARCH_CACHE_SECONDS` | `3600` | How long a finished search (`success` only; a `partial` answer is asked again) is kept in Valkey, per query, language, page, time range, sources and `max_results`. 0 turns the cache off. 0 to 86400. |
-| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources` (in any case; another name is `422`, its message lists these), as a comma list; a request without `sources` uses all of them. |
-| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys; a user key gets `403` `forbidden`. |
+| `SEARCH_ENABLED` | `false` | Serve the search route and tool (the tool is listed either way). Off: `400` `invalid_request`. The root compose files switch it on together with their `searxng` service (`SEARCH_ENABLED=false` in `.env` or the shell switches it off); Helm: `config.SEARCH_ENABLED` (`"false"`), separate from `searxng.enabled`, which runs SearXNG in the release. |
+| `SEARCH_URL` | `http://searxng:8080` | Base URL of SearXNG (http or https with a host; a trailing slash is dropped). It is the operator's endpoint, so the SSRF guard does not apply to it, nor do proxies from the environment or redirects. Anything else makes the service exit with code 2. Helm sets it to the release's SearXNG Service while `searxng.enabled` (a `config.SEARCH_URL` entry is then ignored). |
+| `SEARCH_TIMEOUT_SECONDS` | `10` | Time a search may take before it answers `failed` / `search_failed`, retryable. 1 to 120. SearXNG's own settings cut every engine at 8 s (`outgoing.max_request_timeout`), so a slow source becomes a failed source of a `partial` answer before this timeout ends the whole search. |
+| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`; more is `422`. 1 to 200. Keep it at 10 or more: a request without `max_results` asks for 10. |
+| `SEARCH_CACHE_SECONDS` | `3600` | How long a finished search is kept in Valkey, per query (spacing ignored), language, page, time range, sources (order ignored) and `max_results`. Only a `success` answer is kept; a `partial` or `failed` one is asked again next time. `data.cache` says `hit`, `miss` or `bypass`. 0 turns the cache off. 0 to 86400. |
+| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources` (in any case), as a comma list; a request without `sources` asks all of them. A name outside the list, a blank name and `sources: []` are `422` (for a name outside, the message lists these). It must name exactly the engines SearXNG's `settings.yml` keeps (`data/searxng-settings.yml`). |
+| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys; a user key gets `403` `forbidden`, and the playground shows such a key no Search tab (the Info tab says why). |
+
+A search is one hit of the key's rate limit. An answer is `partial` when some sources did not
+answer (`data.sources_failed` names each with SearXNG's reason) and `failed` / `search_failed`
+when SearXNG is unreachable, too slow or answers no JSON, or when no source returned a hit and at
+least one did not answer. `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the
+SearXNG container, not of this service: the root compose file's `init` keeps it in the volume
+`secrets` (`searxng-secret`) and renders `searxng/settings.yml` from it on every start; Helm keeps
+it in a Secret (see [Secrets](#secrets)).
 
 ## UI
 
