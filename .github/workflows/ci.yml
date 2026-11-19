@@ -471,6 +471,28 @@ jobs:
             | jq -e '.services.api.environment.SEARCH_ENABLED == "false"'
           rm compose.json
 
+      # The overrides of the web search checks: live.yml's keeps the build file's SearXNG with its
+      # hardening, publishes only 127.0.0.1:8888, mounts the folder init rendered read-only and
+      # resets the entry point to the image's; image.yml's swaps only init's image in the root file.
+      - name: docker compose config (web search check overrides)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+          SEARXNG_CONFIG_DIR: /tmp/searxng-config
+        run: |
+          docker compose -f docker-compose.build.yml -f tests/live/compose.searxng.yml config --format json \
+            | jq -e '.services.searxng | .entrypoint == null and .user == "977:977" and .read_only == true
+              and .cap_drop == ["ALL"] and (.ports | length == 1)
+              and .ports[0].host_ip == "127.0.0.1" and .ports[0].published == "8888" and .ports[0].target == 8080
+              and (.volumes | length == 1) and .volumes[0].type == "bind"
+              and .volumes[0].source == "/tmp/searxng-config" and .volumes[0].target == "/etc/searxng"
+              and .volumes[0].read_only == true'
+          test ! -e .env
+          CHECK_TAG=text-extraction-api:check docker compose -f docker-compose.yml \
+            -f tests/image/compose.searxng-check.yml config --format json \
+            | jq -e '.services.init.image == "text-extraction-api:check" and .services.init.pull_policy == "never"
+              and .services.searxng.volumes[0].source == "searxng-config"
+              and ([.services.init.volumes[].target] == ["/secrets", "/searxng"])'
+
       # The load-test override of load.yml: it parses on top of every worker, mounts the repo's
       # tests/ (paths resolve against the first file) read-only into the farm and the fake LLM,
       # gives the farm a writable load-results/farm/ for its record,

@@ -3641,7 +3641,16 @@ on the sample site's server), `tests/test_searxng_settings.py`, `tests/test_init
 `tests/test_compose_files.py` and the Helm render checks. A live check against a real SearXNG of
 the pinned commit (2026-11-19, in the build sandbox) confirmed the settings (exactly the eight
 engines, JSON on, the placeholder key refused) and the failure path, but got no hits: the sandbox's
-egress proxy refuses every engine's host. Hits from a real network are Jan's check.
+egress proxy refuses every engine's host. Two CI checks run the real image instead. live.yml's
+web search steps (PR label `live`, `tests/live/run_search.py`, unit-tested in
+`tests/test_live_search.py`) start the pinned SearXNG with its hardening and the root file's
+read-only mount of the settings `init` rendered (`tests/live/compose.searxng.yml`) and a second
+API from source, then check REST and `web_search`: hits for "Photosynthese" (de) from Wikipedia on
+de.wikipedia.org and another source, http(s) URLs only, a cache hit on the second call, and,
+with SearXNG stopped, 200 `failed`/`search_failed` (retryable). image.yml (api variant) runs the
+root file's `init` from the image just built into fresh volumes and its `searxng`
+(`tests/image/compose.searxng-check.yml`), and checks that SearXNG sees only `settings.yml` with
+a generated key and answers `/healthz` and a JSON search.
 
 **Decisions of Jan (2026-11-18, the recommended options).**
 
