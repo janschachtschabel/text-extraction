@@ -63,9 +63,12 @@ def test_info_site_apis_follows_the_switch() -> None:
         on = info(client, USER_KEY)
     with running(site_apis_enabled=False) as client:
         off = info(client, USER_KEY)
+    with running(jobs_enabled=False) as client:
+        no_jobs = info(client, USER_KEY)
 
     assert on["features"]["site_apis"] is True
     assert off["features"]["site_apis"] is False
+    assert no_jobs["features"]["site_structure"] is no_jobs["features"]["site_apis"] is False
 
 
 def test_info_browser_and_unblock() -> None:
