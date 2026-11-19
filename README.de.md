@@ -86,7 +86,7 @@ Jede Antwort hat dieselbe Ergebnishülle (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototyp `v0.1.14`: Die Pakete 0 bis 26 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.15`: Die Pakete 0 bis 26 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
@@ -95,8 +95,8 @@ Schalter für die Website-Regeln pro Lauf, Korrekturen an der Spielwiese nach de
 Website-Baum mit Typen, Spalten und schnellem Lesen der Sitemap, Zusatzfunktionen standardmäßig an,
 Bot-Prüfungen als `bot_protection` gemeldet, Linklisten von Übersichtsseiten, KMap-Anhänge,
 Tabellen und Formeln, mehr Text aus dünnen Seiten, Website-Baum oben, MCP für Agenten leichter
-nutzbar, freie Websuche über SearXNG, Website-Schnittstellen als Linkquellen und Orte in den
-Metadaten). Die Pakete und ihren Stand zeigt
+nutzbar, freie Websuche über SearXNG mit deutschen Quellen, Website-Schnittstellen als
+Linkquellen und Orte in den Metadaten). Die Pakete und ihren Stand zeigt
 [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion
