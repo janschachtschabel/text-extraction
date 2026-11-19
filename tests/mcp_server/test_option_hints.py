@@ -61,7 +61,7 @@ def test_options_description_lists_the_fields() -> None:
 def test_site_options_description() -> None:
     fields = option_fields(TOOLS["site_structure"].rest_model, TOOLS["site_structure"].args_model)
 
-    assert sorted(fields) == ["cache", "compliance", "metadata", "sitemaps"]
+    assert sorted(fields) == ["apis", "cache", "compliance", "metadata", "sitemaps"]
 
 
 def test_hints_are_short() -> None:

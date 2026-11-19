@@ -35,6 +35,7 @@ OPTION_HINTS: Final[dict[str, str]] = {
     "viewport": '{"width", "height"}; default 1920 x 1080',
     "width": "scale the image down to this width in px",
     "sitemaps": "read robots.txt and the sitemaps; default true",
+    "apis": "read feeds, WordPress and Drupal lists; default true",
 }
 # A field whose meaning differs on one route.
 ROUTE_HINTS: Final[dict[str, dict[str, str]]] = {

@@ -572,6 +572,15 @@ def test_site_structure_tool(client: TestClient) -> None:
     )
     assert scoped["isError"] is False, scoped
 
+    no_apis = call_tool(
+        client, "site_structure", {"url": PAGE, "options": {"apis": False}}, headers=AUTH
+    )
+    assert no_apis["isError"] is False, no_apis
+    record = portal(client).call(store_of(client).get, envelope_of(no_apis)["data"]["id"])
+    assert record is not None
+    assert record.options.site is not None
+    assert record.options.site.apis is False
+
     first = call_tool(
         client, "site_structure", {"url": PAGE, "discovery": "sitemap_first"}, headers=AUTH
     )

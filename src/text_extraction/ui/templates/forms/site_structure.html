@@ -26,6 +26,8 @@
     <legend>{{ t("form.also") }}</legend>
     <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked aria-describedby="site-sitemaps-hint"> {{ t("form.sitemaps") }}</label>
     <p class="hint" id="site-sitemaps-hint">{{ t("hint.sitemaps") }}</p>
+    <label class="inline"><input type="checkbox" name="apis" value="on" checked aria-describedby="site-apis-hint"> {{ t("form.apis") }}</label>
+    <p class="hint" id="site-apis-hint">{{ t("hint.apis") }}</p>
   </fieldset>
   {% set access_variant = "site" %}
   {% include "forms/access.html" %}

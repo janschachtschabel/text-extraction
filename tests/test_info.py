@@ -58,6 +58,16 @@ def test_info_lists_features_for_the_role() -> None:
     assert user["features"]["compliance_default"] == "enforce"
 
 
+def test_info_site_apis_follows_the_switch() -> None:
+    with running() as client:
+        on = info(client, USER_KEY)
+    with running(site_apis_enabled=False) as client:
+        off = info(client, USER_KEY)
+
+    assert on["features"]["site_apis"] is True
+    assert off["features"]["site_apis"] is False
+
+
 def test_info_browser_and_unblock() -> None:
     with running(browser_enabled=True, browser_unblock_enabled=True) as client:
         user, admin = info(client, USER_KEY), info(client, ADMIN_KEY)
