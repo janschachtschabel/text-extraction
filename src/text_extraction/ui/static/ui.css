@@ -340,6 +340,7 @@ button.secondary:disabled {
 /* The wide submit button of a settings column. */
 form.op > button[type="submit"],
 .tree-actions > button[type="submit"],
+.search-actions > button[type="submit"],
 #login-form button[type="submit"] {
   width: 100%;
   min-height: 48px;
@@ -1251,7 +1252,8 @@ button.link:hover {
 
 .pager,
 .actions,
-.tree-tools {
+.tree-tools,
+.search-tools {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -1447,8 +1449,57 @@ ul.tree .pages {
   font-weight: 600;
 }
 
-.tree-counter {
+.tree-counter,
+.hits-counter {
   color: var(--muted);
+}
+
+/* A web search's hits (package 25): the box beside the title, the URL, snippet and sources below
+   it, aligned with the title. */
+ol.search-hits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+ol.search-hits > li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+ol.search-hits > li > * {
+  grid-column: 2;
+  margin: 0;
+}
+
+ol.search-hits > li > input[type="checkbox"] {
+  grid-column: 1;
+  grid-row: 1;
+  margin-top: 0.3rem;
+}
+
+.hit-url {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.hit-meta {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.search-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.search-actions > * {
+  max-width: 380px;
 }
 
 /* The type pill (package 18), one colour pair per kind of type, each at 4.5:1 or more. The cell
