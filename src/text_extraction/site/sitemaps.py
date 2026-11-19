@@ -33,7 +33,7 @@ from xml.etree.ElementTree import Element, ParseError
 from defusedxml import DefusedXmlException, DTDForbidden
 from defusedxml.ElementTree import iterparse
 
-from text_extraction.site.types import LINK_TEXT_MAX_CHARS, SitemapChild, SitemapEntry
+from text_extraction.site.types import LINK_TEXT_MAX_CHARS, ApiFormat, SitemapChild, SitemapEntry
 from text_extraction.site.urls import normalize_url
 
 __all__ = [
@@ -47,7 +47,7 @@ __all__ = [
     "parse_sitemap",
 ]
 
-ParsedFormat = Literal["urlset", "index", "text", "rss", "atom"]
+ParsedFormat = Literal["urlset", "index", "text", "rss", "atom", ApiFormat]
 # The protocol's limit of sitemaps in one index; more are dropped and the parse is truncated.
 MAX_INDEX_CHILDREN = 50_000
 

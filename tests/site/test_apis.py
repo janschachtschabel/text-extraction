@@ -71,3 +71,175 @@ def test_feeds_capped() -> None:
 
 def test_no_signals() -> None:
     assert detect("<title>x</title>") == SiteApis()
+
+
+# --- parsers -------------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from text_extraction.site.apis import (  # noqa: E402
+    api_type_hint,
+    parse_drupal_index,
+    parse_drupal_nodes,
+    parse_wordpress_posts,
+    parse_wordpress_types,
+    path_matches,
+    wordpress_list_url,
+)
+
+ROOT = "https://ex.org/wp-json/"
+
+
+def dump(value: object) -> bytes:
+    return json.dumps(value).encode()
+
+
+def wp_types() -> dict[str, object]:
+    return {
+        "post": {"slug": "post", "rest_base": "posts"},
+        "page": {"slug": "page", "rest_base": "pages"},
+        "tribe_events": {"slug": "tribe_events", "rest_base": "events"},
+        "attachment": {"slug": "attachment", "rest_base": "media"},
+        "wp_block": {"slug": "wp_block", "rest_base": "blocks"},
+    }
+
+
+def test_wordpress_types_children() -> None:
+    parsed = parse_wordpress_types(dump(wp_types()), ROOT, path_prefix=None)
+    assert parsed.format == "wordpress_types"
+    assert [c.url for c in parsed.children] == [
+        wordpress_list_url(ROOT, base) for base in ("posts", "pages", "events")
+    ]
+    assert {c.crawl for c in parsed.children} == {"listed"}
+    assert wordpress_list_url(ROOT, "posts") == (
+        "https://ex.org/wp-json/wp/v2/posts?per_page=100&_fields=link,title,modified_gmt"
+    )
+    assert wordpress_list_url(ROOT, "posts", 2).endswith("modified_gmt&page=2")
+
+
+def test_wordpress_types_path_prefix() -> None:
+    types = wp_types() | {"v": {"slug": "veranstaltung", "rest_base": "veranstaltung"}}
+    parsed = parse_wordpress_types(dump(types), ROOT, path_prefix="/veranstaltungen/")
+    assert [c.url for c in parsed.children] == [wordpress_list_url(ROOT, "veranstaltung")]
+
+
+def items(count: int) -> list[dict[str, str]]:
+    return [
+        {
+            "link": f"https://ex.org/p{i}/",
+            "title": {"rendered": "<b>Fortbildung</b> &#8211; Mathe"},  # type: ignore[dict-item]
+            "modified_gmt": "2026-01-01T00:00:00",
+        }
+        for i in range(count)
+    ]
+
+
+def posts(body: object, url: str = wordpress_list_url(ROOT, "posts"), **kw: object):  # type: ignore[no-untyped-def]
+    args: dict[str, object] = {"site_host": "ex.org", "total_pages": None, "max_entries": 1000}
+    args.update(kw)
+    return parse_wordpress_posts(dump(body), url, **args)  # type: ignore[arg-type]
+
+
+def test_wordpress_posts_entries_and_next() -> None:
+    parsed = posts(items(100), total_pages=3)
+    assert parsed.format == "wordpress_posts"
+    assert len(parsed.entries) == parsed.entry_count == 100
+    assert parsed.entries[0].title == "Fortbildung \u2013 Mathe"
+    assert parsed.entries[0].lastmod == "2026-01-01T00:00:00"
+    assert [c.url for c in parsed.children] == [wordpress_list_url(ROOT, "posts", 2)]
+    page3 = posts(items(100), url=wordpress_list_url(ROOT, "posts", 3), total_pages=3)
+    assert page3.children == []
+    assert posts(items(40)).children == []
+    assert len(posts(items(100)).children) == 1
+
+
+def test_wordpress_posts_max_entries() -> None:
+    parsed = posts(items(10), max_entries=4)
+    assert (len(parsed.entries), parsed.entry_count, parsed.truncated) == (4, 10, True)
+
+
+def test_wordpress_posts_drops_bad_links() -> None:
+    bad = [
+        {"link": "javascript:alert(1)", "title": {"rendered": "x"}},
+        {"link": 42, "title": {"rendered": "x"}},
+        {"link": "https://other.org/a/", "title": {"rendered": "x"}},
+        {"link": "https://ex.org/ok/", "title": "nope"},
+    ]
+    parsed = posts(bad)
+    assert [e.loc for e in parsed.entries] == ["https://ex.org/ok/"]
+    assert parsed.entry_count == 1
+
+
+def test_wordpress_posts_hostile() -> None:
+    big = [{"link": "https://ex.org/a/", "title": {"rendered": "x" * 1_000_000}}]
+    assert len(posts(big).entries[0].title or "") == 200
+    nested = parse_wordpress_posts(
+        b"[" * 100_000, "https://ex.org/x", site_host="ex.org", total_pages=None, max_entries=5
+    )
+    assert nested.error == "invalid"
+    huge = posts(items(1), total_pages=999_999_999)
+    assert [c.url for c in huge.children] == [wordpress_list_url(ROOT, "posts", 2)]
+
+
+def test_drupal_index_and_nodes() -> None:
+    origin = "https://ex.org"
+    index = {
+        "links": {
+            "self": {"href": "https://ex.org/jsonapi"},
+            "node--article": {"href": "https://ex.org/jsonapi/node/article"},
+            "node--event": {"href": "https://ex.org/jsonapi/node/event"},
+            "file--file": {"href": "https://ex.org/jsonapi/file/file"},
+        }
+    }
+    parsed = parse_drupal_index(dump(index), origin, path_prefix=None)
+    assert parsed.format == "drupal_index"
+    assert [c.url for c in parsed.children] == [
+        "https://ex.org/jsonapi/node/article?page%5Blimit%5D=50"
+        "&fields%5Bnode--article%5D=title%2Cpath%2Cchanged%2Cdrupal_internal__nid",
+        "https://ex.org/jsonapi/node/event?page%5Blimit%5D=50"
+        "&fields%5Bnode--event%5D=title%2Cpath%2Cchanged%2Cdrupal_internal__nid",
+    ]
+    only = parse_drupal_index(dump(index), origin, path_prefix="/events/")
+    assert len(only.children) == 1
+    nodes = {
+        "data": [
+            {"attributes": {"title": "A", "path": {"alias": "/a"}, "changed": "2026-01-01"}},
+            {"attributes": {"title": "B", "path": {"alias": None}, "drupal_internal__nid": 7}},
+        ],
+        "links": {"next": {"href": "https://ex.org/jsonapi/node/article?page=2"}},
+    }
+    got = parse_drupal_nodes(dump(nodes), origin, site_host="ex.org", max_entries=10)
+    assert [e.loc for e in got.entries] == ["https://ex.org/a", "https://ex.org/node/7"]
+    assert got.entries[0].lastmod == "2026-01-01"
+    assert [c.url for c in got.children] == ["https://ex.org/jsonapi/node/article?page=2"]
+    nodes["links"] = {"next": {"href": "https://evil.org/x"}}
+    other = parse_drupal_nodes(dump(nodes), origin, site_host="ex.org", max_entries=10)
+    assert other.children == []
+
+
+@pytest.mark.parametrize("body", [b"<html>", b"[]", b'"x"'])
+def test_invalid_body(body: bytes) -> None:
+    assert parse_wordpress_types(body, ROOT, path_prefix=None).error == "invalid"
+    assert parse_drupal_index(body, "https://ex.org", path_prefix=None).error == "invalid"
+    nodes = parse_drupal_nodes(body, "https://ex.org", site_host="ex.org", max_entries=5)
+    assert nodes.error == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("name", "prefix", "expected"),
+    [
+        ("veranstaltung", "/veranstaltungen/", True),
+        ("events", "/event/", True),
+        ("event", "/eventlocations/", True),
+        ("kurs", "/veranstaltungen/", False),
+        ("post", "/posts/", False),
+    ],
+)
+def test_path_matches(name: str, prefix: str, expected: bool) -> None:
+    assert path_matches(name, prefix) is expected
+
+
+def test_api_type_hint() -> None:
+    assert api_type_hint("wordpress_posts", wordpress_list_url(ROOT, "events")) == "event"
+    assert api_type_hint("drupal_nodes", "https://ex.org/jsonapi/node/event?x=1") == "event"
+    assert api_type_hint("drupal_index", "https://ex.org/jsonapi") is None

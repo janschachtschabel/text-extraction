@@ -138,7 +138,7 @@ PageSignal = Literal[
     "word_count",
 ]
 LinkKind = Literal["internal", "external", "file"]
-GuessReason = Literal["url", "sitemap", "link_text", "keywords", "default"]
+GuessReason = Literal["url", "sitemap", "api", "link_text", "keywords", "default"]
 
 # The share of the visible characters that sits in links, and the number of links, from which a
 # page is a listing (an index of other pages) and not an article.
@@ -569,6 +569,7 @@ def guess_type(
     link_text: str = "",
     region: str | None = None,
     sitemap_hint: PageType | None = None,
+    hint_reason: Literal["sitemap", "api"] = "sitemap",
 ) -> TypeGuess | None:
     """The type of a URL that was not fetched, with its reason (ruling P18-R1); the first rule
     that applies wins:
@@ -592,7 +593,7 @@ def guess_type(
     if (by_pattern := _guess_by_query_or_date(url)) is not None:
         return TypeGuess(by_pattern, "url")
     if sitemap_hint is not None and sitemap_hint != "content":
-        return TypeGuess(sitemap_hint, "sitemap")
+        return TypeGuess(sitemap_hint, hint_reason)
     if (by_text := _HEADING_TYPE.get(_fold(link_text))) is not None and _link_text_counts(url):
         return TypeGuess(by_text, "link_text")
     if region == "pagination":
@@ -600,7 +601,7 @@ def guess_type(
     if (by_keyword := _keyword_type(url, link_text)) is not None:
         return TypeGuess(by_keyword, "keywords")
     if sitemap_hint == "content":
-        return TypeGuess("content", "sitemap")
+        return TypeGuess("content", hint_reason)
     if _has_default_shape(url):
         return TypeGuess("content", "default")
     return None
@@ -621,6 +622,14 @@ def _sitemap_name_type(name: str) -> PageType | None:
     if any(token in _MATERIAL_WORDS for token in _WORD_TOKENS.findall(name)):
         return "learning_material"
     return None
+
+
+def post_type_hint(name: str) -> PageType | None:
+    """The type a CMS post type or REST base says about its items (``posts``, ``tribe_events``,
+    ``arbeitsblaetter``): the sitemap name rules applied to the name, and failing them to the
+    name without a trailing ``s``; else None."""
+    folded = _fold(name)
+    return _sitemap_name_type(folded) or _sitemap_name_type(folded.removesuffix("s"))
 
 
 def sitemap_type_hint(sitemap_url: str) -> PageType | None:
