@@ -303,3 +303,19 @@ def test_wordpress_types_use_their_rest_namespace() -> None:
     assert api_type_hint("wordpress_posts", plain.children[1].url) == api_type_hint(
         "wordpress_posts", parsed.children[1].url
     )
+
+
+def test_drupal_index_children_from_the_normalised_address() -> None:
+    fields = "title%2Cpath%2Cchanged%2Cdrupal_internal__nid"
+    index = {
+        "links": {
+            "node--article": {"href": "HTTPS://EX.ORG:443/jsonapi/node/article#top"},
+            "node--page": {"href": "https://ex.org/jsonapi/node/page?resourceVersion=rel%3Alatest"},
+        }
+    }
+    parsed = parse_drupal_index(dump(index), "https://ex.org", path_prefix=None)
+    assert [c.url for c in parsed.children] == [
+        f"https://ex.org/jsonapi/node/article?page%5Blimit%5D=50&fields%5Bnode--article%5D={fields}",
+        "https://ex.org/jsonapi/node/page?resourceVersion=rel%3Alatest"
+        f"&page%5Blimit%5D=50&fields%5Bnode--page%5D={fields}",
+    ]

@@ -310,7 +310,11 @@ def parse_drupal_index(body: bytes, origin: str, *, path_prefix: str | None) -> 
                 f"fields[{key}]": "title,path,changed,drupal_internal__nid",
             }
         )
-        parsed.children.append(SitemapChild(url=f"{href}?{query}", crawl="listed"))
+        parts = urlsplit(target)
+        query = f"{parts.query}&{query}" if parts.query else query
+        parsed.children.append(
+            SitemapChild(url=parts._replace(query=query).geturl(), crawl="listed")
+        )
     return parsed
 
 
