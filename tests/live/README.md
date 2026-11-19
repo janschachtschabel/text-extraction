@@ -137,7 +137,9 @@ prints a Markdown summary: per site the job's state and duration (created to fin
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
 sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at
 `/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no
-page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and
+page type) and `type open %`, `titled` (tree URLs whose title came from a feed or API list) and
+`titled %`, `API files` (sitemap items whose `source` is `feed`, `wordpress` or `drupal`; 0
+against a service older than package 26), the `median convert ms` of the page items (`timings.convert_ms`) and
 `crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and
 one by `crawl` decision; and the warnings and error codes of the items. A request the service
 refuses (a 4xx or 5xx) or a job that does not complete within `--job-timeout` is reported in the

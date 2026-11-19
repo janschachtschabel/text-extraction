@@ -155,6 +155,7 @@ nur über HTTP gelesen, ohne ihren Text.
 | `depth` | Ganzzahl, 0 bis `SITE_MAX_DEPTH` | `2` | Wie viele Links weit der Crawl von der Startseite aus geht; `0`: nur die Startseite und die Sitemaps. |
 | `max_pages` | Ganzzahl, 1 bis `SITE_MAX_PAGES` | `100` | Höchstens so viele Seiten, die Startseite mitgezählt. |
 | `sitemaps` | Boolean | `true` | robots.txt und die Sitemaps lesen, die sie nennt (sonst nacheinander `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml`). |
+| `apis` | Boolean | `true` | Auch die Inhaltslisten lesen, die die Website selbst veröffentlicht: die RSS/Atom-Feeds, die der Kopf der Startseite nennt, die WordPress-REST-API und Drupal JSON:API. Jede Listenseite zählt als Sitemap-Datei, jeder Eintrag als Sitemap-Eintrag. Wird ignoriert, wenn der Betrieb sie abgeschaltet hat (`GET /v1/info`: `features.site_apis`). |
 | `discovery` | `crawl` oder `sitemap_first` | `crawl` | `crawl` folgt Links bis `depth` und `max_pages`. `sitemap_first`: Antwortet eine Sitemap, die robots.txt nennt, als Sitemap oder eine erratene Sitemap-Adresse mit einer, wird nur die Startseite gecrawlt und ihre Links haben `crawl: sitemap_first`; sonst wie `crawl`. Setzt `sitemaps: true` voraus (sonst 422). |
 | `scope` | `host` oder `path` | `host` | Welchen Links gefolgt wird: `host` dem Host der Startseite, `path` nur URLs unter dem Verzeichnis der Start-URL. |
 | `metadata` | Boolean | `true` | Die Metadaten jeder Seite mitliefern. |

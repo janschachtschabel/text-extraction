@@ -24,7 +24,7 @@ Englisch.
 - **Metadaten.** Titel, Beschreibung, Autoren, Daten, Sprache, Bilder, kanonische URL,
   Schlagwörter, Felder aus schema.org und LRMI, die Lizenz (Creative Commons und andere, mit
   Quelle und Sicherheit), der Seitentyp (etwa `content`, `listing` oder `imprint`) und die Links
-  mit ihrer Kategorie.
+  mit ihrer Kategorie, und die Orte, die sie nennt (Adresse und Koordinaten).
 - **Dokumente.** PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, SVG (sein Text), HTML, reiner Text und Markdown, per URL
   oder als Upload (bis 20 MB, PDFs bis 100 Seiten). Mit dem OCR-Worker (Docling) auch Scans,
   Bilder (PNG, JPEG, TIFF, WebP, BMP) und OpenDocument-Dateien (ODT, ODS, ODP). Die Bytes
@@ -191,7 +191,8 @@ Selektoren oder Mustern oder mit einem LLM, und `chunking` zerlegt den Inhalt in
 ## Website-Struktur
 
 `POST /v1/site-structure` erfasst eine Website, ihre Sitemaps und ihren Linkgraphen, als Job, und
-ein Batch extrahiert dann die Seiten, die Sie auswählen: siehe
+ein Batch extrahiert dann die Seiten, die Sie auswählen. Der Crawl liest auch die Feeds und die
+Inhaltslisten von WordPress und Drupal, die eine Website veröffentlicht (`apis`): siehe
 [Ein Teil einer Website](docs/user-guide/de/part-of-a-site.md) und
 [Eine ganze Website und ihre Metadaten](docs/user-guide/de/whole-site-and-metadata.md).
 

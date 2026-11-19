@@ -1431,6 +1431,11 @@ ul.tree .title-link {
   font-style: italic;
 }
 
+/* A title from a feed or a site's API list is the site's own: plain, with a tooltip. */
+ul.tree .title-list {
+  font-style: normal;
+}
+
 ul.tree .pages {
   flex: none;
   color: var(--muted);

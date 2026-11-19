@@ -9,13 +9,13 @@ is read, so the tree never holds more than the open path. ``pack_parts`` splits 
 entries into parts that each fit an item's result.
 
 Formats: ``urlset`` (``url/loc``, ``lastmod``, ``changefreq``, ``priority``), ``index``
-(``sitemapindex``: ``sitemap/loc``, ``lastmod``), ``rss`` (``channel/item/link``, ``pubDate``),
-``atom`` (``feed/entry/link[@href]`` with ``rel`` ``alternate`` or none, ``updated``) and
-``text`` (one URL per line). Namespaces and prefixes are ignored; elements match by local name,
-and a file that uses a prefix without declaring it (``image:`` with no ``xmlns:image``) is read
-again with its tag prefixes dropped. Nesting deeper than ``MAX_XML_DEPTH``, an encoding Python
-cannot read incrementally (``shift_jis``, ``big5``, an unknown name) and a UTF-16 file are
-``invalid``.
+(``sitemapindex``: ``sitemap/loc``, ``lastmod``), ``rss`` (``channel/item/link``, ``pubDate``,
+``title``), ``atom`` (``feed/entry/link[@href]`` with ``rel`` ``alternate`` or none, ``updated``,
+``title``) and ``text`` (one URL per line). Namespaces and prefixes are ignored; elements match
+by local name, and a file that uses a prefix without declaring it (``image:`` with no
+``xmlns:image``) is read again with its tag prefixes dropped. Nesting deeper than
+``MAX_XML_DEPTH``, an encoding Python cannot read incrementally (``shift_jis``, ``big5``, an
+unknown name) and a UTF-16 file are ``invalid``.
 Not read: the ``image:``, ``video:``, ``news:`` and ``xhtml:link`` extensions.
 """
 
@@ -33,7 +33,7 @@ from xml.etree.ElementTree import Element, ParseError
 from defusedxml import DefusedXmlException, DTDForbidden
 from defusedxml.ElementTree import iterparse
 
-from text_extraction.site.types import SitemapChild, SitemapEntry
+from text_extraction.site.types import LINK_TEXT_MAX_CHARS, ApiFormat, SitemapChild, SitemapEntry
 from text_extraction.site.urls import normalize_url
 
 __all__ = [
@@ -47,7 +47,7 @@ __all__ = [
     "parse_sitemap",
 ]
 
-ParsedFormat = Literal["urlset", "index", "text", "rss", "atom"]
+ParsedFormat = Literal["urlset", "index", "text", "rss", "atom", ApiFormat]
 # The protocol's limit of sitemaps in one index; more are dropped and the parse is truncated.
 MAX_INDEX_CHILDREN = 50_000
 
@@ -70,6 +70,9 @@ MAX_XML_DEPTH = 32
 _CLOCK_EVERY = 1024
 # A tag's namespace prefix, for the retry of a file that uses one without declaring it.
 _PREFIXED_TAG = re.compile(rb"(</?)[A-Za-z_][\w.\-]*:")
+# A title is read up to this many characters (collapsing whitespace can shrink it, so more than
+# the stored limit); the rest of a long one is never copied into the record.
+_TITLE_READ_CHARS = 4 * LINK_TEXT_MAX_CHARS
 _UNBOUND_PREFIX = expat_errors.codes[expat_errors.XML_ERROR_UNBOUND_PREFIX]
 
 
@@ -104,8 +107,10 @@ _LAYOUTS = {
         {"loc": "loc", "lastmod": "lastmod", "changefreq": "changefreq", "priority": "priority"},
     ),
     "sitemapindex": _Layout("index", "sitemap", 1, {"loc": "loc", "lastmod": "lastmod"}),
-    "rss": _Layout("rss", "item", 2, {"link": "loc", "pubDate": "lastmod"}),
-    "feed": _Layout("atom", "entry", 1, {"updated": "lastmod"}),  # loc: <link href>, below
+    "rss": _Layout("rss", "item", 2, {"link": "loc", "pubDate": "lastmod", "title": "title"}),
+    "feed": _Layout(
+        "atom", "entry", 1, {"updated": "lastmod", "title": "title"}
+    ),  # loc: <link href>, below
 }
 
 
@@ -267,7 +272,7 @@ def _read_field(layout: _Layout, element: Element, name: str, record: dict[str, 
             record.setdefault("loc", href)
         return
     key = layout.fields.get(name)
-    text = (element.text or "").strip()
+    text = (element.text or "")[: _TITLE_READ_CHARS if key == "title" else None].strip()
     if key is not None and text:
         record.setdefault(key, text)  # the first one that says something wins
 

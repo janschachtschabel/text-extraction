@@ -22,9 +22,11 @@ sitemap's ``type_hint``, a link's text and region, or ``content`` by default), a
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
 strongest, unless that guess is ``content`` by default and a weaker source gives a reason other
 than a link text for a sitemap entry (AU3-R2: a link "Datenschutz" leaves a listed page
-content). The first link that names a URL sets its title (``title_from_link``); a crawled
-page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
-type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
+content). The first link that names a URL sets its title (``title_from_link``); the title of
+a feed or site API entry (``title_from_list``) beats a link text, and a crawled page's own title
+wins. An entry of a WordPress or Drupal list has the reason ``api``, which ranks like
+``sitemap``. A section has ``pages`` (the URL leaves below it), ``section_type`` (the type all
+of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
 ``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
 shown URLs of each kind. ``SiteTree.social`` lists the external social links of the crawled
@@ -137,8 +139,10 @@ class TreeNode:
     (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
     ``error_code`` its error's code, ``depth`` its link distance from the start page,
     ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL),
-    ``type_reason`` what a guessed type rests on, ``title_from_link`` that the title is a link's
-    text, ``blocked`` why the site's rules block it (none: no rule does, or it is not known).
+    ``type_reason`` what a guessed type rests on, ``title_from_list`` that it is a feed or API
+    entry's title,
+    ``title_from_link`` that it is a link's text, ``blocked`` why the site's rules block it
+    (none: no rule does, or it is not known).
     A section has ``pages`` (URL leaves below it), ``section_type`` (the type they all share,
     none if one has none or they differ) and ``section_guessed`` (any of them is guessed)."""
 
@@ -155,6 +159,7 @@ class TreeNode:
     type_guessed: bool = False
     type_reason: GuessReason | None = None
     title_from_link: bool = False
+    title_from_list: bool = False
     blocked: BlockReason | None = None
     pages: int = 0
     section_type: PageType | None = None
@@ -177,7 +182,8 @@ class SiteTree:
     of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
     ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
     number of origins not tried (`mark_blocked`). ``untyped`` counts the shown URLs that were
-    not fetched (sitemap or linked) and have no page type; ``social`` the social links;
+    not fetched (sitemap or linked) and have no page type, ``titled`` the shown URLs whose title
+    came from a feed or API list (``title_from_list``); ``social`` the social links;
     ``found_counts`` the shown URLs of each kind (``page``, ``sitemap``, ``linked``);
     ``contacted`` the origins of the job's own items (pages, robots.txt and sitemaps, fetched
     or queued) and of their final URLs: the origins the crawl itself contacts."""
@@ -191,6 +197,7 @@ class SiteTree:
     unchecked: tuple[str, ...] = ()
     unchecked_more: int = 0
     untyped: int = 0
+    titled: int = 0
     social: tuple[SocialLink, ...] = ()
     found_counts: Mapping[NodeKind, int] = field(default_factory=dict)
     contacted: frozenset[str] = frozenset()
@@ -210,12 +217,15 @@ class _Found:
     type_guessed: bool = False
     type_reason: GuessReason | None = None
     title_from_link: bool = False
+    title_from_list: bool = False
     blocked: BlockReason | None = None
     from_sitemap: bool = False
 
     def merge(self, other: "_Found") -> None:
-        if not self.title:
+        # An entry's title from a feed or site API beats a link text (not a crawled page's).
+        if not self.title or (self.title_from_link and other.title_from_list):
             self.title, self.title_from_link = other.title, other.title_from_link
+            self.title_from_list = other.title_from_list
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL; between
             # guesses, a weaker source's reason beats a stronger source's bare default, but a
@@ -244,6 +254,9 @@ class _Found:
         self.lastmod = self.lastmod or other.lastmod
         self.blocked = self.blocked or other.blocked
         self.from_sitemap = self.from_sitemap or other.from_sitemap
+
+
+_API_SOURCES: Final = frozenset({"wordpress", "drupal"})
 
 
 class TreeBuilder:
@@ -294,14 +307,25 @@ class TreeBuilder:
                 if link.kind == "external":
                     self._add_social(link.url, link.category)
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
+            # An API list's entries are guessed as ``_read_api`` guessed them: with the title as
+            # link text and the list's content type as a hint whose reason is ``api``.
+            api = site.sitemap.source in _API_SOURCES
             for entry in site.sitemap.entries:
-                found = _guessed(entry.loc, sitemap_hint=site.sitemap.type_hint)
+                found = _guessed(
+                    entry.loc,
+                    link_text=(entry.title or "") if api else "",
+                    sitemap_hint=site.sitemap.type_hint,
+                    hint_reason="api" if api else "sitemap",
+                )
                 if entry.type_guess is not None:
                     # The sitemap item stored the guess (the same function), so the tree and the
                     # API agree; the reason still comes from the guess above. An item stored
                     # before the field has none and keeps the guess made here.
                     found.page_type, found.type_guessed = entry.type_guess, True
                     found.type_reason = found.type_reason or "default"
+                title = " ".join((entry.title or "").split())
+                if title:
+                    found.title, found.title_from_list = title, True
                 found.lastmod, found.from_sitemap = entry.lastmod, True
                 self._add(_ENTRY, found)
 
@@ -368,6 +392,7 @@ class TreeBuilder:
             crawl_mode=self._mode,
             blocked=sum(1 for _, one in shown if one.blocked is not None),
             untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
+            titled=sum(1 for _, one in shown if one.title_from_list),
             social=tuple(self._social.values()),
             found_counts={kind: sum(1 for k, _ in shown if k == kind) for kind in _KINDS},
             contacted=frozenset(self._contacted),
@@ -391,9 +416,16 @@ def _guessed(
     link_text: str = "",
     region: str | None = None,
     sitemap_hint: PageType | None = None,
+    hint_reason: Literal["sitemap", "api"] = "sitemap",
 ) -> _Found:
     """A URL that was not crawled, with its guessed type and the reason (none if nothing says)."""
-    guess = guess_type(url, link_text=link_text, region=region, sitemap_hint=sitemap_hint)
+    guess = guess_type(
+        url,
+        link_text=link_text,
+        region=region,
+        sitemap_hint=sitemap_hint,
+        hint_reason=hint_reason,
+    )
     if guess is None:
         return _Found(url)
     return _Found(url, page_type=guess.type, type_guessed=True, type_reason=guess.reason)
@@ -461,6 +493,7 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 type_guessed=found.type_guessed,
                 type_reason=found.type_reason,
                 title_from_link=found.title_from_link,
+                title_from_list=found.title_from_list,
                 blocked=found.blocked,
             )
         )

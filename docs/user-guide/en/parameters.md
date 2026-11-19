@@ -153,6 +153,7 @@ over HTTP only, without their text.
 | `depth` | integer, 0 to `SITE_MAX_DEPTH` | `2` | How many links deep the crawl goes from the start page; `0`: the start page and the sitemaps only. |
 | `max_pages` | integer, 1 to `SITE_MAX_PAGES` | `100` | Most pages, the start page included. |
 | `sitemaps` | boolean | `true` | Read robots.txt and the sitemaps it lists (or `/sitemap.xml`, `/sitemap_index.xml`, `/wp-sitemap.xml` in turn). |
+| `apis` | boolean | `true` | Also read the content lists the site publishes itself: the RSS/Atom feeds named in the start page's head, the WordPress REST API and Drupal JSON:API. Each list page counts as a sitemap file, each entry as a sitemap entry. Ignored when the operator turned it off (`GET /v1/info`: `features.site_apis`). |
 | `discovery` | `crawl` or `sitemap_first` | `crawl` | `crawl` follows links up to `depth` and `max_pages`. `sitemap_first`: when robots.txt lists a sitemap that answers as one, or a guessed sitemap address does, only the start page is crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs `sitemaps: true` (422 otherwise). |
 | `scope` | `host` or `path` | `host` | Which links are followed: `host` the start page's host, `path` only URLs under the start URL's directory. |
 | `metadata` | boolean | `true` | Include each page's metadata. |

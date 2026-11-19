@@ -1237,3 +1237,18 @@ def test_many_main_entity_values_cost_little_more_than_parsing_them() -> None:
     elapsed, result = _timed(page("mainEntity"))
     assert result[0] == "event"
     assert elapsed < 3 * baseline + 0.1
+
+
+def test_post_type_hint() -> None:
+    from text_extraction.page_types import post_type_hint
+
+    assert post_type_hint("posts") == "content"
+    assert post_type_hint("tribe_events") == "event"
+    assert post_type_hint("arbeitsblaetter") == "learning_material"
+    assert post_type_hint("product") is None
+
+
+def test_guess_type_api_reason() -> None:
+    guess = guess_type("https://ex.org/a-b-c/", sitemap_hint="event", hint_reason="api")
+    assert guess is not None
+    assert guess.reason == "api"

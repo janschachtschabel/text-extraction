@@ -21,6 +21,7 @@ from text_extraction.envelope import ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import ItemRun, JobItem
+from text_extraction.ratelimit import RateLimiter
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.ui import markdown, results
 from text_extraction.ui.answers import screenshot_failure
@@ -1164,6 +1165,12 @@ def test_screenshot_failure_names_the_status_once() -> None:
 
 def test_refusal_shows_when_to_retry() -> None:
     with running(rate_limit_per_minute=1) as client:
+        # A fixed clock: two calls on either side of a minute boundary fall into two windows.
+        client.app.state.rate_limiter = RateLimiter(  # type: ignore[attr-defined]
+            client.app.state.valkey,  # type: ignore[attr-defined]
+            1,
+            clock=lambda: 6_000_030.0,
+        )
         run(client, "images", url=["https://example.org/a.png"], alt=["a"])
         html = run(client, "images", url=["https://example.org/a.png"], alt=["a"]).text
 
@@ -1238,3 +1245,27 @@ def test_a_form_that_cannot_be_read_is_a_fragment(
     assert texts(tree(answer.text), "//div[@class='error']/p") == [
         f"The form could not be read: {cause}"
     ]
+
+
+def test_metadata_row_per_place() -> None:
+    places = [
+        {
+            "kind": "Event",
+            "name": "Stadtbibliothek",
+            "street": "Domplatz 1",
+            "postal_code": "99084",
+            "locality": "Erfurt",
+            "country": "DE",
+            "latitude": 50.98,
+            "longitude": 11.03,
+        },
+        {"kind": "meta", "region": "DE-TH"},
+    ]
+    data = result_data(metadata={"places": places})
+    german = tree(rendered(data, language="de"))
+    assert texts(german, "//dl[@class='meta']//dt") == ["Ort", "Ort"]
+    assert texts(german, "//dl[@class='meta']//dd") == [
+        "Stadtbibliothek, Domplatz 1, 99084 Erfurt, DE, 50.98, 11.03",
+        "DE-TH",
+    ]
+    assert texts(tree(rendered(data)), "//dl[@class='meta']//dt") == ["Place", "Place"]

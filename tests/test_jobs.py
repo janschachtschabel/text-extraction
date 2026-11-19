@@ -1216,6 +1216,22 @@ def test_site_job_options_omit_default_discovery() -> None:
     assert JobOptions.model_validate_json(stored) == sitemap_first
 
 
+def test_site_job_options_omit_default_apis_and_keep_false() -> None:
+    """AU3-R1: ``apis`` is left out of the stored site options while true (the default), and
+    stored as false otherwise; both read back as the same options."""
+    options = JobOptions(site=SiteOptions(), compliance="enforce")
+    stored = _options_json(options)
+
+    assert "apis" not in json.loads(stored)["site"]
+    assert JobOptions.model_validate_json(stored) == options
+
+    off = JobOptions(site=SiteOptions(apis=False), compliance="enforce")
+    stored = _options_json(off)
+
+    assert json.loads(stored)["site"]["apis"] is False
+    assert JobOptions.model_validate_json(stored) == off
+
+
 @scenario
 async def test_default_site_job_stores_no_discovery() -> None:
     valkey = FakeAsyncRedis()

@@ -138,6 +138,7 @@ SETTING_ENV_VARS = (
     "SITE_MAX_SITEMAP_URLS",
     "SITE_SITEMAP_MAX_BYTES",
     "SITE_MAX_LINKS_PER_PAGE",
+    "SITE_APIS_ENABLED",
     "MCP_ENABLED",
     "MCP_ALLOWED_ORIGINS",
     "MCP_WAIT_SECONDS",
@@ -192,6 +193,15 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.api_keys == [
         ApiKey(name="ci", role="user", sha256=sha256_hex("secret"), rate_limit_per_minute=None)
     ]
+
+
+def test_site_apis_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEYS", json.dumps([key_entry("ci", "secret")]))
+    assert Settings().site_apis_enabled is True
+
+    monkeypatch.setenv("SITE_APIS_ENABLED", "false")
+
+    assert Settings().site_apis_enabled is False
 
 
 def test_api_keys_from_json_env(monkeypatch: pytest.MonkeyPatch) -> None:

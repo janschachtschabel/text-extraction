@@ -114,6 +114,8 @@ def sitemap_item(
     *,
     part: int | None = None,
     type_hint: str | None = None,
+    format: str = "urlset",
+    source: str | None = None,
 ) -> JobItem:
     """A sitemap (or, with ``part``, a further part of one) listing ``entries``."""
     site = {
@@ -121,7 +123,8 @@ def sitemap_item(
         "depth": 0,
         "parent": 1,
         "sitemap": {
-            "format": "urlset",
+            "format": format,
+            "source": source,
             "entries": entries,
             "part": part or 1,
             "type_hint": type_hint,

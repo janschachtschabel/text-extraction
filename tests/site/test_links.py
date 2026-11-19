@@ -310,3 +310,12 @@ def test_not_html_and_empty() -> None:
         links=[], nofollow=False, truncated=False
     )
     assert site_links("just text, no links", BASE, {}, max_links=10).links == []
+
+
+def test_site_links_reports_wordpress_api() -> None:
+    html = (
+        '<html><head><link rel="https://api.w.org/" href="https://lernen.example.org/wp-json/">'
+        "</head><body></body></html>"
+    )
+    found = site_links(html, BASE, {}, max_links=1000)
+    assert found.apis.wordpress == "https://lernen.example.org/wp-json/"

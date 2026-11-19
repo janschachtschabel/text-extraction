@@ -113,6 +113,22 @@ def _licence(licence: Mapping[str, Any]) -> Licence:
     return Licence(" ".join(parts), str(source) if source else None)
 
 
+def _place_text(place: Mapping[str, Any]) -> str:
+    """A place in one line: name, street, postal code and locality, region, country and
+    coordinates; parts the page does not give are skipped."""
+    town = " ".join(str(place[name]) for name in ("postal_code", "locality") if place.get(name))
+    latitude, longitude = place.get("latitude"), place.get("longitude")
+    coordinates = f"{latitude}, {longitude}" if None not in (latitude, longitude) else ""
+    parts = [
+        place.get("name"),
+        place.get("street"),
+        town,
+        place.get("region"),
+        place.get("country"),
+    ]
+    return ", ".join([str(part) for part in (*parts, coordinates) if part])
+
+
 def _metadata_rows(metadata: Mapping[str, Any]) -> list[Row]:
     rows: list[Row] = []
     for label, name in (
@@ -130,6 +146,9 @@ def _metadata_rows(metadata: Mapping[str, Any]) -> list[Row]:
     if metadata.get("keywords"):
         keywords = ", ".join(map(_shown, metadata["keywords"]))
         rows.append(Row(Message("result.meta.keywords"), keywords))
+    for place in metadata.get("places") or []:
+        if isinstance(place, Mapping) and (text := _place_text(place)):
+            rows.append(Row(Message("result.meta.place"), text))
     canonical = metadata.get("canonical_url")
     if canonical:
         label = Message("result.meta.canonical")

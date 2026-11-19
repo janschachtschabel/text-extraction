@@ -337,7 +337,8 @@ add a note of its own):
   skipped or got no description while the status stays: not fetched, refused, not a type the
   model takes, too large, or the endpoint refused it or found nothing to describe; V-S11).
 - Site structure (items of a `site` job): `sitemap_not_found` (a guessed sitemap address
-  answered 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
+  answered 404 or 410), `site_api_not_found` (the WordPress types or Drupal JSON:API index the
+  start page names answered 401, 403, 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
   its inflate or by its time limit, or its children did not fit the item; the entries before the
   cut), `sitemap_urls_truncated` (`SITE_MAX_SITEMAP_URLS` reached: the first entries),
   `sitemap_files_truncated` (`SITE_MAX_SITEMAP_FILES` reached: the further sitemaps are not
@@ -2859,7 +2860,8 @@ a report-only step of the live workflow.
   the site sees one extra request within its per-host limits. It needs a lost lease, so it is
   rare.
 - **Valkey.** A crawl's state lives with its job until `JOB_TTL_SECONDS`: each page item holds up to
-  `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes. The memory guard stops a
+  `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes (about 300 bytes with a
+  title, up to 200 characters, from a feed or API list). The memory guard stops a
   crawl from appending (`site_memory_guard`) and refuses new ones (503).
 
 **Known limits.**
@@ -3119,9 +3121,11 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   Literals, so an unknown value in a request is still 422. Job options still forbid unknown
   fields: `_options_json` leaves an option out while it is at its default (`site.discovery` while
   it is `crawl`), so a new option needs an upgrade order only once a request sets it. The other
-  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SitemapInfo.format`,
-  `SiteInfo.role`) stay strict, so a new value there still needs the upgrade order (API pods
-  first).
+  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SiteInfo.role`) stay
+  strict, so a new value there still needs the upgrade order (API pods first). Since package 26
+  `SitemapInfo.format` and `source` are tolerant too (`TolerantSitemapFormat`,
+  `TolerantSitemapSource`): an unknown format reads as `urlset`, an unknown source as null.
+  Package 26's own new values still need the order, since 0.1.13 readers are strict.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
   marked guessed with its reason; a URL that `guess_type` cannot type shows "Type open" with its
@@ -3621,6 +3625,63 @@ could not learn or use well:
   `summary`; `MCP_MAX_ANSWER_CHARS` still bounds the answer, so a summary page holds about 150
   site items (the required `timings` and `compliance` stay), and `next_offset` reads on. The UI's
   live tree keeps reading the full view.
+
+**Package 26: site APIs as link sources and places in the metadata (2026-11-19, Jan).** A site
+that publishes its content lists (RSS/Atom feeds, the WordPress REST API, Drupal JSON:API) names
+pages that neither sitemap nor links show, with titles and content types. The crawl reads them as
+sitemaps (`site/apis.py`, the start page's item only) and every extraction lists the places its
+page names itself.
+
+- **R26-1** Request field `apis: bool = True` in `SiteOptions` (also the MCP site tool's
+  `options` and the UI form, checkbox "Read feeds and CMS interfaces", on). `SITE_APIS_ENABLED=false`
+  makes the crawl ignore it (no warning); `/v1/info` lists the feature `site_apis`.
+- **R26-2** Caps: each API list page counts as a sitemap file (`SITE_MAX_SITEMAP_FILES`), each
+  entry as a sitemap entry (`SITE_MAX_SITEMAP_URLS`). An API answer is read to at most
+  `API_MAX_BYTES` (4 MiB, or `SITE_SITEMAP_MAX_BYTES` if smaller): JSON is parsed whole, so a
+  larger answer fails `too_large` without a parse. A list page whose entries the URL cap cut
+  (some or all) ends its chain: its next page is not appended, and a 400 on a WordPress list
+  page after the first (`rest_post_invalid_page_number`, past the last page of a list without
+  `X-WP-TotalPages`) ends it as `success` without entries. A 401/403/404 answer fails that item
+  (`target_http_error`, not retryable) and the crawl goes on. robots.txt, the TDM checks and the
+  per-host pauses apply to these fetches as to any other.
+  *Amendment (final review, 2026-11-19):* a 401/403/404/410 on a root item (`wordpress_types`,
+  `drupal_index`) is not a failure: the item is `success`, `format: absent`, with the warning
+  `site_api_not_found`, like a guessed sitemap that is not there; a content type's list still
+  fails. A generator naming Drupal 1-7 appends no index (JSON:API came with Drupal 8).
+- **R26-3** `scope: path`: only content types whose name matches a segment of the start URL's
+  path prefix (`path_matches`; `/veranstaltungen/` matches `veranstaltung`); `scope: host`: all
+  content types except `EXCLUDED_WP_TYPES`.
+- **R26-4** `discovery: sitemap_first` is unchanged: the APIs do not count as a sitemap.
+- **R26-5** Only `/v1/site-structure`; `/v1/extract` listing link lists stay as in package 21.
+- **R26-6** Only the start page (item 0) reports signals and appends API items; at most
+  `MAX_FEEDS = 3` feeds, each on the start page's site host.
+- **R26-7** API entries whose host is not the crawl's site host (`site_host`) are dropped (not
+  counted).
+- **R26-8** Places under PII handling: the text of a place is masked like other metadata text;
+  the coordinates are dropped when the name, street, postal code or locality changed.
+- **R26-9** In `scope: path` a start path of `/` keeps all content types.
+- **R26-10** API items depend only on `apis`, not on `sitemaps`.
+
+Flow. The start page's signals come from its head (`<link rel="alternate">` of type RSS or Atom;
+`<link rel="https://api.w.org/">` or the `Link` header for WordPress; drupalSettings,
+`data-drupal` or the generator for Drupal). Each source becomes a `sitemap` item with `source`
+(`robots`, `guess`, `feed`, `wordpress`, `drupal`) and a format: `wordpress_types`
+(`wp-json/wp/v2/types`, or `?rest_route=/wp/v2/types` on a site with plain permalinks, whose
+list addresses then carry the route in `rest_route` and `per_page`, `_fields` and `page` as
+their own parameters; then each content type's list under its `rest_namespace`, `wp/v2` when
+it names none, 100 per page, a `wordpress_posts` item each), `drupal_index` (`/jsonapi`, then each `node--*` list, 50 per page, a `drupal_nodes` item
+each). Entries carry `title`; their type comes from the content type (reason `api`). RSS/Atom
+entries in ordinary sitemaps carry `title` too. The start page's result has `site.apis`. The tree
+shows an entry's title from the list (tooltip "title from the site's list"); a CMS list entry's
+type and reason are those of `guess_type` with the title as link text and the list's content type
+as a hint of reason `api` (the stored `type_guess` is the same call), so the URL (`/impressum/`)
+or the title still beats "from the site's interface"; a crawled page's own title and type still
+win.
+
+Places. `metadata.places` (at most 5; `kind`, `name`, `street`, `postal_code`, `locality`,
+`region`, `country`, `latitude`, `longitude`) comes from the page's own schema.org items (Place,
+LocalBusiness, `address`, `geo`, an Event's `location`) and the geo meta tags (`geo.position`,
+`ICBM`, `geo.placename`, `geo.region`). The playground shows one "Place" row each.
 
 ## Web search
 

@@ -22,6 +22,7 @@ parsed once for both.
 """
 
 import json
+import math
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -38,7 +39,7 @@ from extruct.utils import parse_xmldom_html
 from extruct.w3cmicrodata import MicrodataExtractor
 from lxml.html import HtmlElement
 from py3langid.langid import MODEL_FILE, LanguageIdentifier
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from text_extraction.convert.links import absolute_url
 from text_extraction.licenses import (
@@ -54,6 +55,8 @@ _log = structlog.get_logger(__name__)
 MAX_FIELD_LENGTH = 1000  # page-controlled text: keeps metadata from carrying a second document
 MAX_IMAGES = 20
 MAX_KEYWORDS = 50
+MAX_PLACES = 5
+_MAX_PLACE_TEXT = 200
 _MAX_LIST_ITEMS = 50
 _MAX_ITEMS_SCANNED = 200  # values of one list property that are looked at
 _MAX_NODES = 200
@@ -183,6 +186,30 @@ class Image(BaseModel):
     description: str | None = None
 
 
+class Place(BaseModel):
+    """A place the page names: ``kind`` is the schema.org type it belongs to (``Event``,
+    ``Place``, ``LocalBusiness``, ``PostalAddress``, ``GeoCoordinates`` ...) or ``meta`` for the
+    geo meta tags. Fields the page does not give are left out of the JSON."""
+
+    kind: str
+    name: str | None = None
+    street: str | None = None
+    postal_code: str | None = None
+    locality: str | None = None
+    region: str | None = None
+    country: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+    # No return annotation on purpose: see ``site.types.SitemapEntry``.
+    @model_serializer(mode="wrap")
+    def _drop_nulls(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if isinstance(data, dict):
+            return {name: value for name, value in data.items() if value is not None}
+        return data
+
+
 class PageMetadata(BaseModel):
     title: str | None = None
     description: str | None = None
@@ -197,6 +224,7 @@ class PageMetadata(BaseModel):
     licenses: list[License] = Field(default_factory=list)
     lrmi: dict[str, Any] = Field(default_factory=dict)
     images: list[Image] = Field(default_factory=list)
+    places: list[Place] = Field(default_factory=list)
 
 
 # --- language ----------------------------------------------------------------------------------
@@ -421,6 +449,191 @@ def _node_values(nodes: Iterable[dict[str, Any]], *keys: str) -> Iterator[str]:
     for key in keys:
         for node in nodes:
             yield from _strings(node.get(key))
+
+
+# --- places ------------------------------------------------------------------------------------
+
+_ADDRESS_KEYS = (
+    ("street", "streetAddress"),
+    ("postal_code", "postalCode"),
+    ("locality", "addressLocality"),
+    ("region", "addressRegion"),
+    ("country", "addressCountry"),
+)
+_PLACE_TYPE = re.compile(
+    r"(?:Place|LocalBusiness)$"
+)  # a place by type: ``Place``, ``CivicStructure``
+# Types whose ``name`` is the name of a place (a business, an organisation), not a headline.
+_NAMED_PLACE_TYPE = re.compile(
+    r"(?:Place|Business|Organization|Corporation|Store|Restaurant|Hotel|School|University"
+    r"|Museum|Library|Venue)$"
+)
+
+
+def _place_text(value: Any) -> str | None:
+    text = next(_strings(value), None)
+    return text[:_MAX_PLACE_TEXT] if text else None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        value = value.get("@value")
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):  # an integer too large for a float overflows
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _coordinates(latitude: Any, longitude: Any) -> dict[str, Any]:
+    """Both coordinates when both are numbers in range, else neither."""
+    lat, lon = _number(latitude), _number(longitude)
+    if lat is None or lon is None or not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return {}
+    return {"latitude": lat, "longitude": lon}
+
+
+def _objects(value: Any) -> Iterator[dict[str, Any] | str]:
+    """The values of a property that are objects (as plain nodes) or strings."""
+    values = value if isinstance(value, list) else [value]
+    for item in values[:_MAX_VALUES_PER_PROPERTY]:
+        if isinstance(item, dict):
+            if "@value" in item:
+                yield from _strings(item)
+            else:
+                yield _node(item)
+        elif isinstance(item, str) and item.strip():
+            yield _squash(item)
+
+
+def _place_fields(node: dict[str, Any], *, named: bool) -> dict[str, Any]:
+    """The place fields of a node: its own address and coordinate properties, those of its
+    ``address`` and ``geo`` objects (one level), and, if ``named``, its name."""
+    fields: dict[str, Any] = {"name": _place_text(node.get("name")) if named else None}
+
+    def address(source: dict[str, Any]) -> None:
+        for field_name, key in _ADDRESS_KEYS:
+            text = _place_text(source.get(key))
+            if text and not fields.get(field_name):
+                fields[field_name] = text
+
+    address(node)
+    for value in _objects(node.get("address")):
+        if isinstance(value, str):
+            fields.setdefault("street", value[:_MAX_PLACE_TEXT])
+        else:
+            address(value)
+    coordinates = _coordinates(node.get("latitude"), node.get("longitude"))
+    for value in _objects(node.get("geo")):
+        if not coordinates and isinstance(value, dict):
+            coordinates = _coordinates(value.get("latitude"), value.get("longitude"))
+    fields.update(coordinates)
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _place_from_node(node: dict[str, Any]) -> tuple[int, dict[str, Any]] | None:
+    """(rank, fields incl. ``kind``) of the place an item describes, or None. Rank: 0 an
+    event's location, 1 an item of a place type, 2 any other item with an address or geo."""
+    types = sorted(_type_names(node))
+    kind = types[0] if types else "Place"
+    if "Event" in types:
+        found = [
+            {"kind": "Event", **_place_fields(value, named=True)}
+            if isinstance(value, dict)
+            else {"kind": "Event", "name": value[:_MAX_PLACE_TEXT]}
+            for value in _objects(node.get("location"))
+        ]
+        found = [fields for fields in found if len(fields) > 1]
+        if found:
+            return 0, found[0]
+    named = any(_NAMED_PLACE_TYPE.search(name) for name in types)
+    fields = _place_fields(node, named=named)
+    placelike = any(_PLACE_TYPE.search(name) for name in types)
+    located = any(key != "name" for key in fields)
+    if placelike and fields:
+        return 1, {"kind": next(n for n in types if _PLACE_TYPE.search(n)), **fields}
+    if located:
+        return 2, {"kind": kind, **fields}
+    return None
+
+
+def _meta_place(pairs: list[tuple[str, str]]) -> dict[str, Any] | None:
+    index: dict[str, str] = {}
+    for key, content in pairs:
+        index.setdefault(key, content)
+    fields: dict[str, Any] = {}
+    for key, field_name in (("geo.placename", "name"), ("geo.region", "region")):
+        if key in index:
+            fields[field_name] = index[key][:_MAX_PLACE_TEXT]
+    for key in ("geo.position", "icbm"):
+        parts = re.split(r"\s*[;,]\s*|\s+", index.get(key, "").strip())
+        if len(parts) == 2:
+            coordinates = _coordinates(*parts)
+            if coordinates:
+                fields.update(coordinates)
+                break
+    return {"kind": "meta", **fields} if fields else None
+
+
+_PLACE_REFERENCES = ("address", "geo", "location")
+
+
+def _resolved(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The nodes with the address, geo and location objects they refer to by ``@id`` (RDFa and
+    ``@graph`` write them as separate nodes) put in place; referred nodes are not places of their
+    own then. A node whose ``@id`` is no string or null (a list, an object) is skipped, and only
+    a string ``@id`` refers."""
+    nodes = [node for node in nodes if isinstance(node.get("@id"), str | None)]
+    by_id = {
+        node["@id"]: node for node in nodes if isinstance(node.get("@id"), str) and node["@id"]
+    }
+    referred: set[str] = set()
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, list):
+            return [resolve(item) for item in value[:_MAX_VALUES_PER_PROPERTY]]
+        ref = value.get("@id") if isinstance(value, dict) else None
+        if not isinstance(ref, str) or (target := by_id.get(ref)) is None or set(value) != {"@id"}:
+            return value
+        referred.add(ref)
+        return target
+
+    resolved = [
+        {**node, **{key: resolve(node[key]) for key in _PLACE_REFERENCES if key in node}}
+        for node in nodes
+    ]
+    return [node for node in resolved if node.get("@id") not in referred]
+
+
+def _places(structured: _Structured, pairs: list[tuple[str, str]]) -> list[Place]:
+    """The places the page names, at most ``MAX_PLACES``: event locations first, then items of
+    a place type, other items with an address or coordinates, the geo meta tags last. A failing
+    reader costs the places and nothing else."""
+    try:
+        ranked: list[list[dict[str, Any]]] = [[], [], [], []]
+        for nodes in (structured.json_ld, structured.microdata, structured.rdfa):
+            for node in _resolved(nodes):
+                found = _place_from_node(node)
+                if found is not None:
+                    ranked[found[0]].append(found[1])
+        meta_place = _meta_place(pairs)
+        if meta_place is not None:
+            ranked[3].append(meta_place)
+        places: list[Place] = []
+        seen: set[tuple[tuple[str, Any], ...]] = set()
+        for fields in chain.from_iterable(ranked):
+            key = tuple(sorted((k, v) for k, v in fields.items() if k != "kind"))
+            if key not in seen:
+                seen.add(key)
+                places.append(Place(**fields))
+        return places[:MAX_PLACES]
+    except Exception as error:  # hostile markup: only the places are lost
+        _log.debug("metadata_places_failed", error=type(error).__name__)
+        return []
 
 
 # --- DOM ---------------------------------------------------------------------------------------
@@ -830,4 +1043,5 @@ def _metadata(
         licenses=licenses,
         lrmi=structured.lrmi(),
         images=_images(tree, base, pairs, nodes),
+        places=_places(structured, pairs),
     )

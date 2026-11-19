@@ -54,13 +54,14 @@ config:
   # Site structure (POST /v1/site-structure): the caps of one crawl. A request's depth or max_pages
   # above the first two answers 422. A crawl's items live in Valkey with its job: size
   # valkey.maxmemory for the open crawls, each page item with up to SITE_MAX_LINKS_PER_PAGE links
-  # and each sitemap entry about 100 bytes.
+  # and each sitemap entry about 100 bytes (about 300 with a title from a feed or API list).
   SITE_MAX_DEPTH: "5"
   SITE_MAX_PAGES: "1000"
   SITE_MAX_SITEMAP_FILES: "500"
   SITE_MAX_SITEMAP_URLS: "200000"
   SITE_SITEMAP_MAX_BYTES: "52428800"
   SITE_MAX_LINKS_PER_PAGE: "1000"
+  SITE_APIS_ENABLED: "true"
   # A YouTube video whose subtitles could not be read gets a second try in the browser where
   # YouTube offers its new transcript view (auto requests; nothing happens without browser workers).
   MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"

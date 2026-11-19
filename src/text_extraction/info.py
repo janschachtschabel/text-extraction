@@ -84,6 +84,10 @@ class InfoFeatures(BaseModel):
     semantic_chunking: bool = Field(description="Chunking strategy `semantic`.")
     describe_images: bool = Field(description="`describe_images` with the vision model.")
     site_structure: bool = Field(description="`/v1/site-structure`.")
+    site_apis: bool = Field(
+        description="A site crawl's `apis`: feeds, WordPress REST API and Drupal JSON:API "
+        "as sitemaps (`SITE_APIS_ENABLED`, and only with `/v1/site-structure`)."
+    )
     compliance_choice: bool = Field(
         description="The key may ask for another `compliance` mode than the default (asking "
         "for `ignore` needs an admin key)."
@@ -149,6 +153,7 @@ def _features(
         semantic_chunking=offered["semantic"],
         describe_images=offered["llm"],
         site_structure=settings.jobs_enabled,
+        site_apis=settings.jobs_enabled and settings.site_apis_enabled,
         compliance_choice=admin or settings.compliance_allow_override,
         compliance_default=settings.compliance_default,
         search=search_offered(principal.role, settings),

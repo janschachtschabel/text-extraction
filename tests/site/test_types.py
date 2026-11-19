@@ -211,6 +211,7 @@ def test_sitemap_entry_schema_keeps_its_fields() -> None:
         "changefreq",
         "priority",
         "type_guess",
+        "title",
     }
 
 
@@ -224,3 +225,27 @@ def test_sitemap_entry_type_guess_is_null_omitted_and_described() -> None:
     assert SitemapEntry.model_validate_json(entry.model_dump_json()) == entry
     assert "type_guess" not in SitemapEntry(loc="https://a.example/x").model_dump_json()
     assert SitemapEntry.model_json_schema()["properties"]["type_guess"]["description"]
+
+
+def test_sitemap_entry_title_none_is_dropped() -> None:
+    from text_extraction.site.types import SitemapEntry
+
+    assert "title" not in SitemapEntry(loc="https://a.org/", title=None).model_dump()
+    assert SitemapEntry(loc="https://a.org/", title="  A \n b ").title == "A b"
+
+
+def test_sitemap_info_unknown_format_and_source_are_tolerated() -> None:
+    from text_extraction.site.types import SitemapInfo
+
+    info = SitemapInfo.model_validate({"format": "future_format", "source": "future"})
+    assert info.format == "urlset"
+    assert info.source is None
+    assert (
+        SitemapInfo.model_validate({"format": "wordpress_posts", "source": "feed"}).source == "feed"
+    )
+
+
+def test_site_options_apis_default_true() -> None:
+    from text_extraction.site.types import SiteOptions
+
+    assert SiteOptions().apis is True

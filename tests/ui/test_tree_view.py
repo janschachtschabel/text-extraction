@@ -246,3 +246,39 @@ def test_a_link_text_is_isolated_inside_its_quotes(
     assert isolate.text_content() == RLO_TEXT
     assert linked.text_content() == quoted.format(RLO_TEXT)
     assert linked.get("title") == quoted.format(RLO_TEXT)
+
+
+API_SITE = [
+    page_item(0, f"{ORIGIN}/", title="Home", depth=0, page_type="home"),
+    sitemap_item(
+        1,
+        f"{ORIGIN}/wp-json/wp/v2/events",
+        [{"loc": f"{ORIGIN}/fortbildung/", "title": "Fortbildung \u2013 Mathe"}],
+        format="wordpress_posts",
+        source="wordpress",
+        type_hint="event",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("language", "reason", "title_note"),
+    [
+        ("en", "guessed, from the site's interface", "title from the site's list"),
+        ("de", "geschätzt, aus der Schnittstelle der Website", "Titel aus der Liste der Website"),
+    ],
+)
+def test_an_api_entry_shows_its_title_and_the_api_reason(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, language: str, reason: str, title_note: str
+) -> None:
+    fake_reads(monkeypatch, len(API_SITE), lambda offset, limit: API_SITE[offset : offset + limit])
+    root = tree(show_tree(client, language=language))
+
+    row = leaf(root, "/fortbildung/")
+    [pill] = row.xpath(".//span[contains(@class, 'page-type')]")
+    assert reason in pill.get("title")
+    [title] = row.xpath(".//span[contains(@class, 'title')]")
+    assert title.text_content() == "Fortbildung \u2013 Mathe"
+    assert "title-list" in title.get("class").split()
+    assert "title-link" not in title.get("class").split()
+    assert title_note in title.get("title")

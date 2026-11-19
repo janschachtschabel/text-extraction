@@ -90,7 +90,28 @@ the same URL (`part` of `parts`), and an index lists its sitemaps in `children`,
 item it became. Each entry carries a `type_guess`: the page type guessed from its URL and the
 sitemap's `type_hint` (what its file name suggests, such as `listing` for a WordPress category
 sitemap) without fetching the page, or no `type_guess` when the URL says nothing. It is a guess,
-not a `page_type`; sitemaps read before this field existed have none. An item whose `final_url` is another item's URL is a redirect to that page (its
+not a `page_type`; sitemaps read before this field existed have none.
+
+With `apis: true` (the default) the crawl also reads the content lists the site publishes, and
+the start page's result says what it found in `site.apis`. These are `sitemap` items too, with
+`source` `feed`, `wordpress` or `drupal` (`robots` and `guess` for the files robots.txt names and
+the guessed ones) and a `format`: an RSS or Atom feed named in the start page's head (at most 3,
+on the same host) is `rss` or `atom`; the WordPress REST API (found by the `<link
+rel="https://api.w.org/">` in the head or the `Link` header) gives `wordpress_types` (the content
+types, `wp-json/wp/v2/types`) and, for each type, `wordpress_posts` (100 entries a page); Drupal
+JSON:API (found by drupalSettings, `data-drupal` or the generator) gives `drupal_index`
+(`/jsonapi`) and, for each `node--*` type, `drupal_nodes` (50 entries a page). Their entries carry
+a `title` as well (so do the entries of a feed inside an ordinary sitemap), and their type comes
+from the content type. Each list page counts as a sitemap file and each entry as a sitemap entry
+(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). When the WordPress types or the Drupal
+`/jsonapi` answer 401, 403, 404 or 410 (the interface is locked or switched off), that item is
+`success` with `format: "absent"` and the warning `site_api_not_found`; a content type's list
+that answers so fails that item only (`target_http_error`). Past the last page of a WordPress
+list (a 400) the list simply ends. robots.txt, the TDM checks and the pauses between requests to a host apply. With
+`scope: "path"` only the content types that match the start path are read (`/veranstaltungen/`
+matches `veranstaltung`; a start path of `/` keeps all). `discovery: "sitemap_first"` is not
+changed by it. The operator can switch the reading off (`SITE_APIS_ENABLED`, `GET /v1/info`:
+`features.site_apis`). An item whose `final_url` is another item's URL is a redirect to that page (its
 links repeat the page's): dedupe the graph by `final_url`.
 
 ### Page types and link categories
@@ -179,8 +200,13 @@ Every item's result then has:
 
 - `metadata`: title, authors, dates, keywords and images; the licence as `license` (the best
   candidate, with `id` such as `CC-BY-4.0`, `url`, `source` and `confidence`) and `licenses` (all
-  that were found); and `lrmi`, the LRMI fields of the page (`educationalLevel`,
-  `learningResourceType`, `audience`, `typicalAgeRange`, `teaches` and more).
+  that were found); `lrmi`, the LRMI fields of the page (`educationalLevel`,
+  `learningResourceType`, `audience`, `typicalAgeRange`, `teaches` and more); and `places`, up to
+  5 places the page names itself (`kind`, `name`, `street`, `postal_code`, `locality`, `region`,
+  `country`, `latitude`, `longitude`), read from its schema.org items (a place, a local business,
+  an address, a geo position, an event's location) and its geo meta tags (`geo.position`, `ICBM`,
+  `geo.placename`, `geo.region`). With `pii` their text is masked, and the coordinates are left out
+  when the name or address text was masked.
 - `structured.values`: the fields of your schema, read from the page's JSON-LD, microdata, RDFa,
   OpenGraph and meta tags, with `sources` and `missing`. See
   [Structured data](structured-data.md).
@@ -209,7 +235,8 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
    the host, choose "How to read the site" ("Fast: sitemap first", the preset, or "Thorough: follow
    links"), and press "Read the site structure".
-2. The site tree appears at once in place of a job card and grows every few seconds while the
+2. Leave "Read feeds and CMS interfaces" ticked: the crawl then also includes the pages the site lists in its feeds and through WordPress or Drupal (`apis`).
+   The site tree appears at once in place of a job card and grows every few seconds while the
    crawl runs; your ticks, folds and filter stay. Its head shows the job's state, how many
    fetches are done so far, the failed ones, how long it has run (or took) and, while it runs,
    "Cancel". "Single fetches" under the head folds out the list of every fetch (robots.txt,

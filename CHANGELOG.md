@@ -9,6 +9,31 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- Site APIs and places (package 26). A site-structure crawl with `apis: true` (the default;
+  `SITE_APIS_ENABLED` is the operator's switch, `/v1/info` lists `site_apis`) reads the RSS/Atom
+  feeds named in the start page's head (at most 3), the WordPress REST API and Drupal JSON:API as
+  `sitemap` items (`source`, formats `wordpress_types`, `wordpress_posts`, `drupal_index`,
+  `drupal_nodes`). Their entries carry `title` and a type from their content type (reason `api`),
+  and the tree shows both. A WordPress or Drupal interface that answers 401, 403, 404 or 410 is
+  `format: absent` with the warning `site_api_not_found`; an API answer over 4 MiB fails
+  `too_large`. The playground has the checkbox "Read feeds and CMS interfaces", the
+  MCP site tool takes `apis` in `options`. The entries of RSS/Atom feeds in ordinary sitemaps carry
+  `title` too. Every extraction's `metadata.places` lists up to 5 places the page names itself
+  (schema.org Place, LocalBusiness, address, geo, an Event's location, geo meta tags); PII handling
+  covers their text.
+
+### Upgrade
+
+- New setting and its default: `SITE_APIS_ENABLED=true`. `SITE_APIS_ENABLED=false` makes a crawl
+  ignore `apis`.
+- On a rolling deploy, update the API pods first, then the workers: a 0.1.13 API pod answers 500
+  for a job that holds a `wordpress_*` or `drupal_*` sitemap item, and an API item leased by a
+  0.1.13 worker fails `conversion_failed` while the rollout runs. Since this release,
+  `SitemapInfo.format` and `source` read an unknown value as `urlset` and null, so later new
+  values need no upgrade order there.
+
 ## [0.1.13] - 2026-11-19
 
 ### Added

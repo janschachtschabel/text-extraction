@@ -335,7 +335,7 @@ from text_extraction.screenshot_image import (
 )
 from text_extraction.settings import Settings
 from text_extraction.site.links import site_links as typed_links
-from text_extraction.site.types import SiteInfo
+from text_extraction.site.types import SiteApis, SiteInfo
 from text_extraction.structured.dom import (
     dom_options,
     dom_stage,
@@ -3304,7 +3304,12 @@ class Pipeline:
                     max_links=self._settings.site_max_links_per_page,
                 )
                 site = SiteInfo(
-                    role="page", depth=0, parent=None, links=found.links, nofollow=found.nofollow
+                    role="page",
+                    depth=0,
+                    parent=None,
+                    links=found.links,
+                    nofollow=found.nofollow,
+                    apis=found.apis if found.apis != SiteApis() else None,
                 )
                 if found.truncated:
                     site_warnings.append(LINKS_TRUNCATED_WARNING)

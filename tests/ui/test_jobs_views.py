@@ -1558,3 +1558,22 @@ def test_site_form_sends_the_chosen_discovery() -> None:
     assert build_body("site-structure", {**posted, "discovery": "crawl"})["discovery"] == "crawl"
     # A post without the choice is not from the form: the API's default.
     assert build_body("site-structure", {"url": PAGE})["discovery"] == "crawl"
+
+
+def test_site_form_offers_the_apis_box_checked_and_sends_it() -> None:
+    posted = {"url": PAGE, "sitemaps": "on", "discovery": "crawl"}
+    assert (
+        build_body("site-structure", {**posted, "apis": "on"}).get("apis", True) is True
+    )  # the default
+    assert build_body("site-structure", posted)["apis"] is False
+
+
+def test_site_form_has_a_checked_apis_checkbox_with_a_hint(client: TestClient) -> None:
+    root = tree(run(client, "login").text)
+
+    (box,) = root.xpath("//form[@hx-post='/ui/run/site-structure']//input[@name='apis']")
+    assert box.get("type") == "checkbox"
+    assert box.get("checked") is not None
+    assert texts(box.getparent(), ".") == ["Read feeds and CMS interfaces"]
+    (note,) = root.xpath(f"//p[@id='{box.get('aria-describedby')}']")
+    assert "feeds" in note.text_content()

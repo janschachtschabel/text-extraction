@@ -96,7 +96,7 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   Each URL of the tree shows its page type, such as "Content", "Listing", "Event", "Learning
   material" or "Imprint" (see
   [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories)),
-  and the "Types:" line above the tree (the chips, with JavaScript) counts them. A crawled page shows the type of its result; a page
+  and the "Types:" line above the tree (the chips, with JavaScript) counts them. An entry that came from a feed or a CMS list ("Read feeds and CMS interfaces") shows the title from that list (tooltip "title from the site's list"). When the content type of a CMS list decided its guessed type, the reason is "from the site's interface"; an address or title that says more (such as `/impressum/`) gives its own reason. A crawled page shows the type of its result; a page
   that failed with an HTTP error has none. Every other URL was not read, so its type is guessed
   and marked "guessed", with the reason: "from the URL" (the URL rules, among others author pages
   (`author`, `autor`: "Listing"), more names for contact pages, and dated paths such as

@@ -3,9 +3,11 @@ pages, robots.txt and sitemaps as items of a growing job, run by the real worker
 with a fake fetcher serving a small site, the queue read back after each item."""
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import replace
 from functools import wraps
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -33,9 +35,19 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.site import runner as runner_module
+from text_extraction.site import sitemap_items as sitemap_items_module
+from text_extraction.site.apis import API_MAX_BYTES, wordpress_list_url
 from text_extraction.site.runner import SiteRunner
 from text_extraction.site.store import SiteStore
-from text_extraction.site.types import SiteInfo, SiteLink, SitemapEntry, SiteOptions, SiteScope
+from text_extraction.site.types import (
+    SiteInfo,
+    SiteLink,
+    SitemapEntry,
+    SitemapInfo,
+    SiteNode,
+    SiteOptions,
+    SiteScope,
+)
 from text_extraction.worker import ExtractRunner, Worker
 
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -1809,3 +1821,585 @@ async def test_sitemap_parts_stay_under_the_item_limit_with_type_guesses() -> No
         assert all(entry.type_guess == "content" for entry in parsed.entries)
     for item in items:
         assert await crawl.stored_size(job_id, item.index) <= 20_000
+
+
+# --- feeds and CMS APIs (package 26) -------------------------------------------------------------
+
+WP = f"{SITE}/wp-json/"
+TYPES = f"{WP}wp/v2/types"
+FEED = f"{SITE}/feed/"
+JSONAPI = f"{SITE}/jsonapi"
+WP_HEAD = '<link rel="https://api.w.org/" href="/wp-json/">'
+FEED_HEAD = '<link rel="alternate" type="application/rss+xml" title="Feed" href="/feed/">'
+DRUPAL_HEAD = '<meta name="generator" content="Drupal 10 (https://www.drupal.org)">'
+
+
+def as_json(url: str, value: object, *, total_pages: int | None = None) -> FetchResult:
+    headers = {"x-wp-totalpages": str(total_pages)} if total_pages is not None else None
+    return fetched(url, json.dumps(value), content_type="application/json", headers=headers)
+
+
+def wp_types(*types: tuple[str, str]) -> dict[str, object]:
+    return {slug: {"slug": slug, "rest_base": base, "name": slug} for slug, base in types}
+
+
+def wp_posts(page_number: int, count: int = 100, base: str = "blog") -> list[dict[str, object]]:
+    first = (page_number - 1) * count
+    return [
+        {
+            "link": f"{SITE}/{base}/post-{n}/",
+            "title": {"rendered": f"Post <b>{n}</b>"},
+            "modified_gmt": "2026-11-01T10:00:00",
+        }
+        for n in range(first, first + count)
+    ]
+
+
+def wp_list(base: str, page_number: int = 1) -> str:
+    return wordpress_list_url(WP, base, page_number)
+
+
+def wp_site(pages: int, *, head: str = WP_HEAD, url: str = ROOT) -> dict[str, Answer]:
+    """A WordPress site whose ``posts`` list says it has ``pages`` pages of 100 posts."""
+    answers: dict[str, Answer] = {
+        url: page(url, head=head),
+        TYPES: as_json(TYPES, wp_types(("post", "posts"), ("attachment", "media"))),
+    }
+    for number in range(1, pages + 1):
+        answers[wp_list("posts", number)] = as_json(
+            wp_list("posts", number), wp_posts(number), total_pages=pages
+        )
+    return answers
+
+
+def node_of(context: Any) -> SiteNode:
+    assert context.node is not None
+    return cast(SiteNode, context.node)
+
+
+def sitemap_of(item: JobItem) -> SitemapInfo:
+    found = site(item).sitemap
+    assert found is not None
+    return found
+
+
+@scenario
+async def test_start_page_appends_api_items() -> None:
+    crawl = Crawl({ROOT: page(ROOT, head=FEED_HEAD + WP_HEAD)})
+    job_id = await crawl.start(depth=0)
+
+    await crawl.step()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, ROBOTS, FEED, TYPES]
+    assert await crawl.queued() == [f"{job_id}:{n}:0" for n in (1, 2, 3)]
+    nodes = [node_of(await crawl.sites.context(job_id, n)) for n in (2, 3)]
+    assert nodes == [
+        SiteNode(role="sitemap", depth=0, parent=0, source="feed"),
+        SiteNode(role="sitemap", depth=0, parent=0, source="wordpress", api="wordpress_types"),
+    ]
+    apis = site(items[0]).apis
+    assert apis is not None
+    assert (apis.feeds, apis.wordpress) == ([FEED], WP)
+
+
+@scenario
+async def test_start_page_api_items_count_against_max_files() -> None:
+    crawl = Crawl({ROOT: page(ROOT, head=FEED_HEAD + WP_HEAD)}, site_max_sitemap_files=1)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.step()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, FEED]
+    assert "sitemap_files_truncated" in data(items[0]).warnings
+    assert crawl.sample("text_extraction_site_caps_total", {"cap": "files"}) == 1
+
+
+@scenario
+async def test_start_page_appends_the_drupal_index() -> None:
+    crawl = Crawl({ROOT: page(ROOT, head=DRUPAL_HEAD)})
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.step()
+
+    assert [item.url for item in await crawl.items(job_id)] == [ROOT, JSONAPI]
+    assert node_of(await crawl.sites.context(job_id, 1)) == SiteNode(
+        role="sitemap", depth=0, parent=0, source="drupal", api="drupal_index"
+    )
+
+
+@scenario
+async def test_apis_false_or_disabled() -> None:
+    head = FEED_HEAD + WP_HEAD + DRUPAL_HEAD
+    off = Crawl({ROOT: page(ROOT, head=head)})
+    job_id = await off.start(depth=0, apis=False)
+    await off.step()
+    assert [item.url for item in await off.items(job_id)] == [ROOT, ROBOTS]
+
+    disabled = Crawl({ROOT: page(ROOT, head=head)}, site_apis_enabled=False)
+    job_id = await disabled.start(depth=0)
+    await disabled.step()
+    assert [item.url for item in await disabled.items(job_id)] == [ROOT, ROBOTS]
+
+
+@scenario
+async def test_wordpress_chain() -> None:
+    crawl = Crawl(wp_site(2))
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    types, first, second = items[1:]
+    assert sitemap_of(types).format == "wordpress_types"
+    assert sitemap_of(types).source == "wordpress"
+    assert [(c.url, c.crawl, c.target) for c in sitemap_of(types).children] == [
+        (wp_list("posts"), "queued", first.index)
+    ]
+    assert node_of(await crawl.sites.context(job_id, first.index)) == SiteNode(
+        role="sitemap", depth=1, parent=1, source="wordpress", api="wordpress_posts", page=1
+    )
+    listed = sitemap_of(first)
+    assert (listed.format, listed.source, listed.entry_count) == (
+        "wordpress_posts",
+        "wordpress",
+        100,
+    )
+    assert len(listed.entries) == 100
+    assert listed.entries[0].title == "Post 0"
+    assert listed.entries[0].lastmod == "2026-11-01T10:00:00"
+    assert all(entry.type_guess == "content" for entry in listed.entries)
+    assert [(c.url, c.crawl, c.target) for c in listed.children] == [
+        (wp_list("posts", 2), "queued", second.index)
+    ]
+    assert site(first).depth == 1
+    assert node_of(await crawl.sites.context(job_id, second.index)) == SiteNode(
+        role="sitemap",
+        depth=1,
+        parent=first.index,
+        source="wordpress",
+        api="wordpress_posts",
+        page=2,
+    )
+    assert (site(second).depth, site(second).parent) == (1, first.index)
+    assert sitemap_of(second).children == []
+    assert sitemap_of(second).entries[0].title == "Post 100"
+    assert all(item.result is not None and item.result.status == "success" for item in items)
+
+
+@scenario
+async def test_drupal_chain() -> None:
+    node_list = f"{JSONAPI}/node/article"
+    first_url = (
+        f"{node_list}?page%5Blimit%5D=50"
+        "&fields%5Bnode--article%5D=title%2Cpath%2Cchanged%2Cdrupal_internal__nid"
+    )
+    second_url = f"{node_list}?page%5Boffset%5D=50&page%5Blimit%5D=50"
+    index_body = {
+        "links": {
+            "self": {"href": JSONAPI},
+            "node--article": {"href": node_list},
+            "taxonomy_term--tags": {"href": f"{JSONAPI}/taxonomy_term/tags"},
+        }
+    }
+
+    def nodes(start: int, next_href: str | None) -> dict[str, object]:
+        rows = [
+            {"attributes": {"title": f"Artikel {n}", "path": {"alias": f"/artikel/{n}"}}}
+            for n in range(start, start + 2)
+        ]
+        links = {"next": {"href": next_href}} if next_href else {}
+        return {"data": rows, "links": links}
+
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=DRUPAL_HEAD),
+            JSONAPI: as_json(JSONAPI, index_body),
+            first_url: as_json(first_url, nodes(0, second_url)),
+            second_url: as_json(second_url, nodes(2, None)),
+        }
+    )
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, JSONAPI, first_url, second_url]
+    assert [site(item).depth for item in items[1:]] == [0, 1, 1]
+    assert [sitemap_of(item).format for item in items[1:]] == [
+        "drupal_index",
+        "drupal_nodes",
+        "drupal_nodes",
+    ]
+    assert {sitemap_of(item).source for item in items[1:]} == {"drupal"}
+    assert [(e.loc, e.title) for e in sitemap_of(items[3]).entries] == [
+        (f"{SITE}/artikel/2", "Artikel 2"),
+        (f"{SITE}/artikel/3", "Artikel 3"),
+    ]
+    assert node_of(await crawl.sites.context(job_id, 3)).page == 2
+
+
+@scenario
+async def test_api_401_and_html_200() -> None:
+    robots = f"Sitemap: {SITE}/one.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=WP_HEAD + DRUPAL_HEAD),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/one.xml": text(f"{SITE}/one.xml", urlset(f"{SITE}/x")),
+            TYPES: fetched(TYPES, '{"code":"rest_forbidden"}', status=401),
+            JSONAPI: page(JSONAPI, body="Please log in."),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, ROBOTS, TYPES, JSONAPI, f"{SITE}/one.xml"]
+    locked, login = items[2], items[3]
+    # A locked API root is absent, like a guessed sitemap that is not there (R26-2 amendment).
+    assert locked.result is not None
+    assert (locked.result.status, locked.result.error) == ("success", None)
+    assert data(locked).upstream_status == 401
+    assert data(locked).warnings == ["site_api_not_found"]
+    assert (sitemap_of(locked).format, sitemap_of(locked).source) == ("absent", "wordpress")
+    assert (sitemap_of(locked).entries, sitemap_of(locked).children) == ([], [])
+    assert login.result is not None
+    assert login.result.status == "failed"
+    assert login.result.error is not None
+    assert (login.result.error.code, login.result.error.retryable) == (
+        ErrorCode.CONVERSION_FAILED,
+        False,
+    )
+    assert site(login).role == "sitemap"
+    for item in (items[0], items[1], items[4]):
+        assert item.result is not None
+        assert item.result.status == "success"
+    assert [e.loc for e in sitemap_of(items[4]).entries] == [f"{SITE}/x"]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 410])
+@scenario
+async def test_api_root_not_there_is_absent(status: int) -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=WP_HEAD + DRUPAL_HEAD),
+            TYPES: fetched(TYPES, "{}", status=status, content_type="application/json"),
+            JSONAPI: fetched(JSONAPI, "{}", status=status, content_type="application/json"),
+        }
+    )
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, TYPES, JSONAPI]
+    for item, source in ((items[1], "wordpress"), (items[2], "drupal")):
+        assert item.result is not None
+        assert (item.result.status, item.result.error) == ("success", None)
+        assert data(item).warnings == ["site_api_not_found"]
+        assert (sitemap_of(item).format, sitemap_of(item).source) == ("absent", source)
+        assert sitemap_of(item).guessed is False
+
+
+@scenario
+async def test_api_list_not_there_still_fails() -> None:
+    """Only a root is absent: a content type's list that answers 404 fails as before, and a
+    root that answers 500 fails, retryable."""
+    answers = wp_site(1)
+    answers[wp_list("posts")] = fetched(wp_list("posts"), "{}", status=404)
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+    await crawl.crawl()
+    listed = (await crawl.items(job_id))[2]
+    assert listed.result is not None
+    assert listed.result.status == "failed"
+    assert listed.result.error is not None
+    assert listed.result.error.code == ErrorCode.TARGET_HTTP_ERROR
+
+    broken = Crawl({ROOT: page(ROOT, head=WP_HEAD), TYPES: fetched(TYPES, "", status=500)})
+    job_id = await broken.start(depth=0, sitemaps=False)
+    await broken.crawl()
+    types = (await broken.items(job_id))[1]
+    assert types.result is not None
+    assert types.result.status == "failed"
+    assert types.result.error is not None
+    assert (types.result.error.code, types.result.error.retryable) == (
+        ErrorCode.TARGET_HTTP_ERROR,
+        True,
+    )
+
+
+@scenario
+async def test_api_caps() -> None:
+    crawl = Crawl(wp_site(50), site_max_sitemap_files=3)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    last = items[3]
+    assert [(c.url, c.crawl, c.target) for c in sitemap_of(last).children] == [
+        (wp_list("posts", 3), "max_files", None)
+    ]
+    assert "sitemap_files_truncated" in data(last).warnings
+    assert crawl.sample("text_extraction_site_caps_total", {"cap": "files"}) == 1
+
+    crawl = Crawl(wp_site(2), site_max_sitemap_urls=150)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    first, second = items[2], items[3]
+    assert len(sitemap_of(first).entries) == 100
+    assert (len(sitemap_of(second).entries), sitemap_of(second).entry_count) == (50, 100)
+    assert "sitemap_urls_truncated" in data(second).warnings
+    assert second.result is not None
+    assert second.result.status == "partial"
+
+    # The chain ends on the page whose entries the cap cut: no request that keeps nothing.
+    crawl = Crawl(wp_site(50), site_max_sitemap_urls=150)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    assert sitemap_of(items[3]).children == []
+    list_calls = [url for url, _ in crawl.fetcher.calls if "/wp/v2/posts" in url]
+    assert list_calls == [wp_list("posts"), wp_list("posts", 2)]
+
+
+@scenario
+async def test_wordpress_plain_permalinks_chain() -> None:
+    """A WordPress site without pretty permalinks names its REST root as ``?rest_route=/``."""
+    head = f'<link rel="https://api.w.org/" href="{SITE}/?rest_route=/">'
+    types = f"{SITE}/?rest_route=/wp/v2/types"
+    fields = "per_page=100&_fields=link,title,modified_gmt"
+    first = f"{SITE}/?rest_route=/wp/v2/events&{fields}"
+    second = f"{first}&page=2"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=head),
+            types: as_json(types, wp_types(("tribe_events", "events"))),
+            first: as_json(first, wp_posts(1, base="kalender"), total_pages=2),
+            second: as_json(second, wp_posts(2, base="kalender"), total_pages=2),
+        }
+    )
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, types, first, second]
+    assert all(item.result is not None and item.result.status == "success" for item in items)
+    for item in items[2:]:
+        listed = sitemap_of(item)
+        assert (len(listed.entries), listed.type_hint) == (100, "event")
+        assert all(entry.type_guess == "event" for entry in listed.entries)
+    assert sitemap_of(items[3]).entries[0].loc == f"{SITE}/kalender/post-100/"
+
+
+@scenario
+async def test_wordpress_400_past_the_last_page_ends_the_list() -> None:
+    """Without ``X-WP-TotalPages`` a list of exactly 100 posts asks for page 2, which WordPress
+    answers 400 (``rest_post_invalid_page_number``): the list ends there, nothing failed."""
+    answers = wp_site(1)
+    answers[wp_list("posts")] = as_json(wp_list("posts"), wp_posts(1))  # no total pages
+    answers[wp_list("posts", 2)] = fetched(
+        wp_list("posts", 2),
+        '{"code":"rest_post_invalid_page_number","data":{"status":400}}',
+        status=400,
+        content_type="application/json",
+    )
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    last = items[3]
+    assert last.result is not None
+    assert (last.result.status, last.result.error) == ("success", None)
+    assert data(last).upstream_status == 400
+    listed = sitemap_of(last)
+    assert (listed.format, listed.source, listed.entries, listed.children) == (
+        "wordpress_posts",
+        "wordpress",
+        [],
+        [],
+    )
+    assert listed.entry_count == 0
+
+
+@scenario
+async def test_wordpress_400_on_the_first_page_fails() -> None:
+    answers = wp_site(1)
+    answers[wp_list("posts")] = fetched(wp_list("posts"), "{}", status=400)
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    first = (await crawl.items(job_id))[2]
+    assert first.result is not None
+    assert first.result.status == "failed"
+    assert first.result.error is not None
+    assert first.result.error.code == ErrorCode.TARGET_HTTP_ERROR
+
+
+class CappingFetcher(FakeFetcher):
+    """A fake fetcher that honours ``max_bytes`` and ``truncate`` as the real one does."""
+
+    async def fetch(self, url: str, **options: Any) -> FetchResult:
+        answer = await super().fetch(url, **options)
+        limit = options.get("max_bytes")
+        if limit is not None and len(answer.content) > limit:
+            if not options.get("truncate"):
+                raise FetchError(
+                    ErrorCode.TOO_LARGE,
+                    "The response body is larger than the limit.",
+                    upstream_status=answer.status,
+                )
+            return replace(answer, content=answer.content[:limit], truncated=True)
+        return answer
+
+
+@scenario
+async def test_api_body_over_its_cap_fails_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_parse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("an API body over its cap is never parsed")
+
+    monkeypatch.setattr(sitemap_items_module, "_read_api", no_parse)
+    huge = b"[" + b"{}," * (API_MAX_BYTES // 3 + 1) + b"{}]"
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, head=WP_HEAD),
+        TYPES: fetched(TYPES, huge, content_type="application/json"),
+    }
+    crawl = Crawl(fetcher=CappingFetcher(answers))
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, TYPES]
+    types = items[1]
+    assert types.result is not None
+    assert types.result.status == "failed"
+    assert types.result.error is not None
+    assert types.result.error.code == ErrorCode.TOO_LARGE
+    assert site(types).role == "sitemap"
+    calls = [options for url, options in crawl.fetcher.calls if url == TYPES]
+    assert [(c["max_bytes"], c["truncate"]) for c in calls] == [(API_MAX_BYTES, False)]
+
+
+@scenario
+async def test_api_rerun_same_children() -> None:
+    crawl = Crawl(wp_site(3))
+    job_id = await crawl.start(depth=0, sitemaps=False)
+    await crawl.step()  # the start page
+    await crawl.step()  # the types
+    await die_after_extend(crawl, wp_list("posts"))
+    assert len(await crawl.items(job_id)) == 4  # page 2 is appended, never queued
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [
+        ROOT,
+        TYPES,
+        wp_list("posts"),
+        wp_list("posts", 2),
+        wp_list("posts", 3),
+    ]
+    assert all(item.state == "done" for item in items)
+    assert [(c.crawl, c.target) for c in sitemap_of(items[2]).children] == [("queued", 3)]
+
+
+@scenario
+async def test_scope_path_types() -> None:
+    start = f"{SITE}/veranstaltungen/"
+    events = wp_list("veranstaltung")
+    crawl = Crawl(
+        {
+            start: page(start, head=WP_HEAD),
+            TYPES: as_json(
+                TYPES,
+                wp_types(("post", "posts"), ("page", "pages"), ("veranstaltung", "veranstaltung")),
+            ),
+            events: as_json(events, wp_posts(1, 3, base="veranstaltungen"), total_pages=1),
+        }
+    )
+    job_id = await crawl.start(start, depth=0, sitemaps=False, scope="path")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [start, TYPES, events]
+    assert [c.url for c in sitemap_of(items[1]).children] == [events]
+    assert [entry.type_guess for entry in sitemap_of(items[2]).entries] == ["event"] * 3
+
+
+@scenario
+async def test_feed_item_titles() -> None:
+    rss = (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>Blog</title>'
+        f"<item><title>Erster Beitrag</title><link>{SITE}/erster/</link></item>"
+        f"<item><title>Zweiter Beitrag</title><link>{SITE}/zweiter/</link></item>"
+        "</channel></rss>"
+    )
+    crawl = Crawl({ROOT: page(ROOT, head=FEED_HEAD), FEED: text(FEED, rss, "application/rss+xml")})
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, FEED]
+    feed = sitemap_of(items[1])
+    assert (feed.format, feed.source) == ("rss", "feed")
+    assert [(e.loc, e.title) for e in feed.entries] == [
+        (f"{SITE}/erster/", "Erster Beitrag"),
+        (f"{SITE}/zweiter/", "Zweiter Beitrag"),
+    ]
+
+
+@scenario
+async def test_sitemap_sources() -> None:
+    listed = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {SITE}/s0.xml\n", "text/plain"),
+            f"{SITE}/s0.xml": text(f"{SITE}/s0.xml", index(f"{SITE}/s1.xml")),
+            f"{SITE}/s1.xml": text(f"{SITE}/s1.xml", urlset(f"{SITE}/p")),
+        }
+    )
+    job_id = await listed.start(depth=0)
+    await listed.crawl()
+    items = await listed.items(job_id)
+    assert [sitemap_of(item).source for item in items[2:]] == ["robots", "robots"]
+    assert node_of(await listed.sites.context(job_id, 3)).source == "robots"
+
+    guessed = Crawl(
+        {ROOT: page(ROOT), ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain")}
+    )
+    job_id = await guessed.start(depth=0)
+    await guessed.crawl()
+    items = await guessed.items(job_id)
+    assert [item.url for item in items[2:]] == [
+        f"{SITE}{path}" for path in ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
+    ]
+    assert [sitemap_of(item).source for item in items[2:]] == ["guess"] * 3
+    assert all(sitemap_of(item).format == "absent" for item in items[2:])

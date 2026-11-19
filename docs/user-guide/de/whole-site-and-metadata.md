@@ -93,7 +93,29 @@ Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Jeder Eintrag t
 `type_guess`: den Seitentyp, der aus seiner URL und dem `type_hint` der Sitemap (was ihr Dateiname
 nahelegt, etwa `listing` bei einer WordPress-Kategorie-Sitemap) geschätzt wird, ohne die Seite
 abzurufen; sagt die URL nichts, fehlt das `type_guess`. Es ist eine Schätzung, kein `page_type`;
-Sitemaps, die vor diesem Feld gelesen wurden, haben keines. Ein Eintrag, dessen `final_url`
+Sitemaps, die vor diesem Feld gelesen wurden, haben keines.
+
+Mit `apis: true` (der Vorgabe) liest der Crawl auch die Inhaltslisten, die die Website
+veröffentlicht, und das Ergebnis der Startseite nennt in `site.apis`, was er gefunden hat. Auch
+das sind `sitemap`-Einträge, mit `source` `feed`, `wordpress` oder `drupal` (`robots` und `guess`
+für die Dateien, die robots.txt nennt, und die geratenen) und einem `format`: Ein RSS- oder
+Atom-Feed, den der Kopf der Startseite nennt (höchstens 3, auf demselben Host), ist `rss` oder
+`atom`; die WordPress-REST-API (erkannt am `<link rel="https://api.w.org/">` im Kopf oder am
+`Link`-Header) liefert `wordpress_types` (die Inhaltstypen, `wp-json/wp/v2/types`) und für jeden
+Typ `wordpress_posts` (100 Einträge je Seite); Drupal JSON:API (erkannt an drupalSettings,
+`data-drupal` oder am Generator) liefert `drupal_index` (`/jsonapi`) und für jeden Typ `node--*`
+`drupal_nodes` (50 Einträge je Seite). Ihre Einträge tragen zusätzlich einen `title` (ebenso die
+Einträge eines Feeds in einer gewöhnlichen Sitemap), und ihr Typ stammt vom Inhaltstyp. Jede
+Listenseite zählt als Sitemap-Datei und jeder Eintrag als Sitemap-Eintrag
+(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). Antworten die WordPress-Typen oder
+Drupals `/jsonapi` mit 401, 403, 404 oder 410 (die Schnittstelle ist gesperrt oder abgeschaltet),
+ist dieser Eintrag `success` mit `format: "absent"` und der Warnung `site_api_not_found`;
+antwortet die Liste eines Inhaltstyps so, scheitert nur dieser Eintrag (`target_http_error`).
+Hinter der letzten Seite einer WordPress-Liste (eine 400) endet die Liste einfach. robots.txt, die TDM-Prüfungen und die Pausen zwischen Anfragen an
+einen Host gelten. Mit `scope: "path"` werden nur die Inhaltstypen gelesen, die zum Startpfad
+passen (`/veranstaltungen/` passt zu `veranstaltung`; ein Startpfad `/` behält alle).
+`discovery: "sitemap_first"` bleibt davon unberührt. Der Betrieb kann das Lesen abschalten
+(`SITE_APIS_ENABLED`, `GET /v1/info`: `features.site_apis`). Ein Eintrag, dessen `final_url`
 die URL eines anderen Eintrags ist, ist eine Weiterleitung auf diese Seite (seine Links
 wiederholen die der Seite): Entfernen Sie die Duplikate des Graphen anhand von `final_url`.
 
@@ -188,8 +210,13 @@ Das Ergebnis jedes Eintrags enthält dann:
 
 - `metadata`: Titel, Autoren, Datumsangaben, Schlagwörter und Bilder; die Lizenz als `license` (der
   beste Kandidat, mit `id` wie `CC-BY-4.0`, `url`, `source` und `confidence`) und `licenses` (alle
-  gefundenen); und `lrmi`, die LRMI-Felder der Seite (`educationalLevel`, `learningResourceType`,
-  `audience`, `typicalAgeRange`, `teaches` und weitere).
+  gefundenen); `lrmi`, die LRMI-Felder der Seite (`educationalLevel`, `learningResourceType`,
+  `audience`, `typicalAgeRange`, `teaches` und weitere); und `places`, bis zu 5 Orte, die die Seite
+  selbst nennt (`kind`, `name`, `street`, `postal_code`, `locality`, `region`, `country`,
+  `latitude`, `longitude`), gelesen aus ihren schema.org-Angaben (ein Ort, ein lokales Geschäft,
+  eine Adresse, eine Geoposition, der Ort einer Veranstaltung) und ihren Geo-Meta-Tags
+  (`geo.position`, `ICBM`, `geo.placename`, `geo.region`). Mit `pii` wird ihr Text maskiert, und die
+  Koordinaten entfallen, wenn der Name oder der Adresstext maskiert wurde.
 - `structured.values`: die Felder Ihres Schemas, gelesen aus JSON-LD, Microdata, RDFa, OpenGraph
   und den Meta-Tags der Seite, mit `sources` und `missing`. Siehe
   [Strukturierte Daten](structured-data.md).
@@ -222,7 +249,9 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    Seitenzahl“, lassen Sie „Bereich“ beim Host, wählen Sie bei „So wird die Website gelesen“
    „Schnell: Sitemap zuerst“ (Voreinstellung) oder „Gründlich: Links folgen“, und klicken Sie auf
    „Website-Struktur lesen“.
-2. Der Website-Baum erscheint sofort statt eines Job-Kastens und wächst alle paar Sekunden mit,
+2. Lassen Sie „Feeds und CMS-Schnittstellen lesen“ angehakt: Dann bezieht der Crawl auch die
+   Seiten ein, die die Website in ihren Feeds und über WordPress oder Drupal auflistet (`apis`).
+   Der Website-Baum erscheint sofort statt eines Job-Kastens und wächst alle paar Sekunden mit,
    solange der Crawl läuft; Ihre Häkchen, aufgeklappten Abschnitte und der Filter bleiben. Sein
    Kopf zeigt den Zustand des Jobs, wie viele Abrufe bisher erledigt sind, die fehlgeschlagenen,
    wie lange er läuft (oder lief) und, solange er läuft, „Abbrechen“. „Einzelne Abrufe“ unter dem

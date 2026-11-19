@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
@@ -26,10 +27,12 @@ __all__ = [
     "LINK_TEXT_MAX_CHARS",
     "MAX_SITE_DEPTH",
     "MAX_SITE_PAGES",
+    "ApiFormat",
     "Crawl",
     "LinkKind",
     "LinkRegion",
     "LinkSource",
+    "SiteApis",
     "SiteInfo",
     "SiteLink",
     "SiteNode",
@@ -41,7 +44,9 @@ __all__ = [
     "SitemapEntry",
     "SitemapFormat",
     "SitemapInfo",
+    "SitemapSource",
     "TolerantCrawl",
+    "TolerantSitemapFormat",
 ]
 
 # The widest bounds of a request; the route checks ``SITE_MAX_DEPTH`` and ``SITE_MAX_PAGES``,
@@ -79,9 +84,38 @@ Crawl = Literal[
 # The result-side reader of ``Crawl`` (ruling AU3-R1): a value of a later release is ``listed``
 # (not followed). The crawl itself works with ``Crawl``.
 TolerantCrawl = Annotated[Crawl, unknown_as(Crawl, "listed")]
-SitemapFormat = Literal["urlset", "index", "text", "rss", "atom", "absent"]
+# Where a sitemap item came from besides robots.txt and the guessed addresses: a feed, the
+# WordPress REST API or Drupal JSON:API of the site (package 26).
+SitemapSource = Literal["robots", "guess", "feed", "wordpress", "drupal"]
+# The API list a sitemap item stands for: WordPress post types, one post type's posts, Drupal's
+# index and one node type's nodes.
+ApiFormat = Literal["wordpress_types", "wordpress_posts", "drupal_index", "drupal_nodes"]
+SitemapFormat = Literal[
+    "urlset",
+    "index",
+    "text",
+    "rss",
+    "atom",
+    "absent",
+    "wordpress_types",
+    "wordpress_posts",
+    "drupal_index",
+    "drupal_nodes",
+]
+# The result-side readers: a format of a later release is a plain ``urlset``, a source of a
+# later release is null.
+TolerantSitemapFormat = Annotated[SitemapFormat, unknown_as(SitemapFormat, "urlset")]
+_SOURCES: frozenset[str] = frozenset(get_args(SitemapSource))
 ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly", "never"]
 _CHANGEFREQS: frozenset[str] = frozenset(get_args(ChangeFreq))
+
+
+def _known_source(value: object) -> object:
+    """A sitemap source of a later release is None."""
+    return None if isinstance(value, str) and value not in _SOURCES else value
+
+
+TolerantSitemapSource = Annotated[SitemapSource | None, BeforeValidator(_known_source)]
 
 
 def _bound_lastmod(value: object) -> object:
@@ -131,6 +165,13 @@ class SiteOptions(BaseModel, strict=True):
         "crawled and its links say `crawl: sitemap_first`; otherwise as `crawl`. Needs "
         "`sitemaps: true` (422 otherwise).",
     )
+    apis: bool = Field(
+        default=True,
+        description="Also read the content lists the site publishes itself: RSS/Atom feeds "
+        "named in the start page's head, the WordPress REST API and Drupal JSON:API (when the "
+        "start page shows them). Each list page counts as a sitemap file, each entry as a "
+        "sitemap entry. Ignored when the operator turned it off.",
+    )
     metadata: bool = Field(default=True, description="Include each page's DOM metadata.")
     cache: bool = Field(
         default=True,
@@ -171,6 +212,9 @@ class SiteNode(BaseModel):
     guessed: bool = False  # a sitemap at a guessed address that robots.txt did not list
     guess: int | None = None  # guessed: its position in GUESSED_SITEMAP_PATHS
     part: int | None = None  # sitemap_part: which part (2 and up) of its sitemap
+    source: SitemapSource | None = None  # sitemap: where its address came from
+    api: ApiFormat | None = None  # sitemap: the API list it stands for
+    page: int | None = None  # an API list page: which page, from 1
 
 
 class SiteScope(BaseModel):
@@ -179,6 +223,20 @@ class SiteScope(BaseModel):
 
     host: str
     path_prefix: str | None
+
+
+class SiteApis(BaseModel):
+    """The feeds and CMS APIs the start page names (package 26)."""
+
+    feeds: list[str] = Field(
+        default=[], description="RSS and Atom feeds of the site's host named in the head."
+    )
+    wordpress: str | None = Field(
+        default=None, description="The WordPress REST API root, ending in `/`."
+    )
+    drupal: str | None = Field(
+        default=None, description="The Drupal JSON:API root (`<origin>/jsonapi`)."
+    )
 
 
 class SiteLink(BaseModel):
@@ -230,6 +288,19 @@ class SitemapEntry(BaseModel):
         "(`page_types.guess_type`), without fetching the page; null for a URL that says nothing "
         "(and for sitemaps read before this field existed).",
     )
+    title: str | None = Field(
+        default=None,
+        description="The entry's title when the source gives one (feeds and CMS APIs), "
+        "whitespace collapsed, at most 200 characters.",
+    )
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _bounded_title(cls, value: object) -> object:
+        if isinstance(value, str):
+            # Slice first: collapsing a megabyte of text would build a word list that long.
+            return " ".join(value[: 4 * LINK_TEXT_MAX_CHARS].split())[:LINK_TEXT_MAX_CHARS] or None
+        return value
 
     @field_validator("lastmod", mode="before")
     @classmethod
@@ -282,9 +353,16 @@ class SitemapChild(BaseModel):
 class SitemapInfo(BaseModel):
     """What one sitemap item (or part) holds."""
 
-    format: SitemapFormat = Field(
-        description="`urlset`, `index`, `text`, `rss`, `atom`, or `absent` (a guessed "
-        "address that does not exist)."
+    format: TolerantSitemapFormat = Field(
+        description="`urlset`, `index`, `text`, `rss`, `atom`, `absent` (a guessed address "
+        "that does not exist, or a CMS API the start page names that is locked or off) or an "
+        "API list: `wordpress_types`, `wordpress_posts`, "
+        "`drupal_index`, `drupal_nodes`."
+    )
+    source: TolerantSitemapSource = Field(
+        default=None,
+        description="Where the address came from: `robots`, `guess`, `feed`, `wordpress` or "
+        "`drupal`; null for sitemaps read before this field existed.",
     )
     guessed: bool = Field(
         default=False,
@@ -330,3 +408,6 @@ class SiteInfo(BaseModel):
         description="robots.txt: the sitemap URLs it listed, or the first one guessed.",
     )
     sitemap: SitemapInfo | None = None
+    apis: SiteApis | None = Field(
+        default=None, description="The start page only: the feeds and APIs its head names."
+    )

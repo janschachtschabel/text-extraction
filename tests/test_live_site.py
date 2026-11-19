@@ -66,8 +66,23 @@ def sitemap(
     role: str = "sitemap",
     format: str = "urlset",
     guessed: bool = False,
+    source: str | None = None,
+    titled: bool = False,
+    prefix: str = "e",
     **result: Any,
 ) -> Any:
+    """A sitemap item; ``source`` and the entries' titles (``titled``) only when given, as an
+    older service sends neither."""
+    info: dict[str, Any] = {
+        "format": format,
+        "guessed": guessed,
+        "entries": [
+            {"loc": f"{START}{prefix}{n}", **({"title": f"Titel {n}"} if titled else {})}
+            for n in range(entries)
+        ],
+    }
+    if source is not None:
+        info["source"] = source
     return {
         "index": index,
         "url": f"{START}sitemap.xml",
@@ -81,11 +96,7 @@ def sitemap(
                     "role": role,
                     "depth": 0,
                     "links": None,
-                    "sitemap": {
-                        "format": format,
-                        "guessed": guessed,
-                        "entries": [{"loc": f"{START}e{n}"} for n in range(entries)],
-                    },
+                    "sitemap": info,
                 },
             },
         },
@@ -165,6 +176,9 @@ def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:
         tree_urls=8,
         type_open=5,
         type_open_pct=62.5,
+        titled=0,
+        titled_pct=0.0,
+        api_files=0,
         median_convert_ms=200,
         crawl_seconds=65.5,
         regions={"nav": 3, "main": 1, "footer": 1, "none": 1},
@@ -189,16 +203,16 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     )
     assert (
         "| Site | State | Duration | Items | Pages | Pages ok | Failed | Sitemap files "
-        "| Parts | Entries | sitemap | tree URLs | type open | type open % "
-        "| median convert ms | crawl s |"
+        "| Parts | Entries | sitemap | tree URLs | type open | type open % | titled | titled % "
+        "| API files | median convert ms | crawl s |"
     ) in lines
     assert (
         "| lernen.example.org | completed | 65.5 s | 6 | 3 | 2 | 1 | 1 | 1 | 6 "
-        "| listed | 8 | 5 | 62.5 | 200 | 65.5 |"
+        "| listed | 8 | 5 | 62.5 | 0 | 0.0 | 0 | 200 | 65.5 |"
     ) in lines
     refused = (
         "| down.example | refused: HTTP 503 internal_error | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 "
-        "| none | 0 | 0 | - | - | - |"
+        "| none | 0 | 0 | - | 0 | - | 0 | - | - |"
     )
     assert refused in lines
     # The histograms: a column per value that occurs, in the API's order, `none` last.
@@ -242,10 +256,33 @@ def test_tally_measures_a_site_without_a_sitemap_and_one_with_a_guessed_sitemap(
 
 
 def test_an_older_services_items_without_the_new_fields_are_tallied() -> None:
-    report = tally(START, {"state": "completed"}, [robots(0), page(1, [])])
+    report = tally(START, {"state": "completed"}, [robots(0), page(1, []), sitemap(2, 2)])
 
-    assert (report.sitemap, report.crawl_seconds, report.median_convert_ms) == ("none", None, None)
-    assert report.tree_urls == 1
+    assert (report.sitemap, report.crawl_seconds, report.median_convert_ms) == (
+        "listed",
+        None,
+        None,
+    )
+    assert report.tree_urls == 3
+    assert (report.titled, report.titled_pct, report.api_files) == (0, 0.0, 0)
+
+
+def test_tally_counts_titled_tree_urls_and_api_files() -> None:
+    items = [
+        robots(0, [f"{START}sitemap.xml"]),
+        sitemap(1, 3, source="robots", prefix="s"),
+        sitemap(2, 2, format="rss", source="feed", titled=True, prefix="f"),
+        sitemap(3, 4, format="wordpress_posts", source="wordpress", titled=True, prefix="w"),
+        sitemap(4, 1, role="sitemap_part", source="wordpress", titled=True, prefix="v"),
+        sitemap(5, 0, format="absent", source="drupal"),
+    ]
+
+    report = tally(START, JOB, items)
+
+    # 10 tree URLs, 7 of them titled from a list; the part is no file of its own.
+    assert (report.tree_urls, report.titled, report.titled_pct) == (10, 7, 70.0)
+    assert report.api_files == 3
+    assert tally(START, JOB, []).titled_pct is None
 
 
 def fake_service(
@@ -530,3 +567,15 @@ def test_a_poll_is_retried_once_on_a_transport_error() -> None:
 
     assert report == tally(START, JOB, ITEMS)
     assert report.error is None
+
+
+def test_feed_and_api_items_do_not_count_as_a_sitemap() -> None:
+    items = [
+        robots(0),
+        sitemap(1, 0, format="absent", guessed=True),
+        sitemap(2, 2, format="rss", source="feed", titled=True, prefix="f"),
+        sitemap(3, 4, format="wordpress_posts", source="wordpress", titled=True, prefix="w"),
+        page(4, [], page_type="home"),
+    ]
+
+    assert tally(START, JOB, items).sitemap == "none"
