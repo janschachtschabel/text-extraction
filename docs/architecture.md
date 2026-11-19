@@ -3721,7 +3721,11 @@ a generated key and answers `/healthz` and a JSON search.
 - **R25-8 a volume of its own.** `searxng` mounts only the volume `searxng-config`, read-only
   at `/etc/searxng`, so it never sees the secrets. `init` mounts it at `/searxng`, which the API
   image creates owned by 10001 (as `/secrets`), so a fresh volume takes that owner and init can
-  write it. When it cannot (an old compose file without the volume), init logs
+  write it. `searxng` mounts it with `nocopy`: Docker fills an empty volume from the image of every
+  container created on it, the root's owner included, and compose creates `searxng` before `init`
+  has run, so SearXNG's `/etc/searxng` (owned 977) took the volume and init's chmod failed with
+  EPERM (image.yml, fix round 2). `secrets` is safe: no other image with that folder has another
+  owner. When it cannot (an old compose file without the volume), init logs
   `init_searxng_settings_failed` and still exits 0, so only the search breaks. The first build
   used a subpath of the volume `secrets`; that needs Docker Engine 26, and an older daemon would
   have mounted every secret into SearXNG. `searxng` depends on `init` with `restart: true`, so a

@@ -297,9 +297,9 @@ services apart from `init` (a test keeps the two in step).
 - Every service except the one-shot ones restarts `unless-stopped`.
 - **Web search (package 25):** the service `searxng` runs SearXNG's own image (pinned tag, no
   published port, only on `backend`, read-only root, user 977, all capabilities dropped). It
-  mounts only its own volume `searxng-config`, read-only at `/etc/searxng`, never the secrets:
-  `init` renders `settings.yml` there from the image's `data/searxng-settings.yml` on every
-  start, with the key `searxng-secret` that it keeps in the volume `secrets`. Edits to that file
+  mounts only its own volume `searxng-config`, read-only at `/etc/searxng` and with `nocopy` (so
+  the volume keeps `init`'s owner), never the secrets: `init` renders `settings.yml` there from
+  the image's `data/searxng-settings.yml` on every start, with the key `searxng-secret` that it keeps in the volume `secrets`. Edits to that file
   do not survive the next start, and `searxng` restarts whenever `init` ran again
   (`restart: true`). The search needs 0.1.13 or later (the `/searxng` mount point and the `init`
   that writes it): with an older image `searxng` gets no settings and does not start, so publish

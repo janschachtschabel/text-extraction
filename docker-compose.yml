@@ -115,8 +115,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # nocopy: Docker fills an empty volume from the image of each container created on it (the
+    # owner of the volume root included), and compose creates this container before init runs;
+    # without it, SearXNG's /etc/searxng (owned 977) would take the volume from init's user.
     volumes:
-      - searxng-config:/etc/searxng:ro
+      - type: volume
+        source: searxng-config
+        target: /etc/searxng
+        read_only: true
+        volume:
+          nocopy: true
     depends_on:
       init:
         condition: service_completed_successfully

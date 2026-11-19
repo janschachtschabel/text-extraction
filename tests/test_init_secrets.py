@@ -1,12 +1,15 @@
 """text-extraction-init: the one-shot service of the root docker-compose.yml that creates the
 stack's secrets on its first start (Hostinger rule: the first deploy works without variables)."""
 
+import errno
 import hashlib
 import json
+import os
 import re
 import stat
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -233,6 +236,28 @@ def test_domain_refused(domain: str) -> None:
 
     assert problem is not None
     assert "host name" in problem
+
+
+def test_a_searxng_folder_owned_by_another_user_is_reported(
+    dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # chmod of a folder owned by another user fails with EPERM ("Operation not permitted"), as
+    # on a searxng-config volume that SearXNG's image (owner 977) populated before init ran.
+    secrets_dir, searxng_dir = dirs
+    real_chmod = os.chmod
+
+    def chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == searxng_dir:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))
+        real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+    result = _ensure(dirs)
+
+    assert result.searxng_problem == f"{searxng_dir}: Operation not permitted"
+    assert not (searxng_dir / "settings.yml").exists()
+    assert sorted(p.name for p in secrets_dir.iterdir()) == sorted(FILES)
 
 
 def test_main_creates_the_secrets_and_logs_the_key_once(

@@ -197,13 +197,26 @@ def test_searxng_reads_only_its_own_config_volume() -> None:
     # A volume of its own, never the secrets volume: a volume subpath needs Docker Engine 26, and
     # an older daemon would mount every secret into SearXNG.
     searxng = _root_services()["searxng"]
-    assert searxng["volumes"] == ["searxng-config:/etc/searxng:ro"]
+    # nocopy: Docker fills an empty named volume from the image of every container created on
+    # it, the volume root's owner included. compose creates searxng before init has run, so
+    # without nocopy SearXNG's image folder (owned 977) would take the volume from init (10001),
+    # and init's chmod would fail with EPERM (image.yml run 44444274061).
+    assert searxng["volumes"] == [
+        {
+            "type": "volume",
+            "source": "searxng-config",
+            "target": "/etc/searxng",
+            "read_only": True,
+            "volume": {"nocopy": True},
+        }
+    ]
     assert "subpath" not in _text()
     mounting = sorted(
         name
         for name, service in _root_services().items()
         for volume in service.get("volumes", [])
-        if str(volume).startswith("searxng-config:")
+        if (volume.get("source") if isinstance(volume, dict) else volume.split(":", 1)[0])
+        == "searxng-config"
     )
     assert mounting == ["init", "searxng"]
     assert "searxng-config" in _load(ROOT_FILE)["volumes"]

@@ -147,6 +147,8 @@ def test_image_check_starts_the_root_files_searxng() -> None:
     run = step["run"]
     assert "docker compose up -d --wait" in run
     assert 'ls -A /etc/searxng)" = settings.yml' in run
+    # The volume keeps init's owner: searxng's nocopy mount does not fill it from its image.
+    assert 'stat -c %u /etc/searxng)" = 10001' in run
     assert "ultrasecretkey" in run
     assert "/healthz" in run
     assert "search?q=x&format=json" in run
