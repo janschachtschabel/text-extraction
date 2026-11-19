@@ -372,6 +372,7 @@
   "warning.chunking_fallback_recursive": "Die Chunking-Strategie konnte nicht laufen: recursive wurde verwendet.",
   "warning.image_not_described": "Ein Bild wurde übersprungen oder nicht beschrieben: Seine Beschreibung ist leer.",
   "warning.sitemap_not_found": "Unter einer erratenen Adresse liegt keine Sitemap.",
+  "warning.site_api_not_found": "Die WordPress- oder Drupal-Schnittstelle der Website ist gesperrt oder abgeschaltet.",
   "warning.sitemap_truncated": "Die Sitemap-Datei überschritt ihre Größengrenze: die Einträge vor dem Schnitt.",
   "warning.sitemap_urls_truncated": "Der Crawl hat SITE_MAX_SITEMAP_URLS erreicht: die ersten Einträge.",
   "warning.sitemap_files_truncated": "Mehr Sitemap-Dateien als SITE_MAX_SITEMAP_FILES: die ersten.",

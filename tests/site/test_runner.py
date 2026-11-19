@@ -2062,17 +2062,77 @@ async def test_api_401_and_html_200() -> None:
     assert await crawl.state(job_id) == "completed"
     assert [item.url for item in items] == [ROOT, ROBOTS, TYPES, JSONAPI, f"{SITE}/one.xml"]
     locked, login = items[2], items[3]
-    for item, code in ((locked, ErrorCode.TARGET_HTTP_ERROR), (login, ErrorCode.CONVERSION_FAILED)):
-        assert item.result is not None
-        assert item.result.status == "failed"
-        assert item.result.error is not None
-        assert (item.result.error.code, item.result.error.retryable) == (code, False)
-        assert site(item).role == "sitemap"
+    # A locked API root is absent, like a guessed sitemap that is not there (R26-2 amendment).
+    assert locked.result is not None
+    assert (locked.result.status, locked.result.error) == ("success", None)
     assert data(locked).upstream_status == 401
+    assert data(locked).warnings == ["site_api_not_found"]
+    assert (sitemap_of(locked).format, sitemap_of(locked).source) == ("absent", "wordpress")
+    assert sitemap_of(locked).entries == sitemap_of(locked).children == []
+    assert login.result is not None
+    assert login.result.status == "failed"
+    assert login.result.error is not None
+    assert (login.result.error.code, login.result.error.retryable) == (
+        ErrorCode.CONVERSION_FAILED,
+        False,
+    )
+    assert site(login).role == "sitemap"
     for item in (items[0], items[1], items[4]):
         assert item.result is not None
         assert item.result.status == "success"
     assert [e.loc for e in sitemap_of(items[4]).entries] == [f"{SITE}/x"]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 410])
+@scenario
+async def test_api_root_not_there_is_absent(status: int) -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, head=WP_HEAD + DRUPAL_HEAD),
+            TYPES: fetched(TYPES, "{}", status=status, content_type="application/json"),
+            JSONAPI: fetched(JSONAPI, "{}", status=status, content_type="application/json"),
+        }
+    )
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, TYPES, JSONAPI]
+    for item, source in ((items[1], "wordpress"), (items[2], "drupal")):
+        assert item.result is not None
+        assert (item.result.status, item.result.error) == ("success", None)
+        assert data(item).warnings == ["site_api_not_found"]
+        assert (sitemap_of(item).format, sitemap_of(item).source) == ("absent", source)
+        assert sitemap_of(item).guessed is False
+
+
+@scenario
+async def test_api_list_not_there_still_fails() -> None:
+    """Only a root is absent: a content type's list that answers 404 fails as before, and a
+    root that answers 500 fails, retryable."""
+    answers = wp_site(1)
+    answers[wp_list("posts")] = fetched(wp_list("posts"), "{}", status=404)
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+    await crawl.crawl()
+    listed = (await crawl.items(job_id))[2]
+    assert listed.result is not None
+    assert listed.result.status == "failed"
+    assert listed.result.error is not None
+    assert listed.result.error.code == ErrorCode.TARGET_HTTP_ERROR
+
+    broken = Crawl({ROOT: page(ROOT, head=WP_HEAD), TYPES: fetched(TYPES, "", status=500)})
+    job_id = await broken.start(depth=0, sitemaps=False)
+    await broken.crawl()
+    types = (await broken.items(job_id))[1]
+    assert types.result is not None
+    assert types.result.status == "failed"
+    assert types.result.error is not None
+    assert (types.result.error.code, types.result.error.retryable) == (
+        ErrorCode.TARGET_HTTP_ERROR,
+        True,
+    )
 
 
 @scenario

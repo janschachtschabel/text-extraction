@@ -107,8 +107,11 @@ Typ `wordpress_posts` (100 Einträge je Seite); Drupal JSON:API (erkannt an drup
 `drupal_nodes` (50 Einträge je Seite). Ihre Einträge tragen zusätzlich einen `title` (ebenso die
 Einträge eines Feeds in einer gewöhnlichen Sitemap), und ihr Typ stammt vom Inhaltstyp. Jede
 Listenseite zählt als Sitemap-Datei und jeder Eintrag als Sitemap-Eintrag
-(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). Antwortet eine Liste mit 401, 403 oder 404,
-scheitert nur dieser Eintrag; robots.txt, die TDM-Prüfungen und die Pausen zwischen Anfragen an
+(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). Antworten die WordPress-Typen oder
+Drupals `/jsonapi` mit 401, 403, 404 oder 410 (die Schnittstelle ist gesperrt oder abgeschaltet),
+ist dieser Eintrag `success` mit `format: "absent"` und der Warnung `site_api_not_found`;
+antwortet die Liste eines Inhaltstyps so, scheitert nur dieser Eintrag (`target_http_error`).
+Hinter der letzten Seite einer WordPress-Liste (eine 400) endet die Liste einfach. robots.txt, die TDM-Prüfungen und die Pausen zwischen Anfragen an
 einen Host gelten. Mit `scope: "path"` werden nur die Inhaltstypen gelesen, die zum Startpfad
 passen (`/veranstaltungen/` passt zu `veranstaltung`; ein Startpfad `/` behält alle).
 `discovery: "sitemap_first"` bleibt davon unberührt. Der Betrieb kann das Lesen abschalten

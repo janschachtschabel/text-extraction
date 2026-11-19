@@ -47,6 +47,24 @@ def test_drupal_markers(head: str, body: str) -> None:
     assert detect(head, body).drupal == "https://ex.org/jsonapi"
 
 
+@pytest.mark.parametrize(
+    ("generator", "expected"),
+    [
+        ("Drupal 7 (http://drupal.org)", None),
+        ("Drupal 6", None),
+        ("Drupal 8 (https://www.drupal.org)", "https://ex.org/jsonapi"),
+        ("Drupal 11", "https://ex.org/jsonapi"),
+        ("Drupal", "https://ex.org/jsonapi"),
+    ],
+)
+def test_drupal_before_8_has_no_jsonapi(generator: str, expected: str | None) -> None:
+    """JSON:API came with Drupal 8: a generator naming Drupal 1-7 asks for no index."""
+    head = f'<meta name="generator" content="{generator}">'
+    assert detect(head).drupal == expected
+    old_with_marker = detect(head, '<div data-drupal-selector="x"></div>').drupal
+    assert old_with_marker == expected
+
+
 def test_plain_page_is_no_drupal() -> None:
     assert detect("<title>x</title>", "<p>hello</p>").drupal is None
 

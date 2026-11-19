@@ -103,8 +103,11 @@ JSON:API (found by drupalSettings, `data-drupal` or the generator) gives `drupal
 (`/jsonapi`) and, for each `node--*` type, `drupal_nodes` (50 entries a page). Their entries carry
 a `title` as well (so do the entries of a feed inside an ordinary sitemap), and their type comes
 from the content type. Each list page counts as a sitemap file and each entry as a sitemap entry
-(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). A list that answers 401, 403 or 404 fails
-that item only; robots.txt, the TDM checks and the pauses between requests to a host apply. With
+(`SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`). When the WordPress types or the Drupal
+`/jsonapi` answer 401, 403, 404 or 410 (the interface is locked or switched off), that item is
+`success` with `format: "absent"` and the warning `site_api_not_found`; a content type's list
+that answers so fails that item only (`target_http_error`). Past the last page of a WordPress
+list (a 400) the list simply ends. robots.txt, the TDM checks and the pauses between requests to a host apply. With
 `scope: "path"` only the content types that match the start path are read (`/veranstaltungen/`
 matches `veranstaltung`; a start path of `/` keeps all). `discovery: "sitemap_first"` is not
 changed by it. The operator can switch the reading off (`SITE_APIS_ENABLED`, `GET /v1/info`:

@@ -337,7 +337,8 @@ add a note of its own):
   skipped or got no description while the status stays: not fetched, refused, not a type the
   model takes, too large, or the endpoint refused it or found nothing to describe; V-S11).
 - Site structure (items of a `site` job): `sitemap_not_found` (a guessed sitemap address
-  answered 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
+  answered 404 or 410), `site_api_not_found` (the WordPress types or Drupal JSON:API index the
+  start page names answered 401, 403, 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
   its inflate or by its time limit, or its children did not fit the item; the entries before the
   cut), `sitemap_urls_truncated` (`SITE_MAX_SITEMAP_URLS` reached: the first entries),
   `sitemap_files_truncated` (`SITE_MAX_SITEMAP_FILES` reached: the further sitemaps are not
@@ -3642,6 +3643,10 @@ page names itself.
   `X-WP-TotalPages`) ends it as `success` without entries. A 401/403/404 answer fails that item
   (`target_http_error`, not retryable) and the crawl goes on. robots.txt, the TDM checks and the
   per-host pauses apply to these fetches as to any other.
+  *Amendment (final review, 2026-11-19):* a 401/403/404/410 on a root item (`wordpress_types`,
+  `drupal_index`) is not a failure: the item is `success`, `format: absent`, with the warning
+  `site_api_not_found`, like a guessed sitemap that is not there; a content type's list still
+  fails. A generator naming Drupal 1-7 appends no index (JSON:API came with Drupal 8).
 - **R26-3** `scope: path`: only content types whose name matches a segment of the start URL's
   path prefix (`path_matches`; `/veranstaltungen/` matches `veranstaltung`); `scope: host`: all
   content types except `EXCLUDED_WP_TYPES`.

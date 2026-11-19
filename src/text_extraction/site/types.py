@@ -355,7 +355,8 @@ class SitemapInfo(BaseModel):
 
     format: TolerantSitemapFormat = Field(
         description="`urlset`, `index`, `text`, `rss`, `atom`, `absent` (a guessed address "
-        "that does not exist) or an API list: `wordpress_types`, `wordpress_posts`, "
+        "that does not exist, or a CMS API the start page names that is locked or off) or an "
+        "API list: `wordpress_types`, `wordpress_posts`, "
         "`drupal_index`, `drupal_nodes`."
     )
     source: TolerantSitemapSource = Field(

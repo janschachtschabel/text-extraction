@@ -327,6 +327,7 @@ def test_result_documents_the_site_warnings() -> None:
 
     for warning in (
         "sitemap_not_found",
+        "site_api_not_found",
         "sitemap_truncated",
         "sitemap_urls_truncated",
         "sitemap_files_truncated",

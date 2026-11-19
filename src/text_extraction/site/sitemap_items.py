@@ -41,8 +41,10 @@ not the other way round:
 - **API lists** (package 26): a sitemap item with ``node.api`` (appended by the start page) is
   fetched as a sitemap but to at most ``API_MAX_BYTES`` (4 MiB; JSON is parsed whole, so a
   larger answer fails ``too_large``), skips the guess logic, and fails on a status other than
-  2xx as a sitemap does, except that a 400 on a WordPress list page after the first ends the
-  list (``success`` without entries). It is parsed by ``site/apis.py`` on the same pool under
+  2xx as a sitemap does, with two exceptions: a WordPress types or Drupal index item answered
+  401, 403, 404 or 410 is ``success``, ``format: absent``, with ``site_api_not_found`` (as a
+  guessed sitemap that is not there), and a 400 on a WordPress list page after the first ends
+  the list (``success`` without entries). It is parsed by ``site/apis.py`` on the same pool under
   the same deadline (a 200 that is no JSON fails ``conversion_failed``); grants, parts and
   warnings are a sitemap's. A WordPress types or Drupal index item lists one child per content
   type (``scope: path``: only types whose name matches the path prefix), one level deeper; a
@@ -115,6 +117,7 @@ __all__ = [
     "SITEMAP_PROBE_MAX_BYTES",
     "SITEMAP_TRUNCATED_WARNING",
     "SITEMAP_URLS_TRUNCATED_WARNING",
+    "SITE_API_NOT_FOUND_WARNING",
     "SITE_MEMORY_GUARD_WARNING",
     "SitemapItems",
     "site_result",
@@ -130,6 +133,7 @@ SITEMAP_PROBE_MAX_BYTES: Final = 65_536
 GUESSED_SITEMAP_PATHS: Final = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 SITEMAP_NOT_FOUND_WARNING = "sitemap_not_found"
+SITE_API_NOT_FOUND_WARNING = "site_api_not_found"
 SITEMAP_TRUNCATED_WARNING = "sitemap_truncated"
 SITEMAP_URLS_TRUNCATED_WARNING = "sitemap_urls_truncated"
 SITEMAP_FILES_TRUNCATED_WARNING = "sitemap_files_truncated"
@@ -144,6 +148,9 @@ _SITEMAP_NO_ROOT_MESSAGE = "The sitemap was read until its time limit without re
 _SITEMAP_TIMEOUT_MESSAGE = "The sitemap was read until its time limit: the entries before it."
 _SITEMAP_CUT_MESSAGE = "The sitemap was cut: the entries before the cut."
 
+# The API items that list an API's content types, and the answers that make them absent.
+_API_ROOTS: Final[frozenset[ApiFormat | None]] = frozenset({"wordpress_types", "drupal_index"})
+_API_ABSENT_STATUSES: Final = frozenset({401, 403, 404, 410})
 # The API items that are one page of a content list, whose one child is the next page.
 _API_LISTS: Final[frozenset[ApiFormat | None]] = frozenset({"wordpress_posts", "drupal_nodes"})
 # How long past the item's deadline the runner waits for a parse that stops itself at it.
@@ -447,6 +454,12 @@ class SitemapItems:
             more, outcome = await self._guess_next(job, item, url, node)
             absent = [SITEMAP_NOT_FOUND_WARNING, *more]
             return Envelope(status="success", data=result(info, absent)), outcome
+        if node.api in _API_ROOTS and fetched.status in _API_ABSENT_STATUSES:
+            # An API the page names but that is locked or not there (a security plugin, JSON:API
+            # off): absent, as a guessed sitemap that is not there (R26-2 amendment).
+            info = SitemapInfo(format="absent", source=node.source)
+            absent = [SITE_API_NOT_FOUND_WARNING]
+            return Envelope(status="success", data=result(info, absent)), _Outcome(links=[])
         if node.api == "wordpress_posts" and (node.page or 1) > 1 and fetched.status == 400:
             # Past a list's last page (``rest_post_invalid_page_number``: a multiple of 100
             # posts and no ``X-WP-TotalPages``): the list ends here, nothing failed.

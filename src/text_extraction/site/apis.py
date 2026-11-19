@@ -69,7 +69,9 @@ _NAMESPACE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_
 _FEED_TYPES = frozenset({"application/rss+xml", "application/atom+xml"})
 _LINK_HEADER_ITEM = re.compile(r"<([^>]*)>([^,<]*)")
 _REL_PARAM = re.compile(r'rel\s*=\s*(?:"([^"]*)"|([^\s;,]+))', re.IGNORECASE)
-_DRUPAL_GENERATOR = re.compile(r"^\s*drupal\b", re.IGNORECASE)
+_DRUPAL_GENERATOR = re.compile(r"^\s*drupal\b(?:\s+(?P<major>\d{1,4})\b)?", re.IGNORECASE)
+# The first Drupal version with JSON:API (a module from 8, in core from 8.7).
+_FIRST_JSONAPI_DRUPAL = 8
 
 
 def detect_site_apis(soup: BeautifulSoup, base_url: str, headers: Mapping[str, str]) -> SiteApis:
@@ -119,14 +121,20 @@ def _wordpress_from_header(value: str, base: str, host: str) -> str | None:
 
 
 def _drupal(soup: BeautifulSoup, base_url: str, host: str) -> str | None:
+    generators = [
+        match
+        for tag in soup.find_all("meta", attrs={"name": re.compile("^generator$", re.I)})
+        if isinstance(tag, Tag) and (match := _DRUPAL_GENERATOR.match(attr(tag, "content")))
+    ]
+    if any(
+        match["major"] is not None and int(match["major"]) < _FIRST_JSONAPI_DRUPAL
+        for match in generators
+    ):
+        return None  # Drupal 1-7 has no JSON:API
     marked = (
-        soup.find("script", string=re.compile("drupalSettings")) is not None
+        bool(generators)
+        or soup.find("script", string=re.compile("drupalSettings")) is not None
         or soup.select_one("[data-drupal-selector]") is not None
-        or any(
-            _DRUPAL_GENERATOR.match(attr(tag, "content"))
-            for tag in soup.find_all("meta", attrs={"name": re.compile("^generator$", re.I)})
-            if isinstance(tag, Tag)
-        )
     )
     if not marked:
         return None
