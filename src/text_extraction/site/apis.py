@@ -22,6 +22,7 @@ from text_extraction.site.types import ApiFormat, SiteApis, SitemapChild, Sitema
 from text_extraction.site.urls import normalize_url, site_host
 
 __all__ = [
+    "API_MAX_BYTES",
     "DRUPAL_PAGE_LIMIT",
     "EXCLUDED_WP_TYPES",
     "MAX_API_TYPES",
@@ -37,6 +38,9 @@ __all__ = [
     "wordpress_list_url",
 ]
 
+# The most bytes of one API answer that are read: it is parsed whole (JSON has no partial
+# read), so a larger answer fails ``too_large`` before it is parsed.
+API_MAX_BYTES = 4 * 1024 * 1024
 MAX_FEEDS = 3
 WP_PER_PAGE = 100
 DRUPAL_PAGE_LIMIT = 50

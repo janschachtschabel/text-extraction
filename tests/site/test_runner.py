@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import replace
 from functools import wraps
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -34,7 +35,8 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.site import runner as runner_module
-from text_extraction.site.apis import wordpress_list_url
+from text_extraction.site import sitemap_items as sitemap_items_module
+from text_extraction.site.apis import API_MAX_BYTES, wordpress_list_url
 from text_extraction.site.runner import SiteRunner
 from text_extraction.site.store import SiteStore
 from text_extraction.site.types import (
@@ -2102,6 +2104,51 @@ async def test_api_caps() -> None:
     assert "sitemap_urls_truncated" in data(second).warnings
     assert second.result is not None
     assert second.result.status == "partial"
+
+
+class CappingFetcher(FakeFetcher):
+    """A fake fetcher that honours ``max_bytes`` and ``truncate`` as the real one does."""
+
+    async def fetch(self, url: str, **options: Any) -> FetchResult:
+        answer = await super().fetch(url, **options)
+        limit = options.get("max_bytes")
+        if limit is not None and len(answer.content) > limit:
+            if not options.get("truncate"):
+                raise FetchError(
+                    ErrorCode.TOO_LARGE,
+                    "The response body is larger than the limit.",
+                    upstream_status=answer.status,
+                )
+            return replace(answer, content=answer.content[:limit], truncated=True)
+        return answer
+
+
+@scenario
+async def test_api_body_over_its_cap_fails_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_parse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("an API body over its cap is never parsed")
+
+    monkeypatch.setattr(sitemap_items_module, "_read_api", no_parse)
+    huge = b"[" + b"{}," * (API_MAX_BYTES // 3 + 1) + b"{}]"
+    answers = {
+        ROOT: page(ROOT, head=WP_HEAD),
+        TYPES: fetched(TYPES, huge, content_type="application/json"),
+    }
+    crawl = Crawl(fetcher=CappingFetcher(answers))
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, TYPES]
+    types = items[1]
+    assert types.result is not None
+    assert types.result.status == "failed"
+    assert types.result.error is not None
+    assert types.result.error.code == ErrorCode.TOO_LARGE
+    assert site(types).role == "sitemap"
+    calls = [options for url, options in crawl.fetcher.calls if url == TYPES]
+    assert [(c["max_bytes"], c["truncate"]) for c in calls] == [(API_MAX_BYTES, False)]
 
 
 @scenario

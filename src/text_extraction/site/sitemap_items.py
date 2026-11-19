@@ -39,8 +39,9 @@ not the other way round:
   and only the kept ones are followed. A child refused by ``SITE_MAX_SITEMAP_FILES`` says
   ``max_files``, with ``sitemap_files_truncated``.
 - **API lists** (package 26): a sitemap item with ``node.api`` (appended by the start page) is
-  fetched as a sitemap, skips the guess logic, fails on a status other than 2xx as a sitemap
-  does, and is parsed by ``site/apis.py`` on the same pool under the same deadline (a 200 that
+  fetched as a sitemap but to at most ``API_MAX_BYTES`` (4 MiB, a larger answer fails
+  ``too_large``: JSON is parsed whole), skips the guess logic, fails on a status other than 2xx
+  as a sitemap does, and is parsed by ``site/apis.py`` on the same pool under the same deadline (a 200 that
   is no JSON fails ``conversion_failed``); grants, parts and warnings are a sitemap's. A
   WordPress types or Drupal index item lists one child per content type (``scope: path``: only
   types whose name matches the path prefix), one level deeper; a list page's one child is its
@@ -75,6 +76,7 @@ from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
 from text_extraction.site.apis import (
+    API_MAX_BYTES,
     api_type_hint,
     parse_drupal_index,
     parse_drupal_nodes,
@@ -387,12 +389,19 @@ class SitemapItems:
     ) -> tuple[Envelope[ExtractResult], _Outcome]:
         settings = self._settings
         site = SiteInfo(role="sitemap", depth=node.depth, parent=node.parent)
+        # An API answer is parsed whole (JSON has no partial read): one over its cap fails
+        # ``too_large`` in the fetch instead of being cut.
+        api = node.api is not None
         raw = await self._pipeline.fetch_raw(
             url,
             job_principal(job),
             job.options.compliance,
-            max_bytes=settings.site_sitemap_max_bytes,
-            truncate=True,
+            max_bytes=(
+                min(API_MAX_BYTES, settings.site_sitemap_max_bytes)
+                if api
+                else settings.site_sitemap_max_bytes
+            ),
+            truncate=not api,
             gate_refusals=gate_refusals,
         )
         if raw.failure is not None:
