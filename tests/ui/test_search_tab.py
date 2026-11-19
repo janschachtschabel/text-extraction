@@ -310,9 +310,9 @@ def test_language_is_preset_to_the_ui_language(language: Language) -> None:
         app = login(client, language=language)
 
     (form,) = app.xpath("//form[@id='search-form']")
-    assert [o.get("value") for o in form.xpath(".//select[@name='language']/option[@selected]")] == [
-        language
-    ]
+    assert [
+        o.get("value") for o in form.xpath(".//select[@name='language']/option[@selected]")
+    ] == [language]
 
 
 def test_all_languages_sends_no_language() -> None:

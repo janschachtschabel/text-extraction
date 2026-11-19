@@ -260,7 +260,7 @@
   "form.search_submit": "Search",
   "hint.search_query": "The words to search for, at most 500 characters.",
   "hint.search_sources": "Tick the sources to ask; with none ticked every source is asked ({setting}).",
-  "hint.search_language": "Wikipedia, Wikibooks, Wikiversity and Wikinews search in this language; preset to the language of this page.",
+  "hint.search_language": "Google, Bing, Wikipedia, Wikibooks, Wikiversity and Wikinews search in this language; WLO holds German material only. Preset to the language of this page.",
   "hint.search_max_results": "How many hits to show, at most {max} ({setting}).",
   "hint.search_time_range": "Only hits from this period, where a source supports it.",
   "hint.search_page": "The page of the hits, from 1 to 10: 2 shows the next hits.",
