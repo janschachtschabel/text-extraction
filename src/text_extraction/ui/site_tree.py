@@ -182,7 +182,8 @@ class SiteTree:
     of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
     ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
     number of origins not tried (`mark_blocked`). ``untyped`` counts the shown URLs that were
-    not fetched (sitemap or linked) and have no page type; ``social`` the social links;
+    not fetched (sitemap or linked) and have no page type, ``titled`` the shown URLs whose title
+    came from a feed or API list (``title_from_list``); ``social`` the social links;
     ``found_counts`` the shown URLs of each kind (``page``, ``sitemap``, ``linked``);
     ``contacted`` the origins of the job's own items (pages, robots.txt and sitemaps, fetched
     or queued) and of their final URLs: the origins the crawl itself contacts."""
@@ -196,6 +197,7 @@ class SiteTree:
     unchecked: tuple[str, ...] = ()
     unchecked_more: int = 0
     untyped: int = 0
+    titled: int = 0
     social: tuple[SocialLink, ...] = ()
     found_counts: Mapping[NodeKind, int] = field(default_factory=dict)
     contacted: frozenset[str] = frozenset()
@@ -390,6 +392,7 @@ class TreeBuilder:
             crawl_mode=self._mode,
             blocked=sum(1 for _, one in shown if one.blocked is not None),
             untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
+            titled=sum(1 for _, one in shown if one.title_from_list),
             social=tuple(self._social.values()),
             found_counts={kind: sum(1 for k, _ in shown if k == kind) for kind in _KINDS},
             contacted=frozenset(self._contacted),

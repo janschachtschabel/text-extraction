@@ -66,6 +66,8 @@ CRAWLS = (
 )
 # The tree is measured without a cap, as the UI would show it with a large ``UI_TREE_MAX_URLS``.
 TREE_MAX_URLS = 100_000
+# The sitemap sources of package 26: feeds and CMS API lists.
+API_SOURCES = frozenset({"feed", "wordpress", "drupal"})
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,9 @@ class SiteReport:
     tree_urls: int = 0  # the URLs of the site tree (`build_tree`)
     type_open: int = 0  # tree URLs not fetched (sitemap or linked) and without a page type
     type_open_pct: float | None = None  # `type_open` as a share of `tree_urls`; None for no URLs
+    titled: int = 0  # tree URLs whose title came from a feed or API list (`title_from_list`)
+    titled_pct: float | None = None  # `titled` as a share of `tree_urls`; None for no URLs
+    api_files: int = 0  # sitemap items whose `source` is `feed`, `wordpress` or `drupal`
     median_convert_ms: int | None = None  # of the page items' `timings.convert_ms`
     crawl_seconds: float | None = None  # the job's `finished_at - created_at`; None if unknown
 
@@ -156,11 +161,29 @@ def _sitemap_state(items: Sequence[dict[str, Any]]) -> str:
     return "listed" if listed or any(not info.get("guessed") for info in present) else "guessed"
 
 
-def _tree_numbers(items: Sequence[dict[str, Any]]) -> tuple[int, int, float | None]:
+@dataclass(frozen=True)
+class _TreeNumbers:
+    urls: int
+    untyped: int
+    untyped_pct: float | None
+    titled: int
+    titled_pct: float | None
+
+
+def _share(count: int, total: int) -> float | None:
+    return round(100 * count / total, 1) if total else None
+
+
+def _tree_numbers(items: Sequence[dict[str, Any]]) -> _TreeNumbers:
     loose = cast("list[JobItem]", [_loose(item) for item in items])
     tree = build_tree(loose, max_urls=TREE_MAX_URLS)
-    share = round(100 * tree.untyped / tree.urls, 1) if tree.urls else None
-    return tree.urls, tree.untyped, share
+    return _TreeNumbers(
+        urls=tree.urls,
+        untyped=tree.untyped,
+        untyped_pct=_share(tree.untyped, tree.urls),
+        titled=tree.titled,
+        titled_pct=_share(tree.titled, tree.urls),
+    )
 
 
 def tally(
@@ -180,7 +203,7 @@ def tally(
     warnings: Counter[str] = Counter()
     codes: Counter[str] = Counter()
     convert_ms: list[int] = []
-    pages_ok = failed = entries = 0
+    pages_ok = failed = entries = api_files = 0
     for item in items:
         result = item.get("result") or {}
         data = result.get("data") or {}
@@ -206,8 +229,10 @@ def tally(
             crawls[link.get("crawl") or "unknown"] += 1
         sitemap = site.get("sitemap") or {}
         entries += len(sitemap.get("entries") or [])
+        if role == "sitemap" and sitemap.get("source") in API_SOURCES:
+            api_files += 1
     seconds = _seconds(job)
-    tree_urls, type_open, type_open_pct = _tree_numbers(items)
+    tree = _tree_numbers(items)
     return SiteReport(
         url=url,
         state=str(job.get("state") or "unknown"),
@@ -226,9 +251,12 @@ def tally(
         warnings=dict(warnings),
         error_codes=dict(codes),
         sitemap=_sitemap_state(items),
-        tree_urls=tree_urls,
-        type_open=type_open,
-        type_open_pct=type_open_pct,
+        tree_urls=tree.urls,
+        type_open=tree.untyped,
+        type_open_pct=tree.untyped_pct,
+        titled=tree.titled,
+        titled_pct=tree.titled_pct,
+        api_files=api_files,
         median_convert_ms=round(statistics.median(convert_ms)) if convert_ms else None,
         crawl_seconds=seconds,
     )
@@ -455,6 +483,9 @@ def summarize(
             report.tree_urls,
             report.type_open,
             "-" if report.type_open_pct is None else f"{report.type_open_pct:.1f}",
+            report.titled,
+            "-" if report.titled_pct is None else f"{report.titled_pct:.1f}",
+            report.api_files,
             "-" if report.median_convert_ms is None else report.median_convert_ms,
             "-" if report.crawl_seconds is None else f"{report.crawl_seconds:.1f}",
         ]
@@ -475,6 +506,9 @@ def summarize(
         "tree URLs",
         "type open",
         "type open %",
+        "titled",
+        "titled %",
+        "API files",
         "median convert ms",
         "crawl s",
     ]

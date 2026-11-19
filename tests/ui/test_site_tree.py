@@ -1032,3 +1032,15 @@ def test_a_link_text_does_not_beat_the_api_reason() -> None:
     node = _by_url(build_tree(items, max_urls=10))[f"{ORIGIN}/datenschutz-info/"]
 
     assert (node.page_type, node.type_reason, node.title) == ("content", "api", "Info")
+
+
+def test_tree_counts_the_urls_titled_from_a_list() -> None:
+    items = [
+        _api_item(0, [{"loc": f"{ORIGIN}/a/", "title": "A"}, {"loc": f"{ORIGIN}/b/"}]),
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/c/"}]),
+        page_item(2, f"{ORIGIN}/", depth=0, links=((f"{ORIGIN}/d/", "depth", None, "Dee"),)),
+    ]
+
+    tree = build_tree(items, max_urls=10)
+
+    assert (tree.urls, tree.titled) == (5, 1)
