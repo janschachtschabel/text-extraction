@@ -2,7 +2,9 @@ name: live
 
 # Live regression: runs the service against real URLs (needs the internet) and checks the
 # share of URLs that yield usable text. Not part of ci.yml: it is slow and depends on third-party
-# sites. Start it by hand, label a pull request `live`, or wait for the weekly run.
+# sites. Start it by hand, label a pull request `live`, or wait for the weekly run. It also checks
+# the web search (package 25) against a real SearXNG: hits through REST and MCP, and
+# search_failed once SearXNG is stopped.
 #
 # The browser worker runs next to the API with browser mode on and unblock mode off: the gate
 # measures standard behaviour, which is what a partner gets without the admin exception. A
@@ -217,6 +219,73 @@ jobs:
             --summary-out "results/summary_${URL_SET}_${MODE}.md" \
             "${gate[@]}"
 
+      # Web search (package 25): apart from the gate, but a failure fails the job. The real
+      # SearXNG of docker-compose.build.yml (the pinned image and its hardening) with the root
+      # file's mount (a folder text-extraction-init renders, read-only at /etc/searxng) and its
+      # port on 127.0.0.1:8888 (tests/live/compose.searxng.yml), and a second API from source on
+      # 8081 (internal 9093) with search and MCP on. Not on wlo_4000 (the full regression runs
+      # nothing else) and not for another service_ref (its service may have no search).
+      - name: "Web search: start SearXNG and a search API"
+        id: search_setup
+        if: ${{ !cancelled() && env.URL_SET != 'wlo_4000' && inputs.service_ref == '' }}
+        env:
+          COMPOSE_FILE: docker-compose.build.yml:tests/live/compose.searxng.yml
+          SEARXNG_CONFIG_DIR: ${{ runner.temp }}/searxng-config
+          # The build file requires it; this SearXNG uses no Valkey.
+          VALKEY_PASSWORD: live-unused
+          AUTH_MODE: none
+          RATE_LIMIT_ENABLED: "false"
+          VALKEY_URL: redis://127.0.0.1:6379/0
+          PUBLIC_PORT: "8081"
+          INTERNAL_PORT: "9093"
+          SEARCH_ENABLED: "true"
+          SEARCH_URL: http://127.0.0.1:8888
+          MCP_ENABLED: "true"
+        run: |
+          mkdir -p results "$RUNNER_TEMP/search-secrets"
+          # SearXNG's settings as the root file's init writes them; its log (with an admin key
+          # that nothing uses) stays on the runner.
+          uv run text-extraction-init --secrets-dir "$RUNNER_TEMP/search-secrets" \
+            --searxng-dir "$SEARXNG_CONFIG_DIR" > "$RUNNER_TEMP/search-init.log" 2>&1 \
+            || { tail -n 20 "$RUNNER_TEMP/search-init.log" >&2; exit 1; }
+          docker compose up -d --wait --wait-timeout 180 searxng \
+            || { docker compose logs searxng >&2; exit 1; }
+          nohup uv run text-extraction > results/search-server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9093/ready > /dev/null 2>&1; then
+              echo "SearXNG and the search API are ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the search API did not become ready within 120 s" >&2
+          tail -n 50 results/search-server.log >&2
+          exit 1
+
+      # "Photosynthese" (de) through REST and the MCP tool web_search: HTTP 200, success or
+      # partial, a hit from wikipedia on de.wikipedia.org and one from another source, only
+      # http(s) URLs; then a second identical REST call answers from the cache. Up to three
+      # retries for the hits only (tests/live/run_search.py).
+      - name: "Web search: hits through REST and MCP"
+        if: ${{ !cancelled() && steps.search_setup.outcome == 'success' }}
+        run: |
+          uv run python -m tests.live.run_search --base-url http://127.0.0.1:8081 \
+            --expect hits --retries 3 --summary-out results/summary_web_search.md
+
+      # SearXNG stopped: a query that is not in the cache answers 200 failed / search_failed,
+      # retryable, through REST and MCP (isError false), never a 5xx. Tried once.
+      - name: "Web search: SearXNG stopped answers search_failed"
+        if: ${{ !cancelled() && steps.search_setup.outcome == 'success' }}
+        env:
+          COMPOSE_FILE: docker-compose.build.yml:tests/live/compose.searxng.yml
+          SEARXNG_CONFIG_DIR: ${{ runner.temp }}/searxng-config
+          VALKEY_PASSWORD: live-unused
+        run: |
+          docker compose logs searxng > results/searxng.log 2>&1 || true
+          docker compose stop searxng
+          uv run python -m tests.live.run_search --base-url http://127.0.0.1:8081 \
+            --expect failed --query Chlorophyll --summary-out results/summary_web_search_down.md
+
       # Reports only, no gate: the smoke set is a watchlist of hard pages, and wlo_200 with every
       # URL forced through the browser shows what the fast path leaves out (per domain, fast
       # against browser). The smoke report is skipped when the run above was the smoke set. The
@@ -326,4 +395,6 @@ jobs:
             results/server.log
             results/browser-worker.log
             results/extract-worker.log
+            results/search-server.log
+            results/searxng.log
           if-no-files-found: warn

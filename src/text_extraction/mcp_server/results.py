@@ -34,6 +34,7 @@ _CUT_LISTS: tuple[tuple[str, ...], ...] = (
     ("links",),
     ("structured", "tables"),
     ("site", "links"),
+    ("results",),  # the hits of web_search
 )
 
 

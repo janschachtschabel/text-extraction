@@ -387,6 +387,25 @@ class Settings(BaseSettings):
     # Package 26: a crawl's ``apis`` (feeds, WordPress REST API, Drupal JSON:API as sitemaps);
     # false ignores the request field.
     site_apis_enabled: bool = True
+    # Web search (package 25): a self-hosted SearXNG that is the operator's, not a caller's target
+    # (no SSRF guard; http is fine for an internal service). Off by default.
+    search_enabled: bool = False
+    search_url: str = "http://searxng:8080"
+    search_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    search_max_results: int = Field(default=50, ge=1, le=200)  # most hits one request may ask for
+    search_cache_seconds: int = Field(default=3600, ge=0, le=86_400)  # 0 = no cache
+    # SearXNG engines a request may name, as a comma list; also the default when it names none.
+    search_sources: Annotated[list[str], NoDecode] = [
+        "wikipedia",
+        "wikibooks",
+        "wikiversity",
+        "wikinews",
+        "mwmbl",
+        "openalex",
+        "arxiv",
+        "crossref",
+    ]
+    search_allow_users: bool = True  # may non-admin keys search?
     # MCP endpoint (package 10, ruling P10-S9): FastMCP at /mcp on the public port, off by
     # default. Browser origins that may call it, as a comma list of ``scheme://host[:port]``
     # (empty: none; a client without a browser sends no Origin).
@@ -492,6 +511,24 @@ class Settings(BaseSettings):
                 raise ValueError("expected '*' or host names without scheme, port or path")
             hosts.append(host)
         return list(dict.fromkeys(hosts))
+
+    @field_validator("search_sources", mode="before")
+    @classmethod
+    def _source_list(cls, value: object) -> object:
+        """A comma-separated list in the env var (blank entries dropped); a list from code
+        passes."""
+        if isinstance(value, str):
+            return [item for item in (part.strip() for part in value.split(",")) if item]
+        return value
+
+    @field_validator("search_sources")
+    @classmethod
+    def _sources_are_engine_names(cls, value: list[str]) -> list[str]:
+        """Engine names as SearXNG writes them, lower case, without duplicates."""
+        names = [entry.strip().lower() for entry in value]
+        if not names or any(not re.fullmatch(r"[a-z0-9][a-z0-9 ._-]*", name) for name in names):
+            raise ValueError("expected a non-empty comma list of SearXNG engine names")
+        return list(dict.fromkeys(names))
 
     @field_validator("mcp_allowed_origins", mode="before")
     @classmethod
@@ -609,6 +646,15 @@ class Settings(BaseSettings):
                 "LLM_BASE_URL must be an https URL (LLM_ALLOW_HTTP=true also allows http)"
             )
         self.llm_base_url = self.llm_base_url.strip()
+        return self
+
+    @model_validator(mode="after")
+    def _search_url_is_http(self) -> Self:
+        """http(s) with a host; not echoed, it may carry credentials."""
+        parts = urlsplit(self.search_url.strip())
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            raise ValueError("SEARCH_URL must be an http(s) URL with a host")
+        self.search_url = self.search_url.strip().rstrip("/")
         return self
 
     @model_validator(mode="after")

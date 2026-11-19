@@ -120,6 +120,7 @@ def test_offered_features_match_the_ui() -> None:
             "llm": offer.llm,
             "llm_needs_key": offer.llm_needs_key,
             "semantic": offer.semantic,
+            "search": offer.search,
         }
         assert admin_only == offer.admin_only
 
@@ -130,3 +131,21 @@ def test_media_upload_limit_only_for_keys_that_transcribe() -> None:
 
     assert user["limits"]["media_upload_max_bytes"] is None
     assert admin["limits"]["media_upload_max_bytes"] == 30_000_000
+
+
+def test_info_search_for_the_role() -> None:
+    with running(search_enabled=True, search_allow_users=False, search_max_results=30) as client:
+        user, admin = info(client, USER_KEY), info(client, ADMIN_KEY)
+
+    assert user["features"]["search"] is False
+    assert admin["features"]["search"] is True
+    assert user["limits"]["search_max_results"] is None
+    assert admin["limits"]["search_max_results"] == 30
+    with running(search_enabled=True) as client:
+        user = info(client, USER_KEY)
+    assert user["features"]["search"] is True
+    assert user["limits"]["search_max_results"] == 50
+    with running() as client:  # SEARCH_ENABLED is false by default
+        admin = info(client, ADMIN_KEY)
+    assert admin["features"]["search"] is False
+    assert admin["limits"]["search_max_results"] is None

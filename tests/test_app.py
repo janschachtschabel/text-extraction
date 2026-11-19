@@ -163,6 +163,7 @@ _OPERATION_IDS = {
     ("delete", "/v1/jobs/{job_id}"): "delete_job",
     ("post", "/v1/site-structure"): "create_site_structure",
     ("get", "/v1/info"): "info",
+    ("post", "/v1/search"): "search",
 }
 
 

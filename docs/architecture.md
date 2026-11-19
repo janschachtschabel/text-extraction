@@ -18,6 +18,8 @@ API pods, workers ──▶ document children (MarkItDown: PDF text layers, Offi
 API pods, workers ──▶ media children (youtube-transcript-api, yt-dlp: subtitles, metadata)
                       ──egress proxy (SSRF guard)──▶ video platforms
 API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
+API pods ──search (JSON, internal)──▶ SearXNG (optional, unmodified container)
+                                      ──▶ engine APIs (Wikipedia, OpenAlex, ...)
 Valkey ◀──▶ extract-worker  (fast pipeline: batch items from the fair queue)
 Valkey ◀──▶ browser-worker  (Chromium behind an egress proxy: auto fallback, actions,
                              screenshots; Patchright + Chrome for unblock mode)
@@ -359,7 +361,7 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `dns_error`, `connection_error`, `timeout`, `target_http_error`, `bot_protection`,
 `login_required`, `likely_error_page`, `empty_content`, `content_too_short`,
 `unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
-`media_too_long`, `transcription_failed`, `llm_failed`, `pii_failed`, `rate_limited`,
+`media_too_long`, `transcription_failed`, `llm_failed`, `pii_failed`, `search_failed`, `rate_limited`,
 `internal_error`.
 
 `pii_failed` (retryable, except for an `annotate` that was asked for HTML on a path that does not
@@ -423,7 +425,8 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500; `view=summary` drops the large result fields, package 24); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`, as `image/png`, `image/jpeg` or `image/webp`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 400 `invalid_request` while jobs are disabled, 503 while Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
-| `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
+| `POST /v1/search` | Web search through the operator's SearXNG (package 25, see "Web search"): `query` (1-500 characters), `max_results` (default 10, or `SEARCH_MAX_RESULTS` when lower; at most `SEARCH_MAX_RESULTS`), `language` (SearXNG's pattern: 2-3 lower-case letters and an optional 2-letter region), `page` (1-10), `time_range` (`day`, `month`, `year`), `sources` (names from `SEARCH_SOURCES`, any case; unset: all). 400 `invalid_request` while `SEARCH_ENABLED` is false, 403 for a user key while `SEARCH_ALLOW_USERS` is false, 422 for `max_results` over the limit, another `language` form, an unknown or blank source and `sources: []`. One rate-limit hit. Answers `data.results` (`url`, `title`, `snippet`, `sources`, `published`, `score`), `suggestions`, `sources_failed`, `cache`; `partial` when sources failed (also with no hit), 200 `failed`/`search_failed` when SearXNG did not answer or every source asked failed (`error.details` names them) | sync (at most `SEARCH_TIMEOUT_SECONDS`, 10 s); cached in Valkey (`success` only) |
+| `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 12 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
 | `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
 
 Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI). `/ready` does not look at
@@ -3218,7 +3221,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   mask_error_details=True)` served by `http_app(path="/mcp", stateless_http=True,
   json_response=True)` as one Starlette route with the methods `GET`, `POST` and `DELETE`: `/mcp/`
   is 404, `GET /mcp` 405 (no stream). The public lifespan enters the MCP app's lifespan. The
-  server's instructions tell a model to use `extract_url` for pages and documents, to poll
+  server's instructions tell a model to use `extract_url` for pages and documents (and
+  `web_search` to find pages first, since package 25), to poll
   `get_job` with `wait_seconds` when an answer's `data` has a `status_url`, and that `options`
   takes any field of the REST body (`/docs`).
 - **Gate (P10-S3).** A pure ASGI gate in front of FastMCP runs for every HTTP request, after the
@@ -3237,8 +3241,11 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
 - **Tools (P10-S5).** Eleven tools, one per public capability: `extract_url`, `extract_file`,
   `screenshot_url`, `extract_structured`, `chunk`, `batch_extract`, `site_structure` (open world,
   each with `options`), `get_job`, `get_job_screenshot`, `service_info` (read only) and
-  `cancel_job` (destructive). A call validates its arguments, merges `options` under them (a key
-  given in both is `invalid_request`, "<key> is given twice."), holds the merged body to the
+  `cancel_job` (destructive). Package 25 adds a twelfth, `web_search` (`POST /v1/search`, read
+  only and open world, no `options`: its arguments are the whole REST body; listed while search
+  is off, as the job tools are while jobs are off, and then answers the route's 400). A call
+  validates its arguments, merges `options` under them (a key given in both is
+  `invalid_request`, "<key> is given twice."), holds the merged body to the
   route's body limit and validates it with the REST model, so extra fields, a user's
   `compliance: ignore`, an `evaluate` action or an XPath rule are refused exactly as REST refuses
   them. `extract_file` strips a `data:` prefix, ignores whitespace, refuses what is not base64 and
@@ -3657,6 +3664,127 @@ Places. `metadata.places` (at most 5; `kind`, `name`, `street`, `postal_code`, `
 `region`, `country`, `latitude`, `longitude`) comes from the page's own schema.org items (Place,
 LocalBusiness, `address`, `geo`, an Event's `location`) and the geo meta tags (`geo.position`,
 `ICBM`, `geo.placename`, `geo.region`). The playground shows one "Place" row each.
+
+## Web search
+
+Package 25: `search/` (`types.py`, `client.py`), `search_api.py`, the MCP tool `web_search`, the
+playground's Search tab, `data/searxng-settings.yml`, the `searxng` service in both compose files
+and `searxng.*` in the Helm chart. `POST /v1/search` asks a SearXNG that the operator runs as a
+separate, unmodified container (`searxng/searxng`, AGPL-3.0) over its JSON API
+(`GET {SEARCH_URL}/search?q=…&format=json&pageno=…&engines=…[&language=…][&time_range=…]`) and
+answers the envelope. The service fetches no hit; the caller sends the URLs it picks to
+`POST /v1/extract` or `POST /v1/batch` (the UI's "Extract selected" and the MCP tools
+`extract_url` and `batch_extract`). Settings are in [configuration.md](configuration.md)
+("Web search"); the user guide's page is `docs/user-guide/<lang>/search.md`.
+
+The evidence is the default suite: `tests/search/test_client.py` (SearXNG faked with
+`httpx.MockTransport`), `tests/test_search_api.py`, `tests/mcp_server/test_tools_search.py`,
+`tests/ui/test_search_tab.py` and the live UI test in `tests/ui/test_done_when.py` (SearXNG faked
+on the sample site's server), `tests/test_searxng_settings.py`, `tests/test_init_secrets.py`,
+`tests/test_compose_files.py` and the Helm render checks. A live check against a real SearXNG of
+the pinned commit (2026-11-19, in the build sandbox) confirmed the settings (exactly the eight
+engines, JSON on, the placeholder key refused) and the failure path, but got no hits: the sandbox's
+egress proxy refuses every engine's host. Two CI checks run the real image instead. live.yml's
+web search steps (PR label `live`, `tests/live/run_search.py`, unit-tested in
+`tests/test_live_search.py`) start the pinned SearXNG with its hardening and the root file's
+read-only mount of the settings `init` rendered (`tests/live/compose.searxng.yml`) and a second
+API from source, then check REST and `web_search`: hits for "Photosynthese" (de) from Wikipedia on
+de.wikipedia.org and another source, http(s) URLs only, a cache hit on the second call, and,
+with SearXNG stopped, 200 `failed`/`search_failed` (retryable). image.yml (api variant) runs the
+root file's `init` from the image just built into fresh volumes and its `searxng`
+(`tests/image/compose.searxng-check.yml`), and checks that SearXNG sees only `settings.yml` with
+a generated key and answers `/healthz` and a JSON search.
+
+**Decisions of Jan (2026-11-18, the recommended options).**
+
+- **D1, SearXNG as a separate container (a, decided).** Only the unmodified official image in a
+  container of its own, never a Python import; the project ships only its settings. CLAUDE.md
+  rule 7 records the exception.
+- **D2, official free APIs only (a, decided).** On by default: `wikipedia` (`display_type:
+  list`), `wikibooks`, `wikiversity`, `wikinews`, `mwmbl`, `openalex`, `arxiv`, `crossref`
+  (`use_default_settings.engines.keep_only`, each `disabled: false`, as five are off in SearXNG's
+  defaults). Scraping engines (Google, Bing, DuckDuckGo, Brave, Startpage) stay off: they block
+  server addresses and do not fit rule 6. The `wikipedia` engine asks Wikipedia's page summary for
+  the query, so it yields at most one hit per search even as a list. Mwmbl is small and mostly
+  English; the set is strong for Wikipedia knowledge and science, weak as a general German search.
+- **D3, on in compose, off in Helm (a, decided).** Both compose files run `searxng` and set
+  `SEARCH_ENABLED=true` for the API; Helm has `searxng.enabled: false` and
+  `config.SEARCH_ENABLED: "false"`, two separate switches (NOTES warn when they disagree).
+- **D4, a Search tab (a, decided).** Shown only while the key can search (`features.search`),
+  before Info; the hits are listed escaped, each with a checkbox, and "Extract selected" posts
+  the ticked URLs to the site tree's batch flow. The admin-only hint of a hidden tab is in the
+  Info tab.
+- **D5, no WLO source in this package (a, decided).**
+
+**Rulings of the build (R25-1 to R25-9).**
+
+- **R25-1 `search_failed`.** A SearXNG that is down, slow (`SEARCH_TIMEOUT_SECONDS`), answers
+  non-200 or no JSON is the search's failure: 200 `failed` with the new error code
+  `search_failed`, retryable (as `llm_failed` and `pii_failed`), never a 5xx and never
+  `upstream_unavailable` (the plan's name; the envelope has no such code). A 403 (SearXNG's answer
+  while the `json` format is off) is not retryable: a setting of the operator, named in the
+  message. Nor is a 400 (a parameter SearXNG refuses; `language` is checked against SearXNG's
+  own pattern first, so a caller gets the 422). Messages never echo the query or the URL.
+- **R25-2 failed and partial.** SearXNG lists a failed engine in `unresponsive_engines` under
+  the name it was asked for in `engines=` (`add_unresponsive_engine(self.engine.name, …)` in
+  `searx/search/processors/abstract.py` of the pinned commit), so names are matched in lower
+  case. The search is `failed` only when there is no hit and every asked engine is in that list;
+  the failures then go into `error.details` as `[{"source", "reason"}]`, because a failed answer
+  carries no `data`. Some failures are `partial` with `data.sources_failed` (source, reason),
+  also with an empty `results`: the query may simply have no hits, and a blocked source still
+  shows. A source that answered without a hit is no failure. This replaces the first ruling of
+  the build (no hit and any failure was `failed`), which assumed SearXNG reports display names.
+- **R25-3 400 while off.** `SEARCH_ENABLED=false` answers 400 `invalid_request`, as every switch
+  that is off (C12), not 404; the core `run_search` checks it too, so no caller reaches the
+  missing client. The MCP tool stays listed, as the job tools while jobs are off.
+- **R25-4 sources validation.** `sources` names are compared in lower case around blanks with
+  `SEARCH_SOURCES`; another name, a blank one and `sources: []` (which would read as every source)
+  are 422; a name with a comma can never be in `SEARCH_SOURCES`, so it cannot split SearXNG's
+  comma list. Without `sources` the client sends all of `SEARCH_SOURCES` as `engines`, because
+  SearXNG without `engines` asks only its default category (`general`) and would leave out
+  `openalex`, `arxiv`, `crossref` and `wikinews`. `max_results` over `SEARCH_MAX_RESULTS` is 422;
+  an unset `max_results` is min(10, `SEARCH_MAX_RESULTS`) before the cache key (the MCP schema's
+  default too), so a low limit never refuses a request that names no number; non-http(s) hit
+  URLs (`magnet:`, relative) are dropped.
+- **R25-5 cache only success.** `search:{<sha256>}` over the version, the query with spacing
+  collapsed, language, page, time range, sorted engines and `max_results`; TTL
+  `SEARCH_CACHE_SECONDS`. Only `success` is stored: a `partial` answer would hide a recovered
+  source for the whole TTL. A Valkey error acts as a miss or a dropped write, logged without the
+  query.
+- **R25-6 `SEARCH_URL` is the operator's.** The SSRF guard does not apply; the client has
+  `trust_env=False` (no proxy from the environment) and follows no redirect.
+- **R25-7 init renders the settings with a kept key.** The root compose file's `init` keeps
+  `searxng-secret` (64 hex characters) in the volume `secrets` and writes `settings.yml` into the
+  volume `searxng-config` (0644 in a 0755 folder, as SearXNG runs as uid 977) from the packaged template on every start, like `valkey.conf`, so a
+  new image brings its template (whose engines must match the image's `SEARCH_SOURCES` default).
+  The template keeps SearXNG's placeholder `ultrasecretkey`, which SearXNG refuses outside debug,
+  so an unrendered copy fails closed. Helm passes the key as `SEARXNG_SECRET` from a Secret
+  (generated once, kept by `lookup`) and keeps the template in a ConfigMap; the build file
+  generates a random `SEARXNG_SECRET` on each start.
+- **R25-8 a volume of its own.** `searxng` mounts only the volume `searxng-config`, read-only
+  at `/etc/searxng`, so it never sees the secrets. `init` mounts it at `/searxng`, which the API
+  image creates owned by 10001 (as `/secrets`), so a fresh volume takes that owner and init can
+  write it. `searxng` mounts it with `nocopy`: Docker fills an empty volume from the image of every
+  container created on it, the root's owner included, and compose creates `searxng` before `init`
+  has run, so SearXNG's `/etc/searxng` (owned 977) took the volume and init's chmod failed with
+  EPERM (image.yml, fix round 2). `secrets` is safe: no other image with that folder has another
+  owner. When it cannot (an old compose file without the volume), init logs
+  `init_searxng_settings_failed` and still exits 0, so only the search breaks. The first build
+  used a subpath of the volume `secrets`; that needs Docker Engine 26, and an older daemon would
+  have mounted every secret into SearXNG. `searxng` depends on `init` with `restart: true`, so a
+  re-rendered template is picked up. The search needs the images of 0.1.13 or later (Hostinger
+  rule 8: publish the release before the compose file is deployed). It runs as 977 on a
+  read-only root with tmpfs `/tmp` and `/var/cache/searxng`, no capabilities, only on `backend`,
+  with no published port; SearXNG's own settings switch the limiter, the public-instance mode,
+  the image proxy, autocomplete and Valkey off and cut every engine at 8 s
+  (`outgoing.max_request_timeout`), below `SEARCH_TIMEOUT_SECONDS`, so a slow engine is a failed
+  source of a `partial` answer. Helm's NetworkPolicy lets only the API pods in and SearXNG out to
+  DNS and to ports 80/443 of any address except 169.254.169.254.
+- **R25-9 one rate hit, the MCP tool and the UI.** A search is one hit of the key's rate limit;
+  `web_search` is the 12th tool (read only, open world, no `options`), its description carries
+  the deployment's sources and `max_results` bound. The UI form sends no `sources` when none is
+  ticked, presets `max_results` at min(10, `SEARCH_MAX_RESULTS`), and reuses `_single_view` and
+  `result.html`.
 
 ## Observability
 

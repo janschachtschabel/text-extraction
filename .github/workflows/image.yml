@@ -153,6 +153,31 @@ jobs:
           test "$(docker image inspect -f '{{.Config.User}}' "$CHECK_TAG")" = 10001
           docker run --rm "$CHECK_TAG" sh -c 'test "$(id -u)" = 10001 && /usr/bin/tini --version'
 
+      # The root docker-compose.yml's web search starts (package 25): this image's init renders
+      # SearXNG's settings into a fresh volume searxng-config (it takes the owner 10001 of the
+      # image's mount point /searxng), then the pinned SearXNG image starts with the root file's
+      # hardening and its read-only mount (tests/image/compose.searxng-check.yml swaps only
+      # init's image). SearXNG sees only settings.yml, with a generated key, in a volume that kept
+      # init's owner (searxng mounts it with nocopy); /healthz and a JSON search answer 200
+      # (whether any source answers does not matter). The file publishes no port, so wget runs
+      # inside the container.
+      - name: Root compose file starts SearXNG with the settings of init
+        if: matrix.variant == 'api'
+        env:
+          COMPOSE_FILE: docker-compose.yml:tests/image/compose.searxng-check.yml
+          COMPOSE_PROJECT_NAME: searxng-check
+        run: |
+          test ! -e .env
+          docker compose up -d --wait --wait-timeout 180 searxng \
+            || { docker compose logs init searxng >&2; exit 1; }
+          test "$(docker compose exec -T searxng ls -A /etc/searxng)" = settings.yml
+          test "$(docker compose exec -T searxng stat -c %u /etc/searxng)" = 10001
+          docker compose exec -T searxng sh -c '! grep -q ultrasecretkey /etc/searxng/settings.yml'
+          docker compose exec -T searxng wget -q -O /dev/null http://127.0.0.1:8080/healthz
+          docker compose exec -T searxng wget -q -O - 'http://127.0.0.1:8080/search?q=x&format=json' \
+            | jq -e 'has("results") and has("unresponsive_engines")'
+          docker compose down -v
+
       # Both drivers start in the image, as the pods run it: non-root, read-only root filesystem,
       # /tmp as the only writable place, Xvfb for headful Chrome. --check needs no Valkey.
       - name: Browser image starts its browsers

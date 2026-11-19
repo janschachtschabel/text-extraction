@@ -74,8 +74,8 @@ def _override_services() -> dict[str, dict[str, Any]]:
 
 
 def _app_services() -> set[str]:
-    """The base file's services that run the service's code (all but Valkey)."""
-    return set(_load(BASE)["services"]) - {"valkey"}
+    """The base file's services that run the service's code (all but Valkey and SearXNG)."""
+    return set(_load(BASE)["services"]) - {"valkey", "searxng"}
 
 
 def _interpolate(value: str) -> str:
@@ -502,7 +502,8 @@ def test_slow_starts_under_contention_do_not_count_as_unhealthy() -> None:
     gives every health check a long start period, polled every 5 s so a ready container counts
     as healthy at once, and more retries; the check itself stays the base file's."""
     base = _load(BASE)["services"]
-    checked = {name for name, service in base.items() if "healthcheck" in service} - {"valkey"}
+    checked = {name for name, service in base.items() if "healthcheck" in service}
+    checked -= {"valkey", "searxng"}
     assert checked == {name for name in _app_services() if not name.endswith("-models")}
     for name in checked:
         healthcheck = _override_services()[name]["healthcheck"]

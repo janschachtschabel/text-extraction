@@ -37,6 +37,8 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
    per-domain outbound limits, honest user agent. No IP/proxy rotation to evade limits.
    Exception: unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) for sites that allowed extraction by contract may present a stealth browser with an unmodified Chrome user agent; outbound limits still apply and IP/proxy rotation stays excluded.
 7. **Licences:** no AGPL/GPL dependencies (e.g. PyMuPDF, Marker, MinerU are excluded).
+   Exception: an unmodified AGPL service in its own container (SearXNG) is allowed; never an
+   AGPL/GPL import.
 
 ## Workflow
 

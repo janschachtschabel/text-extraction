@@ -47,12 +47,16 @@ Englisch.
   liest auch eine CSV- oder JSON-Datei); die Karte einer Website aus ihren Sitemaps und ihrem
   Linkgraphen, mit Seitentypen, in der Spielwiese als Baum, der die von robots.txt verbotenen
   Seiten markiert.
+- **Websuche.** Eine Suche über das eigene SearXNG des Dienstes, das nur Quellen mit einer
+  offiziellen, freien API fragt (Wikipedia, Wikibooks, Wikiversity, Wikinews, Mwmbl, OpenAlex,
+  arXiv, Crossref); die Spielwiese extrahiert die angekreuzten Treffer als Batch. In Docker
+  Compose an, in Helm aus.
 - **Website-Regeln.** robots.txt und der TDM-Nutzungsvorbehalt der EU (`enforce`, `report` oder
   `ignore` pro Anfrage), wenige Anfragen pro Host gleichzeitig, ein ehrlicher User-Agent. Für
   Websites, die die Extraktion vertraglich erlaubt haben, kann ein Admin die Prüfungen ausschalten
   und den Entsperr-Browser nutzen (siehe unten).
 - **Schnittstellen.** Eine REST-API mit OpenAPI unter `/docs`, Jobs für lange Arbeiten, ein
-  MCP-Server mit 11 Tools und eine Spielwiese unter `/ui` auf Deutsch und Englisch.
+  MCP-Server mit 12 Tools und eine Spielwiese unter `/ui` auf Deutsch und Englisch.
 - **Betrieb.** Docker Compose und ein Helm-Chart; zustandslose Pods, der Zustand liegt in Valkey;
   API-Schlüssel mit den Rollen `user` und `admin` und einer Ratenbegrenzung pro Schlüssel; ein
   Ergebnis-Cache; ein SSRF-Schutz und Grenzen für Bytes und Zeit bei jedem Abruf; JSON-Logs,
@@ -70,6 +74,7 @@ Englisch.
 | `POST /v1/chunk` | Eine Seite oder ein Text, in Chunks zerlegt. |
 | `POST /v1/batch` | Viele URLs als ein Job. |
 | `POST /v1/site-structure` | Die Karte einer Website, als Job. |
+| `POST /v1/search` | Eine Websuche über das SearXNG des Dienstes: die Treffer mit URL, Titel und Ausschnitt. |
 | `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Zustand und Ergebnisse eines Jobs; ihn abbrechen. |
 | `GET /v1/jobs/{id}/artifacts/{name}` | Eine Datei eines Jobs, etwa ein Screenshot. |
 | `GET /v1/info` | Die Version des Dienstes, die Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. |
@@ -81,7 +86,7 @@ Jede Antwort hat dieselbe Ergebnishülle (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototyp `v0.1.12`: Die Pakete 0 bis 22 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.13`: Die Pakete 0 bis 25 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
@@ -89,7 +94,8 @@ Seitentypen, neue Gestaltung der Spielwiese, robots.txt-Markierungen im Website-
 Schalter für die Website-Regeln pro Lauf, Korrekturen an der Spielwiese nach dem Test von v0.1.4,
 Website-Baum mit Typen, Spalten und schnellem Lesen der Sitemap, Zusatzfunktionen standardmäßig an,
 Bot-Prüfungen als `bot_protection` gemeldet, Linklisten von Übersichtsseiten, KMap-Anhänge,
-Tabellen und Formeln, mehr Text aus dünnen Seiten). Die Pakete und ihren Stand zeigt
+Tabellen und Formeln, mehr Text aus dünnen Seiten, Website-Baum oben, MCP für Agenten leichter
+nutzbar, freie Websuche über SearXNG). Die Pakete und ihren Stand zeigt
 [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion
@@ -114,10 +120,10 @@ Siehe [Website-Regeln](docs/user-guide/de/site-rules.md) und
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
 Browser-Worker, die optionalen Worker für OCR, Transkription, personenbezogene Daten und das LLM
-(ihr erster Start lädt etwa 3 GB Modelle) und ein Valkey (mit Passwort) für den gemeinsamen Zustand.
-Die `docker-compose.yml` im Hauptordner startet die veröffentlichten Images und braucht keine
-Variablen: Ihr Dienst `init` legt beim ersten Start das Valkey-Passwort und einen
-Admin-API-Schlüssel an.
+(ihr erster Start lädt etwa 3 GB Modelle), ein Valkey (mit Passwort) für den gemeinsamen Zustand
+und SearXNG für die Websuche. Die `docker-compose.yml` im
+Hauptordner startet die veröffentlichten Images und braucht keine Variablen: Ihr Dienst `init`
+legt beim ersten Start das Valkey-Passwort und einen Admin-API-Schlüssel an.
 
 ```bash
 docker compose up -d --wait                    # public API on http://localhost:8080
@@ -168,7 +174,8 @@ und ein Wert darin geht einem geänderten Standard vor: Vergleichen Sie sie nach
 - Eine ganze Website mit den Metadaten und Lizenzen ihrer Seiten:
   [Eine ganze Website und ihre Metadaten](docs/user-guide/de/whole-site-and-metadata.md).
 - Strukturierte Daten und Chunks: [Strukturierte Daten](docs/user-guide/de/structured-data.md).
-- Ein KI-Assistent mit den 11 Tools des MCP-Servers: [MCP](docs/user-guide/de/mcp.md).
+- Seiten zu einem Thema finden und extrahieren: [Suche](docs/user-guide/de/search.md).
+- Ein KI-Assistent mit den 12 Tools des MCP-Servers: [MCP](docs/user-guide/de/mcp.md).
 - Die Regeln einer Website beachten oder die maximale Extraktion für Vertragspartner:
   [Website-Regeln](docs/user-guide/de/site-rules.md).
 - Ausprobieren im Browser: [die Spielwiese](docs/user-guide/de/usage.md#die-spielwiese).
@@ -191,7 +198,7 @@ Inhaltslisten von WordPress und Drupal, die eine Website veröffentlicht (`apis`
 
 ## MCP
 
-Mit `MCP_ENABLED=true` (in docker compose an) ist der Dienst ein MCP-Server unter `https://<host>/mcp` mit 11 Tools, für
+Mit `MCP_ENABLED=true` (in docker compose an) ist der Dienst ein MCP-Server unter `https://<host>/mcp` mit 12 Tools, für
 Claude Code, Claude Desktop und andere Clients, angemeldet mit einem API-Schlüssel des Dienstes:
 siehe [MCP](docs/user-guide/de/mcp.md).
 

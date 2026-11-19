@@ -42,10 +42,14 @@ and a playground in English and German.
 - **Many pages and whole sites.** Batches of up to 1,000 URLs as jobs (the playground also reads
   a CSV or JSON file); the map of a site from its sitemaps and its link graph, with page types,
   shown in the playground as a tree that marks the pages robots.txt forbids.
+- **Web search.** A search through the service's own SearXNG, which asks only sources with an
+  official, free API (Wikipedia, Wikibooks, Wikiversity, Wikinews, Mwmbl, OpenAlex, arXiv,
+  Crossref); the playground extracts the hits you tick as a batch. On in docker compose, off in
+  Helm.
 - **Site rules.** robots.txt and the EU TDM opt-out (`enforce`, `report` or `ignore` per request),
   a few requests per host at a time, an honest user agent. For sites that allowed extraction by
   contract an admin can switch the checks off and use the unblock browser (see below).
-- **Interfaces.** A REST API with OpenAPI at `/docs`, jobs for long work, an MCP server with 11
+- **Interfaces.** A REST API with OpenAPI at `/docs`, jobs for long work, an MCP server with 12
   tools and a playground at `/ui` in English and German.
 - **Operations.** Docker Compose and a Helm chart; stateless pods with the state in Valkey;
   API keys with the roles `user` and `admin` and a rate limit per key; a result cache; an SSRF
@@ -63,6 +67,7 @@ and a playground in English and German.
 | `POST /v1/chunk` | A page or a text split into chunks. |
 | `POST /v1/batch` | Many URLs as one job. |
 | `POST /v1/site-structure` | The map of a site, as a job. |
+| `POST /v1/search` | A web search through the service's SearXNG: the hits with URL, title and snippet. |
 | `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | A job's state and results; cancel it. |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A file of a job, such as a screenshot. |
 | `GET /v1/info` | The service's version, the key's role, the features the key can use and the limits. |
@@ -74,14 +79,15 @@ Every answer is the same result envelope (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototype `v0.1.12`: packages 0-22 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.13`: packages 0-25 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,
 robots marks in the site tree with a per-run site rules switch, playground fixes after the v0.1.4
 test, site tree with types, columns and a fast sitemap reading, optional features on by default,
 bot-challenge refusals reported as `bot_protection`, link lists of listing pages, KMap
-attachments, tables and formulas, more text from thin pages).
+attachments, tables and formulas, more text from thin pages, the site tree on top, MCP agent
+usability, free web search through SearXNG).
 See [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract
@@ -105,9 +111,10 @@ the page needs it (`auto`, the default), never (`fast`) or always (`browser`). S
 
 Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
 optional workers for OCR, transcription, personal data and the LLM (their first start downloads
-about 3 GB of models) and a Valkey (with a password) for the shared state. The root
-`docker-compose.yml` runs the published images and needs no variables: its service `init`
-creates the Valkey password and an admin API key on the first start.
+about 3 GB of models), a Valkey (with a password) for the shared state and SearXNG for the web
+search. The root `docker-compose.yml` runs the published images and
+needs no variables: its service `init` creates the Valkey password and an admin API key on the
+first start.
 
 ```bash
 docker compose up -d --wait                    # public API on http://localhost:8080
@@ -152,7 +159,8 @@ over a changed default: compare it with `.env.example` after an update.
 - A whole site with the metadata and licences of its pages:
   [A whole site and its metadata](docs/user-guide/en/whole-site-and-metadata.md).
 - Structured data and chunks: [Structured data](docs/user-guide/en/structured-data.md).
-- An AI assistant with the 11 tools of the MCP server: [MCP](docs/user-guide/en/mcp.md).
+- Finding pages on a topic and extracting them: [Search](docs/user-guide/en/search.md).
+- An AI assistant with the 12 tools of the MCP server: [MCP](docs/user-guide/en/mcp.md).
 - Respecting a site's rules, or maximum extraction for contract partners:
   [Site rules](docs/user-guide/en/site-rules.md).
 - Trying it out in the browser: [the playground](docs/user-guide/en/usage.md#the-playground).
@@ -174,7 +182,7 @@ lists a site publishes (`apis`): see [Part of a site](docs/user-guide/en/part-of
 
 ## MCP
 
-With `MCP_ENABLED=true` (on in docker compose) the service is an MCP server at `https://<host>/mcp` with 11 tools, for
+With `MCP_ENABLED=true` (on in docker compose) the service is an MCP server at `https://<host>/mcp` with 12 tools, for
 Claude Code, Claude Desktop and other clients, authenticated with an API key of the service: see
 [MCP](docs/user-guide/en/mcp.md).
 

@@ -21,6 +21,23 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `title` too. Every extraction's `metadata.places` lists up to 5 places the page names itself
   (schema.org Place, LocalBusiness, address, geo, an Event's location, geo meta tags); PII handling
   covers their text.
+
+## [0.1.13] - 2026-11-19
+
+### Added
+
+- Free web search through SearXNG (package 25). `POST /v1/search` and the MCP tool `web_search`
+  ask the operator's SearXNG, the unmodified official image in a container of its own, with only
+  sources that have an official, free API: Wikipedia, Wikibooks, Wikiversity, Wikinews, Mwmbl,
+  OpenAlex, arXiv and Crossref. The answer lists the hits (URL, title, snippet, sources, date),
+  is `partial` with `data.sources_failed` when some sources did not answer and `failed` with the
+  new error code `search_failed` when SearXNG or every source asked did not answer (then
+  `error.details` lists the sources); `success` answers are cached for
+  `SEARCH_CACHE_SECONDS`. The playground has a Search tab ("Suche") whose ticked hits are
+  extracted as a batch. `GET /v1/info` reports `features.search` and `limits.search_max_results`.
+  The root and build compose files run the service `searxng` and switch the search on; the Helm
+  chart has `searxng.enabled` and `config.SEARCH_ENABLED`, both off. See
+  `docs/user-guide/en/search.md`.
 - MCP agent usability (package 24). Each tool's `options` description lists the fields it takes
   with a short hint, so an agent finds `pii`, `ocr`, `compliance`, `screenshot` and the others
   without the API docs. `GET /v1/info` and `service_info` list the features the caller's key can
@@ -53,6 +70,19 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   (supersedes Dependabot PR #60, which changed only the compose files). Valkey reads the data an
   8.1 server wrote; going back to 8.1 after 9.1 has saved data is not guaranteed to work.
 - CI: astral-sh/setup-uv 10.3.2 → 10.3.3 (Dependabot PR #61).
+
+### Upgrade
+
+- New settings and their defaults: `SEARCH_ENABLED=false` (the compose files set `true`),
+  `SEARCH_URL=http://searxng:8080`, `SEARCH_TIMEOUT_SECONDS=10`, `SEARCH_MAX_RESULTS=50`,
+  `SEARCH_CACHE_SECONDS=3600`, `SEARCH_SOURCES` (the eight sources), `SEARCH_ALLOW_USERS=true`.
+  `SEARCH_ENABLED=false` in `.env` switches the search off.
+- The root `docker-compose.yml` gives `searxng` a volume of its own, `searxng-config`, into which
+  `init` renders SearXNG's settings; the key stays in the volume `secrets`. It needs the images
+  of 0.1.13 or later (the `/searxng` mount point and the `init` that writes it): publish 0.1.13
+  before deploying the new compose file, or `searxng` gets no settings and does not start. If
+  `init` then logs `init_searxng_settings_failed`, remove the volume `searxng-config` (it holds
+  only these settings) and deploy again.
 
 ## [0.1.12] - 2026-11-10
 
@@ -751,7 +781,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.9...v0.1.10

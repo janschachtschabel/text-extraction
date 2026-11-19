@@ -32,6 +32,50 @@ spec:
           protocol: TCP
 ---
 {{- end }}
+{{- if .Values.searxng.enabled }}
+# SearXNG accepts connections from the API pods of this release only (SEARCH_URL), and reaches
+# nothing but DNS and the web APIs of its engines (HTTP(S) to any address except the cloud metadata
+# endpoint 169.254.169.254).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "text-extraction.searxngName" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searxng
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "text-extraction.searxngSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "text-extraction.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+---
+{{- end }}
 # API pods: the public port from anywhere, the internal port from `networkPolicy.metricsFrom`.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

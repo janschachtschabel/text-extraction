@@ -299,6 +299,14 @@ jobs:
           helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
           --set workers.asr.enabled=true --set workers.nlp.enabled=true --set workers.llm.enabled=true
           --set workers.nlp.autoscaling.hpa.enabled=true --set workers.llm.autoscaling.hpa.enabled=true
+      - name: helm lint (SearXNG and web search on, policies)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set searxng.enabled=true
+          --set config.SEARCH_ENABLED=true --set networkPolicy.enabled=true
+      - name: helm lint (SearXNG with an existing key Secret)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set searxng.enabled=true
+          --set searxng.secret.existingSecret=searxng-key
       - name: helm lint (MCP and UI on)
         run: helm lint --strict deploy/helm/text-extraction --set mcp.enabled=true --set ui.enabled=true
       - name: helm lint (MCP and UI on, open service behind an ingress)
@@ -361,9 +369,9 @@ jobs:
               and (.volumes | length == 1 and .[0].source == "docling-models" and .[0].read_only == true)
               and .depends_on["docling-models"].condition == "service_completed_successfully"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "true")' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.DOCLING_ENABLED == "true")' compose.json
           DOCLING_ENABLED=false docker compose config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "false")'
+            | jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.DOCLING_ENABLED == "false")'
           rm compose.json
 
       # The ASR services (no profile, on by default): the one-shot models service writes the
@@ -388,9 +396,9 @@ jobs:
               and .depends_on["asr-models"].condition == "service_completed_successfully"
               and .stop_grace_period == "45s" and .profiles == null
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "true")' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.ASR_ENABLED == "true")' compose.json
           ASR_ENABLED=false docker compose config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "false")'
+            | jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.ASR_ENABLED == "false")'
           rm compose.json
 
       # The NLP services (no profile, on by default): the one-shot models service writes the
@@ -412,9 +420,9 @@ jobs:
               and .depends_on["nlp-models"].condition == "service_completed_successfully"
               and .stop_grace_period == "45s"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "true")' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.PII_ENABLED == "true")' compose.json
           PII_ENABLED=false docker compose config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "false")'
+            | jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.PII_ENABLED == "false")'
           rm compose.json
 
       # The llm worker (no profile, on by default): it runs the API image (no model, no volume);
@@ -430,9 +438,9 @@ jobs:
               and (.volumes // [] | length == 0)
               and .stop_grace_period == "45s"
               and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "true")' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.LLM_ENABLED == "true")' compose.json
           LLM_ENABLED=false docker compose config --format json \
-            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "false")'
+            | jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | all(.value.environment.LLM_ENABLED == "false")'
           rm compose.json
 
       # MCP and the UI: on for the api service (local development) unless the environment
@@ -447,6 +455,43 @@ jobs:
           MCP_ENABLED=false UI_ENABLED=false docker compose config --format json \
             | jq -e '.services.api.environment | .MCP_ENABLED == "false" and .UI_ENABLED == "false"'
           rm compose.json
+
+      # Web search: SearXNG runs unpublished and hardened, the api searches through it unless the
+      # environment switches search off (tests/test_compose_files.py checks the root file too).
+      - name: docker compose config (web search)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose config --format json > compose.json
+          jq -e '.services.searxng | .ports == null and .read_only == true and .user == "977:977"
+            and .cap_drop == ["ALL"] and .security_opt == ["no-new-privileges:true"]
+            and (.healthcheck.test | join(" ") | contains("/healthz"))' compose.json
+          jq -e '.services.api.environment.SEARCH_ENABLED == "true"' compose.json
+          SEARCH_ENABLED=false docker compose config --format json \
+            | jq -e '.services.api.environment.SEARCH_ENABLED == "false"'
+          rm compose.json
+
+      # The overrides of the web search checks: live.yml's keeps the build file's SearXNG with its
+      # hardening, publishes only 127.0.0.1:8888, mounts the folder init rendered read-only and
+      # resets the entry point to the image's; image.yml's swaps only init's image in the root file.
+      - name: docker compose config (web search check overrides)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+          SEARXNG_CONFIG_DIR: /tmp/searxng-config
+        run: |
+          docker compose -f docker-compose.build.yml -f tests/live/compose.searxng.yml config --format json \
+            | jq -e '.services.searxng | .entrypoint == null and .user == "977:977" and .read_only == true
+              and .cap_drop == ["ALL"] and (.ports | length == 1)
+              and .ports[0].host_ip == "127.0.0.1" and .ports[0].published == "8888" and .ports[0].target == 8080
+              and (.volumes | length == 1) and .volumes[0].type == "bind"
+              and .volumes[0].source == "/tmp/searxng-config" and .volumes[0].target == "/etc/searxng"
+              and .volumes[0].read_only == true'
+          test ! -e .env
+          CHECK_TAG=text-extraction-api:check docker compose -f docker-compose.yml \
+            -f tests/image/compose.searxng-check.yml config --format json \
+            | jq -e '.services.init.image == "text-extraction-api:check" and .services.init.pull_policy == "never"
+              and .services.searxng.volumes[0].source == "searxng-config"
+              and ([.services.init.volumes[].target] == ["/secrets", "/searxng"])'
 
       # The load-test override of load.yml: it parses on top of every worker, mounts the repo's
       # tests/ (paths resolve against the first file) read-only into the farm and the fake LLM,
@@ -469,11 +514,11 @@ jobs:
           jq -e '.services.farm.ports == null' compose.json
           jq -e '[.services[] | .ports // [] | .[] | select(.target != 8080)] | length == 8
             and all(.host_ip == "127.0.0.1")' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "farm" and .key != "fake-llm"))
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng" and .key != "farm" and .key != "fake-llm"))
             | all(.value.environment | .OUTBOUND_MIN_DELAY_MS == "0" and .DOCLING_ENABLED == "true"
               and .LLM_BASE_URL == "http://fake-llm:8000/v1" and (.VALKEY_URL | startswith("redis://")))' compose.json
           jq -e '.services["asr-worker"].environment | .ASR_MODEL == "large-v3-turbo" and .ASR_MODELS_PATH == "/models"' compose.json
-          jq -e '[.services | to_entries[] | select(.value.healthcheck != null and .key != "valkey" and .key != "farm" and .key != "fake-llm")]
+          jq -e '[.services | to_entries[] | select(.value.healthcheck != null and .key != "valkey" and .key != "searxng" and .key != "farm" and .key != "fake-llm")]
             | length == 7 and all(.value.healthcheck | .start_period == "10m0s" and .start_interval == "5s" and .retries == 6
               and (.test | join(" ") | contains("127.0.0.1:9090/ready")))' compose.json
           jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "lg"' compose.json
@@ -494,13 +539,20 @@ jobs:
           docker compose config -q
           docker compose config --format json > compose.json
           jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
-          jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 11
+          jq -e '.services | to_entries | map(select(.key != "valkey" and .key != "searxng")) | length == 11
             and all(.value.build == null
               and .value.pull_policy == "always"
               and (.value.image | test("^ghcr\\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?:[0-9]+\\.[0-9]+$")))' compose.json
           jq -e '.services | .["browser-worker"].image | contains("/text-extraction-browser:")' compose.json
           jq -e '.services.api.ports == [{"mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp"}]' compose.json
           jq -e '.networks.default.name == "text-extraction-web"' compose.json
+          # SearXNG reads only its own volume, never the secrets, without filling it from its image
+          # (nocopy, so the volume keeps init's owner); init writes it and restarts it.
+          jq -e '.services.searxng.volumes == [{"type": "volume", "source": "searxng-config",
+              "target": "/etc/searxng", "read_only": true, "volume": {"nocopy": true}}]
+            and .services.searxng.depends_on.init.restart == true
+            and ([.services[] | .volumes // [] | .[] | select(.source == "searxng-config") | .target]
+              | sort == ["/etc/searxng", "/searxng"])' compose.json
           TEXT_EXTRACTION_VERSION=0.1 API_PORT=127.0.0.1:8080 DOMAIN=api.example.org docker compose config --format json \
             | jq -e '.services.api.image == "ghcr.io/janschachtschabel/text-extraction:0.1"
               and .services.api.ports[0].host_ip == "127.0.0.1"

@@ -25,7 +25,8 @@ class ServiceInfoTool(ModelTool):
             name="service_info",
             description="Name and version of the service, the caller's key name and role, "
             "which features the key can use (browser, screenshots, OCR, PII, transcription, "
-            "LLM, unblock ...) and the limits (batch size, site pages, upload bytes, rate).",
+            "LLM, unblock, web search ...) and the limits (batch size, site pages, upload bytes, "
+            "search results, rate).",
             parameters=NoArguments.model_json_schema(),
             annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
         )

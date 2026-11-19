@@ -148,6 +148,24 @@ No llm workers are deployed: the LLM is off (LLM_ENABLED=false), so structured o
 semantic chunking answer 400 invalid_request.
 {{- end }}
 
+{{- $searchOn := eq (toString (get .Values.config "SEARCH_ENABLED" | default "false")) "true" }}
+{{- $searchUrl := trim (toString (get .Values.config "SEARCH_URL" | default "")) }}
+{{- if and $searchOn (not .Values.searxng.enabled) (not $searchUrl) }}
+
+WARNING: config.SEARCH_ENABLED is "true" but searxng.enabled is false and no config.SEARCH_URL is set:
+  the API asks the code's default http://searxng:8080, which does not exist in this release, so every
+  search answers failed / search_failed. Set searxng.enabled=true or config.SEARCH_URL to your own
+  SearXNG.
+{{- else if and .Values.searxng.enabled (not $searchOn) }}
+
+NOTE: searxng.enabled is true but config.SEARCH_ENABLED is not "true": SearXNG runs, yet
+  POST /v1/search answers 400 and the MCP tool web_search reports search as off. Set
+  config.SEARCH_ENABLED="true", or searxng.enabled=false to save the pod.
+{{- else if $searchOn }}
+
+Web search is on (POST /v1/search, MCP tool web_search) through {{ if .Values.searxng.enabled }}SearXNG {{ include "text-extraction.searxngName" . }}{{ else }}{{ $searchUrl }}{{ end }}.
+{{- end }}
+
 {{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") (or .Values.workers.docling.enabled $asr.enabled) }}
 
 NOTE: Valkey keeps its default maxmemory (768mb). With Docling or ASR workers it also holds the bytes

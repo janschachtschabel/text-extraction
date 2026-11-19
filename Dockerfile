@@ -291,13 +291,14 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["text-extraction-nlp-worker"]
 
 # Runtime stage (default target): only the virtual environment, no build tools, models, data or
-# browsers. /secrets stays empty: it is the mount point of the root docker-compose.yml's secrets
-# volume, owned by the user, so `text-extraction-init` (the first container on that volume) can
-# write it.
+# browsers. /secrets and /searxng stay empty: they are the mount points of the root
+# docker-compose.yml's volumes `secrets` and `searxng-config`, owned by the user, so
+# `text-extraction-init` (the first container on both) can write them; a fresh named volume takes
+# the owner of the folder it is first mounted on.
 FROM python:3.13-slim AS runtime
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
-    && install -d -o 10001 -g 10001 /secrets
+    && install -d -o 10001 -g 10001 /secrets /searxng
 COPY --from=tini /tini /usr/bin/tini
 COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH \

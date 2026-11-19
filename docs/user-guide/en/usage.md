@@ -144,9 +144,9 @@ are whole.
 `GET /v1/info` names the service and the key, and lists what the key can use (`features`:
 `jobs`, `browser`, `screenshots`, `unblock`, `media`, `ocr`, `pii`, `transcribe`, `llm`,
 `llm_needs_key`, `semantic_chunking`, `describe_images`, `site_structure`, `compliance_choice`,
-`compliance_default`) and the `limits` (`batch_max_urls`, `site_max_depth`, `site_max_pages`,
-`document_max_bytes`, `media_upload_max_bytes`, `request_max_body_bytes`,
-`rate_limit_per_minute`).
+`compliance_default`, `search`) and the `limits` (`batch_max_urls`, `site_max_depth`,
+`site_max_pages`, `document_max_bytes`, `media_upload_max_bytes`, `request_max_body_bytes`,
+`rate_limit_per_minute`, `search_max_results`).
 
 ### Cancel a job
 

@@ -69,10 +69,11 @@ uv run pre-commit install    # install the git hooks
 ## Docker Compose
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM) und ein
-Valkey mit Passwort. Es schaltet den Browser-Modus, OCR, die Transkription, die Behandlung
-personenbezogener Daten, das LLM, den MCP-Server und die Spielwiese ein. Es gibt zwei
-Compose-Dateien:
+Browser-Worker, die optionalen Worker (OCR, Transkription, personenbezogene Daten, LLM), ein
+Valkey mit Passwort und SearXNG für die Websuche. Es schaltet den Browser-Modus, OCR, die
+Transkription, die Behandlung personenbezogener Daten, das LLM, die Websuche, den MCP-Server und
+die Spielwiese ein. Die Websuche braucht die Images von Release 0.1.13 oder neuer; wie man sie
+ausschaltet, steht unter [Suche](search.md). Es gibt zwei Compose-Dateien:
 
 - `docker-compose.yml` startet die veröffentlichten Images von
   `ghcr.io/janschachtschabel/text-extraction` (linux/amd64) und kommt ohne eine einzige Variable

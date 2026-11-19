@@ -213,6 +213,25 @@ curl -H "Authorization: Bearer $KEY" -F file=@report.pdf -F format=markdown \
   -F 'chunking={"strategy": "markdown", "size": 800}' http://localhost:8080/v1/extract/file
 ```
 
+## `POST /v1/search`
+
+Eine Websuche über das SearXNG des Dienstes (wenn der Betreiber sie eingeschaltet hat,
+`SEARCH_ENABLED`). Die Quellen und die Antwort beschreibt [Suche](search.md).
+
+| Feld | Typ | Standard | Bedeutung |
+| --- | --- | --- | --- |
+| `query` | String, 1 bis 500 Zeichen | Pflicht | Die Suchbegriffe. |
+| `max_results` | Ganzzahl, 1 bis `SEARCH_MAX_RESULTS` | `10` (`SEARCH_MAX_RESULTS`, wenn das kleiner ist) | Höchstens so viele Treffer. |
+| `language` | String: 2 oder 3 Kleinbuchstaben, wahlweise mit `-` und einer Region aus 2 Buchstaben | nicht gesetzt | Ein Sprachcode wie `de`, `en` oder `de-DE`: Treffer in dieser Sprache, wo eine Quelle das unterstützt. Nicht gesetzt: jede Sprache. Eine andere Form ergibt 422. |
+| `page` | Ganzzahl, 1 bis 10 | `1` | Die Ergebnisseite: `2` liefert die nächsten Treffer. |
+| `time_range` | `day`, `month` oder `year` | nicht gesetzt | Nur Treffer aus dem letzten Tag, Monat oder Jahr, wo eine Quelle das unterstützt. |
+| `sources` | Liste von Strings | nicht gesetzt | Die Quellen, die gefragt werden, aus `SEARCH_SOURCES` (in beliebiger Schreibung). Nicht gesetzt: alle Quellen. Eine leere Liste, ein leerer Name oder ein anderer Name ergibt 422. |
+
+<!-- request: POST /v1/search -->
+```json
+{"query": "photosynthesis", "language": "en", "max_results": 10, "sources": ["wikipedia", "arxiv"]}
+```
+
 ## Optionsobjekte
 
 ### `pii`

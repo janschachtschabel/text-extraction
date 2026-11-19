@@ -150,9 +150,9 @@ Website-Job; ohne `view` (oder mit `view=full`) sind die Einträge vollständig.
 `GET /v1/info` nennt Dienst und Schlüssel und listet, was der Schlüssel nutzen kann (`features`:
 `jobs`, `browser`, `screenshots`, `unblock`, `media`, `ocr`, `pii`, `transcribe`, `llm`,
 `llm_needs_key`, `semantic_chunking`, `describe_images`, `site_structure`, `compliance_choice`,
-`compliance_default`), sowie die Grenzen (`limits`: `batch_max_urls`, `site_max_depth`,
+`compliance_default`, `search`), sowie die Grenzen (`limits`: `batch_max_urls`, `site_max_depth`,
 `site_max_pages`, `document_max_bytes`, `media_upload_max_bytes`, `request_max_body_bytes`,
-`rate_limit_per_minute`).
+`rate_limit_per_minute`, `search_max_results`).
 
 ### Einen Job abbrechen
 
