@@ -81,7 +81,7 @@ A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and 
 | `get_job_screenshot` | The image of a screenshot job, or of an extraction with `screenshot: true` that continued as a job (PNG, JPEG or WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; no `options` |
 | `cancel_job` | Cancel a job and delete it with its results. | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
 | `service_info` | The service's name and version, the key's name and role, the features the key can use and the limits. | `GET /v1/info` | none |
-| `web_search` | Search the web through the service's SearXNG; read the hits with `extract_url` or `batch_extract`. | `POST /v1/search` | `query` (required), `max_results` (10, at most `SEARCH_MAX_RESULTS`), `language`, `sources` (from `SEARCH_SOURCES`), `page` (1), `time_range`; no `options`; needs `SEARCH_ENABLED=true` |
+| `web_search` | Search the web through the service's SearXNG; the top hits of every source first, one hit per page; read the hits with `extract_url` or `batch_extract`. | `POST /v1/search` | `query` (required), `max_results` (10, at most `SEARCH_MAX_RESULTS`), `language` (`de` for German hits), `sources` (from `SEARCH_SOURCES`), `page` (1), `time_range`; no `options`; needs `SEARCH_ENABLED=true` |
 
 `options` takes any further field of the route's REST body (see [Parameters](parameters.md)),
 for example `{"pii": {"mode": "mask"}}` or `{"metadata": false}`; a field given both as an

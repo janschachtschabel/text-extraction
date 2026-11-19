@@ -85,7 +85,7 @@ und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines 
 | `get_job_screenshot` | Das Bild eines Screenshot-Jobs oder einer Extraktion mit `screenshot: true`, die als Job weiterlief (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
 | `cancel_job` | Einen Job abbrechen und mit seinen Ergebnissen löschen. | `DELETE /v1/jobs/{id}` | `job_id`; keine `options` |
 | `service_info` | Name und Version des Dienstes, Name und Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. | `GET /v1/info` | keine |
-| `web_search` | Das Web über das SearXNG des Dienstes durchsuchen; die Treffer mit `extract_url` oder `batch_extract` lesen. | `POST /v1/search` | `query` (Pflicht), `max_results` (10, höchstens `SEARCH_MAX_RESULTS`), `language`, `sources` (aus `SEARCH_SOURCES`), `page` (1), `time_range`; keine `options`; braucht `SEARCH_ENABLED=true` |
+| `web_search` | Das Web über das SearXNG des Dienstes durchsuchen; zuerst die besten Treffer jeder Quelle, ein Treffer pro Seite; die Treffer mit `extract_url` oder `batch_extract` lesen. | `POST /v1/search` | `query` (Pflicht), `max_results` (10, höchstens `SEARCH_MAX_RESULTS`), `language` (`de` für deutsche Treffer), `sources` (aus `SEARCH_SOURCES`), `page` (1), `time_range`; keine `options`; braucht `SEARCH_ENABLED=true` |
 
 `options` nimmt jedes weitere Feld des REST-Bodys der Route (siehe [Parameter](parameters.md)),
 zum Beispiel `{"pii": {"mode": "mask"}}` oder `{"metadata": false}`; ein Feld, das sowohl als

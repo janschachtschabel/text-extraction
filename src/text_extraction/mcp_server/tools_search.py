@@ -37,8 +37,11 @@ class WebSearchTool(ModelTool):
         super().__init__(
             name="web_search",
             description="Search the web through the service's own search (POST /v1/search): "
-            "each hit has url, title, snippet, the sources that found it and its date. Read a "
-            "hit's text with extract_url, several hits with batch_extract. A search whose "
+            "each hit has url, title, snippet, the sources that found it and its date. With "
+            "several sources, every source's top hit comes first, then the second places, and "
+            "a page found by several sources is one hit (duplicates merged). For German hits "
+            'set language "de". '
+            "Read a hit's text with extract_url, several hits with batch_extract. A search whose "
             "sources did not all answer is partial; one that failed has status failed and "
             "error.retryable. service_info tells whether the key may search (features.search).",
             parameters=lean_schema(WebSearchArguments),

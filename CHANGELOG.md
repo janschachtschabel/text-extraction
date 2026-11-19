@@ -22,6 +22,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   second, and so on (SearXNG's score had put pages found by several engines first). A page found
   as `http` and `https`, with and without `www.`, a trailing slash or `utm_` parameters is one hit
   that names all its sources.
+- MCP: `web_search` gets the same sources, order and merged duplicates as `POST /v1/search`; its
+  description names the order and `language: "de"` for German hits.
 
 ## [0.1.15] - 2026-11-19
 
