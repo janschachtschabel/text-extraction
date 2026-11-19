@@ -16,7 +16,7 @@ most 200 characters (read no further than that), at most 8 ``rel`` tokens, and a
 
 import re
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -26,11 +26,13 @@ from text_extraction.compliance import robots_metas_say, x_robots_tag_says
 from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
 from text_extraction.convert.markup import attr, parse_html
 from text_extraction.page_types import link_category
+from text_extraction.site.apis import detect_site_apis
 from text_extraction.site.types import (
     LINK_TEXT_MAX_CHARS,
     LinkKind,
     LinkRegion,
     LinkSource,
+    SiteApis,
     SiteLink,
 )
 from text_extraction.site.urls import normalize_url, site_host
@@ -61,6 +63,7 @@ class PageLinks:
     links: list[SiteLink]
     nofollow: bool
     truncated: bool
+    apis: SiteApis = field(default_factory=SiteApis)
 
 
 def site_links(
@@ -106,7 +109,12 @@ def site_links(
                 category=link_category(url, text, kind),
             )
         )
-    return PageLinks(links=links, nofollow=_nofollow(soup, headers), truncated=truncated)
+    return PageLinks(
+        links=links,
+        nofollow=_nofollow(soup, headers),
+        truncated=truncated,
+        apis=detect_site_apis(soup, base_url, headers),
+    )
 
 
 def _link_elements(soup: BeautifulSoup) -> Iterator[Tag]:
