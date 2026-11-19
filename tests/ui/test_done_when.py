@@ -58,6 +58,7 @@ SINGLE_DRIVEN: Final = frozenset(
     {"login", "info", "extract", "file", "screenshot", "structured", "chunk", "job"}
 )
 JOBS_DRIVEN: Final = frozenset({"batch", "site-structure", "job", "artifact", "cancel"})
+SEARCH_DRIVEN: Final = frozenset({"search", "batch"})
 
 
 @dataclass(frozen=True)
@@ -253,7 +254,7 @@ def test_operations_cover_every_rest_route() -> None:
     """The two tests below together drive every entry of ``OPERATIONS``: each proves that it
     drove its set (from the calls it forwarded), so an entry added to ``OPERATIONS`` fails here
     until a test drives it."""
-    assert set(OPERATIONS) == SINGLE_DRIVEN | JOBS_DRIVEN
+    assert set(OPERATIONS) == SINGLE_DRIVEN | JOBS_DRIVEN | SEARCH_DRIVEN
 
 
 def test_driven_tells_login_from_info() -> None:
@@ -521,6 +522,58 @@ def test_batches_site_tree_and_cancel(
     assert (status, envelope["error"]["code"]) == ("HTTP 404", "not_found")
 
     assert driven(forwarded) >= JOBS_DRIVEN
+
+
+@pytest.fixture
+def search_live(httpserver: HTTPServer) -> Iterator[Live]:
+    """The setup above with the web search on (package 25): SEARCH_URL is the sample site's
+    server, whose ``/search`` answers once as SearXNG would, with the three subpages as hits."""
+    origin = httpserver.url_for("/").rstrip("/")
+    hits = [
+        {"url": f"{origin}/{name}.html", "title": f"Einheit {name}", "engines": ["wikipedia"]}
+        for name in SUBPAGES
+    ]
+    answer = {"query": "Einheit", "results": hits, "suggestions": [], "unresponsive_engines": []}
+    httpserver.expect_oneshot_request("/search").respond_with_json(answer)
+    with serving(
+        httpserver, search_enabled=True, search_url=origin, search_sources=["wikipedia"]
+    ) as running:
+        yield running
+
+
+def test_search_and_extract_selected(
+    search_live: Live, forwarded: list[Call], lang: Language
+) -> None:
+    """The Search tab: its form forwards POST /v1/search, the hits are listed with a box each,
+    and "Extract selected" starts a batch of the ticked hits that the worker completes; with
+    nothing ticked the form error comes back and no batch is started."""
+    urls = page_urls(search_live)
+    with client_of(search_live, lang, HEADERS) as ui:
+        shell = post(ui, "login")
+        assert shell.xpath("//section[@data-panel='search']//form[@id='search-form']")
+
+        shown = post(ui, "search", query="Einheit")
+        status, envelope = shown_answer(shown)
+        assert (status, envelope["status"]) == ("HTTP 200", "success")
+        [search_call] = calls_of(forwarded, "search")
+        assert (search_call.view, search_call.status) == ("/ui/run/search", 200)
+        [form] = shown.xpath("//form[@id='search-hits-form']")
+        assert form.xpath(".//input[@name='url']/@value") == urls
+        assert form.get("hx-post") == "/ui/run/batch-urls"
+
+        nothing = post(ui, "batch-urls", **batch_options())
+        assert texts(nothing, "//div[@role='alert']") == [translate(lang, "jobs.no_urls")]
+        assert calls_of(forwarded, "batch") == []
+
+        ticked = [urls[0], urls[2]]
+        started = post(ui, "batch-urls", url=ticked, **batch_options())
+        [batch_id] = job_ids(started)
+        done = wait_completed(ui, [batch_id])
+        success = translate(lang, "status.success")
+        assert [row[:3] for row in rows(done, batch_id)] == [
+            [str(index), url, success] for index, url in enumerate(ticked)
+        ]
+    assert driven(forwarded) >= SEARCH_DRIVEN
 
 
 @pytest.fixture

@@ -19,13 +19,14 @@ from text_extraction.tracing import current_trace_id
 
 SERVICE_NAME = "text-extraction"
 
-OfferedFeature = Literal["ocr", "pii", "transcribe", "llm", "llm_needs_key", "semantic"]
+OfferedFeature = Literal["ocr", "pii", "transcribe", "llm", "llm_needs_key", "semantic", "search"]
 # The switch (``feature_access``) behind each offered feature.
 _SWITCH: Final[dict[str, Feature]] = {
     "ocr": "ocr",
     "pii": "pii",
     "transcribe": "asr",
     "llm": "llm",
+    "search": "search",
 }
 
 
@@ -33,15 +34,17 @@ def offered_features(
     role: str | None, settings: Settings
 ) -> tuple[dict[OfferedFeature, bool], frozenset[str]]:
     """The optional features a key of ``role`` can use (the service has them and the role may
-    use them, ``feature_access.allowed``), and those the service has but keeps for admin keys;
-    ``llm_needs_key`` (the LLM is offered and the service has no key) and ``semantic`` (semantic
-    chunking: the LLM and an embedding model) follow from them. The UI's forms
-    (``ui.forms.feature_offer``) and ``GET /v1/info`` both read it."""
+    use them, ``feature_access.allowed``), and those the service has but keeps for admin keys
+    (``search`` too: ``SEARCH_ALLOW_USERS``, package 25); ``llm_needs_key`` (the LLM is offered
+    and the service has no key) and ``semantic`` (semantic chunking: the LLM and an embedding
+    model) follow from them. The UI's forms (``ui.forms.feature_offer``) and ``GET /v1/info``
+    both read it."""
     has: dict[OfferedFeature, bool] = {
         "ocr": ocr_available(settings),
         "pii": pii_available(settings),
         "transcribe": asr_available(settings) and settings.media_enabled,
         "llm": llm_available(settings),
+        "search": settings.search_enabled,
     }
     admin_only = frozenset(
         name for name, on in has.items() if on and not allowed(_SWITCH[name], role, settings)
@@ -52,6 +55,12 @@ def offered_features(
     offered["llm_needs_key"] = offered["llm"] and settings.llm_api_key is None
     offered["semantic"] = offered["llm"] and settings.llm_embedding_model is not None
     return offered, admin_only
+
+
+def search_offered(role: str | None, settings: Settings) -> bool:
+    """Whether a key of ``role`` can search: ``SEARCH_ENABLED`` and, for a user key,
+    ``SEARCH_ALLOW_USERS``."""
+    return settings.search_enabled and allowed("search", role, settings)
 
 
 class InfoFeatures(BaseModel):
@@ -80,6 +89,10 @@ class InfoFeatures(BaseModel):
         "for `ignore` needs an admin key)."
     )
     compliance_default: ComplianceMode = Field(description="The mode without a request.")
+    search: bool = Field(
+        description="Web search: `POST /v1/search` (`SEARCH_ENABLED`; user keys while "
+        "`SEARCH_ALLOW_USERS`)."
+    )
 
 
 class InfoLimits(BaseModel):
@@ -101,6 +114,10 @@ class InfoLimits(BaseModel):
     )
     rate_limit_per_minute: int | None = Field(
         description="Requests per minute of the key; null while rate limiting is off."
+    )
+    search_max_results: int | None = Field(
+        description="Most `max_results` of a web search (`SEARCH_MAX_RESULTS`); null when the "
+        "key cannot search."
     )
 
 
@@ -134,6 +151,7 @@ def _features(
         site_structure=settings.jobs_enabled,
         compliance_choice=admin or settings.compliance_allow_override,
         compliance_default=settings.compliance_default,
+        search=search_offered(principal.role, settings),
     )
 
 
@@ -153,6 +171,9 @@ def _limits(
         media_upload_max_bytes=(settings.media_upload_max_bytes if offered["transcribe"] else None),
         request_max_body_bytes=settings.request_max_body_bytes,
         rate_limit_per_minute=rate if settings.rate_limit_enabled else None,
+        search_max_results=(
+            settings.search_max_results if search_offered(principal.role, settings) else None
+        ),
     )
 
 

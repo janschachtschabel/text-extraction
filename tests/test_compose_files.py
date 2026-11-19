@@ -14,6 +14,7 @@ import yaml
 ROOT_DIR = Path(__file__).resolve().parent.parent
 ROOT_FILE = ROOT_DIR / "docker-compose.yml"
 BUILD_FILE = ROOT_DIR / "docker-compose.build.yml"
+DOCKERFILE = ROOT_DIR / "Dockerfile"
 IMAGE = re.compile(
     r"^ghcr\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?"
     r":\$\{TEXT_EXTRACTION_VERSION:-[0-9]+\.[0-9]+\}$"
@@ -26,6 +27,9 @@ PUBLISHED = {
     "text-extraction-asr:dev": "text-extraction-asr",
     "text-extraction-nlp:dev": "text-extraction-nlp",
 }
+# SearXNG (package 25): the newest tag that was at least 14 days old when it was pinned (the
+# supply-chain rule of CONTRIBUTING.md), the same in both files.
+SEARXNG_IMAGE = "searxng/searxng:2026.11.2-cccbc9e15"
 # Settings only the root file has: the secrets the init service generates.
 ROOT_ONLY_ENV = {
     "VALKEY_URL_FILE": "/secrets/valkey-url",
@@ -46,7 +50,9 @@ def _root_services() -> dict[str, Any]:
 
 
 def _app_services() -> dict[str, Any]:
-    return {name: s for name, s in _root_services().items() if name not in ("init", "valkey")}
+    return {
+        name: s for name, s in _root_services().items() if name not in ("init", "valkey", "searxng")
+    }
 
 
 def _build_services() -> dict[str, Any]:
@@ -75,7 +81,11 @@ def test_no_build_bind_mount_or_external_network() -> None:
     for name, service in root["services"].items():
         assert "build" not in service, name
         for volume in service.get("volumes", []):
-            source = volume.split(":", 1)[0]
+            if isinstance(volume, dict):
+                assert volume["type"] == "volume", f"{name}: {volume}"
+                source = volume["source"]
+            else:
+                source = volume.split(":", 1)[0]
             assert not source.startswith((".", "/", "~")), f"{name}: bind mount {volume}"
     for network in root.get("networks", {}).values():
         assert not network.get("external"), "an external network aborts the deploy when missing"
@@ -93,8 +103,8 @@ def test_only_the_api_joins_the_shared_network() -> None:
 
 def test_every_image_is_published() -> None:
     for name, service in _root_services().items():
-        if name == "valkey":
-            assert service["image"] == _build_services()["valkey"]["image"]
+        if name in ("valkey", "searxng"):
+            assert service["image"] == _build_services()[name]["image"]
             continue
         assert IMAGE.match(service["image"]), name
         # A redeploy picks up the newest release of the minor line without a manual pull.
@@ -128,7 +138,8 @@ def test_init_writes_the_secrets_volume() -> None:
     init = _root_services()["init"]
     assert init["command"] == ["text-extraction-init"]
     assert init["restart"] == "no"
-    assert init["volumes"] == ["secrets:/secrets"]
+    # SearXNG's settings go to a volume of their own; the key stays in `secrets`.
+    assert init["volumes"] == ["secrets:/secrets", "searxng-config:/searxng"]
     assert init["environment"]["DOMAIN"] == "${DOMAIN:-}"
     assert "depends_on" not in init
 
@@ -151,6 +162,95 @@ def test_app_service_reads_the_secrets_after_init(name: str) -> None:
     assert service["depends_on"]["init"] == {"condition": "service_completed_successfully"}
     assert service["depends_on"]["valkey"] == {"condition": "service_healthy"}
     assert service["env_file"] == [{"path": ".env", "required": False}]
+
+
+# --- Web search: SearXNG (package 25) --------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [ROOT_FILE, BUILD_FILE], ids=["root", "build"])
+def test_searxng_is_a_hardened_backend_service(path: Path) -> None:
+    searxng = _load(path)["services"]["searxng"]
+
+    assert searxng["image"] == SEARXNG_IMAGE
+    assert "ports" not in searxng, "SearXNG is reached by the api only, never published"
+    assert "labels" not in searxng
+    # The image's own unprivileged user: its entrypoint then neither chowns nor writes the CA store.
+    assert searxng["user"] == "977:977"
+    assert searxng["read_only"] is True
+    assert searxng["tmpfs"] == ["/tmp", "/var/cache/searxng:uid=977,gid=977"]  # noqa: S108
+    assert searxng["security_opt"] == ["no-new-privileges:true"]
+    assert searxng["cap_drop"] == ["ALL"]
+    assert "cap_add" not in searxng
+    assert "/healthz" in " ".join(searxng["healthcheck"]["test"])
+    assert "valkey" not in searxng.get("depends_on", {}), "limiter off: no Valkey of its own"
+
+
+def test_searxng_is_on_the_backend_network_only() -> None:
+    # Not the shared Traefik network; `backend` is not internal, so the engines reach the web.
+    root = _load(ROOT_FILE)
+    assert root["services"]["searxng"]["networks"] == ["backend"]
+    assert not root["networks"]["backend"].get("internal")
+    assert "networks" not in _build_services()["searxng"]
+
+
+def test_searxng_reads_only_its_own_config_volume() -> None:
+    # A volume of its own, never the secrets volume: a volume subpath needs Docker Engine 26, and
+    # an older daemon would mount every secret into SearXNG.
+    searxng = _root_services()["searxng"]
+    # nocopy: Docker fills an empty named volume from the image of every container created on
+    # it, the volume root's owner included. compose creates searxng before init has run, so
+    # without nocopy SearXNG's image folder (owned 977) would take the volume from init (10001),
+    # and init's chmod would fail with EPERM (image.yml run 44444274061).
+    assert searxng["volumes"] == [
+        {
+            "type": "volume",
+            "source": "searxng-config",
+            "target": "/etc/searxng",
+            "read_only": True,
+            "volume": {"nocopy": True},
+        }
+    ]
+    assert "subpath" not in _text()
+    mounting = sorted(
+        name
+        for name, service in _root_services().items()
+        for volume in service.get("volumes", [])
+        if (volume.get("source") if isinstance(volume, dict) else volume.split(":", 1)[0])
+        == "searxng-config"
+    )
+    assert mounting == ["init", "searxng"]
+    assert "searxng-config" in _load(ROOT_FILE)["volumes"]
+    # restart: a redeploy that runs init again (a new template) restarts SearXNG too.
+    assert searxng["depends_on"] == {
+        "init": {"condition": "service_completed_successfully", "restart": True}
+    }
+    assert searxng["restart"] == "unless-stopped"
+    assert "environment" not in searxng
+    assert "env_file" not in searxng
+
+
+def test_build_file_mounts_the_template_with_a_key_per_start() -> None:
+    # No init service in the build file: the template is bind-mounted and the key comes from
+    # SEARXNG_SECRET, generated afresh on each start (it signs nothing that outlives the container).
+    searxng = _build_services()["searxng"]
+    assert searxng["volumes"] == [
+        "./src/text_extraction/data/searxng-settings.yml:/etc/searxng/settings.yml:ro"
+    ]
+    entrypoint = " ".join(searxng["entrypoint"])
+    assert "SEARXNG_SECRET" in entrypoint
+    assert "/dev/urandom" in entrypoint
+    assert entrypoint.endswith("exec /usr/local/searxng/entrypoint.sh")
+
+
+@pytest.mark.parametrize("path", [ROOT_FILE, BUILD_FILE], ids=["root", "build"])
+def test_api_searches_through_searxng(path: Path) -> None:
+    services = _load(path)["services"]
+    assert services["api"]["environment"]["SEARCH_ENABLED"] == "${SEARCH_ENABLED:-true}"
+    # The API answers search_failed while SearXNG is down; it does not wait for it.
+    assert "searxng" not in services["api"]["depends_on"]
+    for name, service in services.items():
+        if name != "api":
+            assert "SEARCH_ENABLED" not in (service.get("environment") or {}), name
 
 
 # --- In step with the build file ------------------------------------------------------------
@@ -181,4 +281,16 @@ def test_app_service_matches_the_build_file(name: str) -> None:
 
 
 def test_same_volumes_as_the_build_file_plus_secrets() -> None:
-    assert set(_load(ROOT_FILE)["volumes"]) == set(_load(BUILD_FILE)["volumes"]) | {"secrets"}
+    assert set(_load(ROOT_FILE)["volumes"]) == set(_load(BUILD_FILE)["volumes"]) | {
+        "secrets",
+        "searxng-config",
+    }
+
+
+def test_the_api_image_owns_the_mount_points_of_init() -> None:
+    # A fresh named volume takes the owner of the image's folder it is mounted on, so init (uid
+    # 10001) can write both volumes (the Hostinger rule for volumes of a non-root service).
+    runtime = DOCKERFILE.read_text(encoding="utf-8").split(" AS runtime\n", 1)[1]
+    runtime = runtime.split("\nFROM ", 1)[0]
+    assert "install -d -o 10001 -g 10001 /secrets /searxng" in runtime
+    assert "\nUSER 10001\n" in runtime

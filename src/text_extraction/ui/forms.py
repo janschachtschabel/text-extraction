@@ -24,6 +24,7 @@ from typing import Any, Final, Literal
 from text_extraction.compliance import ComplianceMode
 from text_extraction.file_api import PATH as FILE_PATH
 from text_extraction.info import offered_features
+from text_extraction.search_api import PATH as SEARCH_PATH
 from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
@@ -33,6 +34,10 @@ DEFAULT_WAIT_SECONDS: Final = 25
 DEFAULT_MAX_IMAGES: Final = 5
 DEFAULT_SITE_DEPTH: Final = 2
 DEFAULT_SITE_PAGES: Final = 100
+DEFAULT_SEARCH_RESULTS: Final = 10
+DEFAULT_SEARCH_PAGE: Final = 1
+# The search form's "Time range": the first sends nothing (any time).
+TIME_RANGE_CHOICES: Final = ("", "day", "month", "year")
 CHECKED: Final = "on"
 # The "Site rules" choice: its form field and the radio value of the deployment's default step.
 ACCESS_FIELD: Final = "access"
@@ -101,6 +106,7 @@ OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType(
         "chunk": Operation("POST", CHUNK_PATH, "forms/chunk.html"),
         "batch": Operation("POST", "/v1/batch", "forms/batch.html"),
         "site-structure": Operation("POST", SITE_PATH, "forms/site_structure.html"),
+        "search": Operation("POST", SEARCH_PATH, "forms/search.html"),
         "job": Operation("GET", "/v1/jobs/{job_id}", ""),
         "artifact": Operation("GET", "/v1/jobs/{job_id}/artifacts/{name}", ""),
         "cancel": Operation("DELETE", "/v1/jobs/{job_id}", ""),
@@ -143,7 +149,19 @@ class OptionsError(MessageError):
 # ``<prefix>-form`` (htmx sends it as ``HX-Trigger``), a control's ``<prefix>-<field>`` with
 # each ``_`` of the field's name as ``-`` (ruling P12-S8).
 FORM_PREFIXES: Final = frozenset(
-    {"extract", "file", "screenshot", "structured", "chunk", "batch", "site", "tree", "preview"}
+    {
+        "extract",
+        "file",
+        "screenshot",
+        "structured",
+        "chunk",
+        "batch",
+        "site",
+        "tree",
+        "preview",
+        "search",
+        "search-hits",
+    }
 )
 FORM_ID_SUFFIX: Final = "-form"
 
@@ -399,6 +417,7 @@ class FeatureOffer:
     llm: bool
     llm_needs_key: bool
     semantic: bool = False  # semantic chunking: the LLM and LLM_EMBEDDING_MODEL
+    search: bool = False  # web search (package 25): its tab is shown only then
     # The features the service has but keeps for admin keys (``*_ALLOW_USERS``, P19-D1 b).
     admin_only: frozenset[str] = frozenset()
 
@@ -429,6 +448,7 @@ def feature_offer(role: str, settings: Settings) -> FeatureOffer:
         llm=offered["llm"],
         llm_needs_key=offered["llm_needs_key"],
         semantic=offered["semantic"],
+        search=offered["search"],
         admin_only=admin_only,
     )
 
@@ -594,6 +614,26 @@ def _site_fields(form: Mapping[str, str]) -> Fields:
     return fields
 
 
+def _search_fields(form: Mapping[str, str]) -> Fields:
+    """The search form (package 25). ``sources`` holds the ticked sources one per line (the view
+    joins the repeated field, `REPEATED_FIELDS`); none ticked sends no ``sources``, which asks
+    every source (REST refuses an empty list). An empty language or time range sends nothing."""
+    fields: Fields = {}
+    _typed(fields, form, "query")
+    sources = [line.strip() for line in form.get("sources", "").splitlines() if line.strip()]
+    if sources:
+        fields["sources"] = _Field(sources, set_by_user=True)
+    _typed(fields, form, "language")
+    for name, default in (
+        ("max_results", DEFAULT_SEARCH_RESULTS),
+        ("page", DEFAULT_SEARCH_PAGE),
+    ):
+        value = _whole_number(form, name, default)
+        fields[name] = _Field(value, set_by_user=value != default)
+    _optional_choice(fields, form, "time_range", TIME_RANGE_CHOICES)
+    return fields
+
+
 _FORMS: Final[Mapping[str, Callable[[Mapping[str, str]], Fields]]] = MappingProxyType(
     {
         "info": _no_fields,
@@ -604,10 +644,22 @@ _FORMS: Final[Mapping[str, Callable[[Mapping[str, str]], Fields]]] = MappingProx
         "chunk": _chunk_fields,
         "batch": _batch_fields,
         "site-structure": _site_fields,
+        "search": _search_fields,
     }
 )
 # The operations whose form is one REST call shown as a result (``POST /ui/run/<op>``).
-SINGLE_OPERATIONS: Final = ("info", "extract", "file", "screenshot", "structured", "chunk")
+SINGLE_OPERATIONS: Final = (
+    "info",
+    "extract",
+    "file",
+    "screenshot",
+    "structured",
+    "chunk",
+    "search",
+)
+# The form fields an operation may post more than once (a group of checkboxes): the view joins
+# their values, one per line, into the one text field its form function reads.
+REPEATED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({"search": ("sources",)})
 
 
 def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:

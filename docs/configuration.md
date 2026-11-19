@@ -127,6 +127,7 @@ Keep these out of ConfigMaps, images and logs.
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 | `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
 | `LLM_API_KEY` | API key of the LLM endpoint (`LLM_BASE_URL`). A request header `X-LLM-Api-Key` wins over it. The llm workers send it; the API pods need it too, only to know whether there is one. Empty counts as unset. Never logged, never in a repr, never in an answer. | `workers.llm.apiKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none and never renders the key as a literal); rendered into the API pods and the llm worker container only, and only with `workers.llm.enabled`. docker compose: `.env` (every service). |
+| `SEARXNG_SECRET` | SearXNG's `server.secret_key` (web search, package 25). Read by the SearXNG container only, never by this service; SearXNG prefers it over the key in its `settings.yml` and refuses to start with the placeholder `ultrasecretkey`. | `searxng.secret.existingSecret` + `.existingSecretKey`, or a Secret the chart generates once and keeps (default); rendered into the SearXNG pods only, and only with `searxng.enabled`. The root `docker-compose.yml`: `init` generates it into the volume `secrets` (`searxng-secret`) and writes it into `settings.yml` in the volume `searxng-config`. `docker-compose.build.yml`: a fresh random key on every start of `searxng`. |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -297,6 +298,19 @@ services apart from `init` (a test keeps the two in step).
   (`text-extraction-init` and the `/secrets` mount point came with 0.1.8), an older one fails at
   `init`.
 - Every service except the one-shot ones restarts `unless-stopped`.
+- **Web search (package 25):** the service `searxng` runs SearXNG's own image (pinned tag, no
+  published port, only on `backend`, read-only root, user 977, all capabilities dropped). It
+  mounts only its own volume `searxng-config`, read-only at `/etc/searxng` and with `nocopy` (so
+  the volume keeps `init`'s owner), never the secrets: `init` renders `settings.yml` there from
+  the image's `data/searxng-settings.yml` on every start, with the key `searxng-secret` that it keeps in the volume `secrets`. Edits to that file
+  do not survive the next start, and `searxng` restarts whenever `init` ran again
+  (`restart: true`). The search needs 0.1.13 or later (the `/searxng` mount point and the `init`
+  that writes it): with an older image `searxng` gets no settings and does not start, so publish
+  0.1.13 before deploying this compose file. When `init` logs `init_searxng_settings_failed`,
+  it could not write the volume (the other secrets are written, the stack starts): remove the
+  volume `searxng-config` (it holds only the settings) and deploy again. The API does not wait
+  for SearXNG; while it is down a search answers `search_failed`. `SEARCH_ENABLED=false` in `.env` switches the search off; scale
+  the service away with `--scale searxng=0`.
 
 ## Response times
 
@@ -799,8 +813,37 @@ annotations for ingress-nginx.
 | `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash and a default port, `:443` for https and `:80` for http, are dropped, in the setting and in the `Origin` header). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
 | `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of these tools and of `get_job` (a larger `wait_seconds` is cut to it). 0 to 60. |
 | `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
-| `MCP_MAX_ANSWER_CHARS` | `200000` | Most characters of the envelope JSON of one tool answer. The answer carries that JSON twice (as `structuredContent` and as its last text), plus the hints and a screenshot, so the message is about twice this size. Over it, a `get_job` page drops its trailing items (its `next_offset` names the first) and then the lists `chunks`, `links`, `structured.tables` and `site.links` of a result are cut from the end, in that order, with the warning `mcp_answer_truncated` and a hint; REST returns them whole. `content` is bounded by `MCP_MAX_CONTENT_CHARS` alone, so with `MCP_ENABLED=true` this setting must be larger than it, or the service exits with code 2. 10000 to 50000000. |
+| `MCP_MAX_ANSWER_CHARS` | `200000` | Most characters of the envelope JSON of one tool answer. The answer carries that JSON twice (as `structuredContent` and as its last text), plus the hints and a screenshot, so the message is about twice this size. Over it, a `get_job` page drops its trailing items (its `next_offset` names the first) and then the lists `chunks`, `links`, `structured.tables` and `site.links` of a result, and the hits `results` of `web_search`, are cut from the end, in that order, with the warning `mcp_answer_truncated` and a hint; REST returns them whole. `content` is bounded by `MCP_MAX_CONTENT_CHARS` alone, so with `MCP_ENABLED=true` this setting must be larger than it, or the service exits with code 2. 10000 to 50000000. |
 | `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
+
+## Web search
+
+Package 25: `POST /v1/search` and the MCP tool `web_search` query a self-hosted SearXNG (an
+unmodified container of its own, AGPL-3.0, never imported) over its JSON API. The service never
+fetches the hits; the caller extracts the ones it wants. SearXNG must have the `json` format enabled
+(`search.formats` in its `settings.yml`), or it answers 403 and the search fails with
+`search_failed` (not retryable: a setting of SearXNG). The design and its rulings are in
+[architecture.md](architecture.md#web-search); the user guide's
+[Search](user-guide/en/search.md) page covers the sources and their limits.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SEARCH_ENABLED` | `false` | Serve the search route and tool (the tool is listed either way). Off: `400` `invalid_request`. The root compose files switch it on together with their `searxng` service (`SEARCH_ENABLED=false` in `.env` or the shell switches it off); Helm: `config.SEARCH_ENABLED` (`"false"`), separate from `searxng.enabled`, which runs SearXNG in the release. |
+| `SEARCH_URL` | `http://searxng:8080` | Base URL of SearXNG (http or https with a host; a trailing slash is dropped). It is the operator's endpoint, so the SSRF guard does not apply to it, nor do proxies from the environment or redirects. Anything else makes the service exit with code 2. Helm sets it to the release's SearXNG Service while `searxng.enabled` (a `config.SEARCH_URL` entry is then ignored). |
+| `SEARCH_TIMEOUT_SECONDS` | `10` | Time a search may take before it answers `failed` / `search_failed`, retryable. 1 to 120. SearXNG's own settings cut every engine at 8 s (`outgoing.max_request_timeout`), so a slow source becomes a failed source of a `partial` answer before this timeout ends the whole search. Keep it above 8: from 1 to 7 a single slow source fails the whole search. |
+| `SEARCH_MAX_RESULTS` | `50` | Most hits one request may ask for with `max_results`; more is `422`. 1 to 200. A request without `max_results` asks for 10, or for this limit when it is lower (the MCP tool's schema shows the same default). |
+| `SEARCH_CACHE_SECONDS` | `3600` | How long a finished search is kept in Valkey, per query (spacing ignored), language, page, time range, sources (order ignored) and `max_results`. Only a `success` answer is kept; a `partial` or `failed` one is asked again next time. `data.cache` says `hit`, `miss` or `bypass`. 0 turns the cache off. 0 to 86400. |
+| `SEARCH_SOURCES` | `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref` | SearXNG engines a request may name in `sources` (in any case), as a comma list; a request without `sources` asks all of them. A name outside the list, a blank name and `sources: []` are `422` (for a name outside, the message lists these). It must name exactly the engines SearXNG's `settings.yml` keeps (`data/searxng-settings.yml`). |
+| `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys; a user key gets `403` `forbidden`, and the playground shows such a key no Search tab (the Info tab says why). |
+
+A search is one hit of the key's rate limit. An answer is `partial` when some sources did not
+answer (`data.sources_failed` names each with SearXNG's reason), even when the others found no
+hit, and `failed` / `search_failed` when SearXNG is unreachable, too slow or answers no JSON, or
+when every source asked did not answer (then `error.details` lists each as `{"source",
+"reason"}`). `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the SearXNG
+container, not of this service: the root compose file's `init` keeps it in the volume `secrets`
+(`searxng-secret`) and renders `settings.yml` in the volume `searxng-config` from it on every
+start; Helm keeps it in a Secret (see [Secrets](#secrets)).
 
 ## UI
 

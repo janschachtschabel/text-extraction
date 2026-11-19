@@ -4,7 +4,7 @@ Runs a started service against real, public URLs and counts how many yield usabl
 what fixtures cannot: dead links, cookie and bot walls, script-only pages, sites whose text is
 mostly navigation. Nothing here runs in `uv run pytest` (`tests/live` is ignored there); the
 harnesses are unit-tested against fake services (`tests/test_live_classify.py`,
-`tests/test_live_run.py`, `tests/test_live_site.py`).
+`tests/test_live_run.py`, `tests/test_live_site.py`, `tests/test_live_search.py`).
 
 ## URL lists
 
@@ -165,6 +165,34 @@ The summary's formatting and paging are unit-tested against a fake service in
 `tests/test_live_site.py`. The build sandbox of package 9 had no route to the sites, so the
 run is a report-only step of the live workflow (below); its summary goes into the pull request.
 
+## The web search check
+
+`run_search.py` (package 25) checks `POST /v1/search` and the MCP tool `web_search` of a started
+service with `SEARCH_ENABLED=true`, `MCP_ENABLED=true` and a SearXNG that reaches the real
+sources. It is a check, not a report: the exit code is 1 when one condition fails.
+
+```bash
+docker compose -f docker-compose.build.yml up -d --wait   # the stack runs SearXNG and the API
+LIVE_API_KEY=... uv run python -m tests.live.run_search --expect hits \
+  --summary-out results/summary_web_search.md
+docker compose -f docker-compose.build.yml stop searxng
+LIVE_API_KEY=... uv run python -m tests.live.run_search --expect failed --query Chlorophyll
+```
+
+- `--expect hits`: "Photosynthese" (`--query`) in German (`--language`) through REST and MCP
+  answers HTTP 200 (MCP `isError: false`), `success` or `partial`, at least one hit from
+  `wikipedia` on de.wikipedia.org and one from another source, and only http(s) URLs. A failed
+  try is repeated up to `--retries` times (3), `--pause` seconds (10) apart; each try asks for
+  one more hit (`max_results` 10, 11, ...), so it never gets the cached answer of the try
+  before. Then a second identical REST call must answer `data.cache: "hit"` (only `success` is
+  cached, so after a `partial` answer the check uses a Wikipedia-only search).
+- `--expect failed` (SearXNG stopped): a query that is not cached answers, through REST and MCP,
+  HTTP 200 with `failed`, `search_failed` and `retryable: true`, MCP `isError: false`. One try;
+  a 5xx always fails.
+
+The summary lists each call with its HTTP status, status, cache, hits per source and
+`sources_failed` (or a failed answer's `error.details`).
+
 ## Buckets
 
 `classify` in `classify.py` reads the envelope: `status`, `error.code`, `data.word_count` and
@@ -216,6 +244,15 @@ and worker logs as the `live-results` artifact.
   `sitemap_first` or `both`, the default also for pull requests and the weekly run) sets
   `--discovery`, and each run has its own summary and result file
   (`site_structure_<discovery>.jsonl`). Compare the two tables to see what `sitemap_first` saves.
+- **Every run** but the full regression and a `service_ref` run also checks the web search
+  (package 25), after the gate and apart from it, but a failure fails the job. `text-extraction-init`
+  renders SearXNG's settings into a folder of the runner, as the root `docker-compose.yml`'s
+  `init` does into its volume; `docker-compose.build.yml` with `compose.searxng.yml` starts the
+  pinned SearXNG image with its hardening, that folder read-only at `/etc/searxng`, the image's
+  own entry point and its port on 127.0.0.1:8888; a second API from source listens on 8081
+  (internal 9093) with search and MCP on. `run_search.py --expect hits` runs, then SearXNG is
+  stopped and `run_search.py --expect failed` runs. Both summaries go to the job summary; the
+  API's and SearXNG's logs are in the artifact.
 
 ## The full WLO regression
 

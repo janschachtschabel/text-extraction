@@ -78,4 +78,6 @@ def test_the_root_compose_file_follows_the_minor_line() -> None:
     defaults = set(re.findall(r"\$\{TEXT_EXTRACTION_VERSION:-([^}]*)\}", text))
     assert defaults == {".".join(_project_version().split(".")[:2])}
     services = yaml.safe_load(text)["services"]
-    assert len(services) == 12
+    # 12 services, plus searxng (package 25), which runs SearXNG's own pinned image.
+    assert len(services) == 13
+    assert services["searxng"]["image"].startswith("searxng/searxng:")

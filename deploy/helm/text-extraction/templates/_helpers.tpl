@@ -49,6 +49,29 @@ app.kubernetes.io/name: {{ include "text-extraction.name" . }}-valkey
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* SearXNG (searxng.enabled): its objects, its pod labels (a name of its own, like Valkey's, so
+the API Services never select it), its key Secret and the URL the API pods ask. */}}
+{{- define "text-extraction.searxngName" -}}
+{{- printf "%s-searxng" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "text-extraction.searxngSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "text-extraction.name" . }}-searxng
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "text-extraction.searxngSecretName" -}}
+{{- if .Values.searxng.secret.existingSecret -}}
+{{- .Values.searxng.secret.existingSecret -}}
+{{- else -}}
+{{- printf "%s-secret" (include "text-extraction.searxngName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "text-extraction.searxngUrl" -}}
+{{- printf "http://%s:8080" (include "text-extraction.searxngName" .) -}}
+{{- end -}}
+
 {{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
 {{- define "text-extraction.workerPools" -}}
 extract browser docling asr nlp llm

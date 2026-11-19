@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any
 
+import httpx
 import structlog
 from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
@@ -54,6 +55,8 @@ from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.screenshot_api import router as screenshot_router
+from text_extraction.search_api import create_search_client
+from text_extraction.search_api import router as search_router
 from text_extraction.settings import Settings, llm_available
 from text_extraction.site.store import SiteStore
 from text_extraction.site_api import router as site_router
@@ -118,8 +121,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     the queue gauges; wait for extractions handed over to a job; stop the guard and the gauges
     (their tasks read Valkey, whose client the server closes after the lifespan); close the
     fetcher's connections, the conversion pool, the document pool, the selector children, the
-    media fetcher, the UI's image fetcher and, last, the post pool. With ``MCP_ENABLED`` it runs
-    the MCP app's lifespan (its session manager) while the app serves."""
+    media fetcher, the UI's image fetcher, the search client and, last, the post pool. With
+    ``MCP_ENABLED`` it runs the MCP app's lifespan (its session manager) while the app serves."""
     documents: DocumentPool = app.state.document_pool
     selectors: SelectorRunner = app.state.selector_runner
     media: MediaFetcher | None = app.state.media_fetcher
@@ -159,6 +162,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         ui_images: ImageFetcher | None = app.state.ui_images
         if ui_images is not None:
             await ui_images.aclose()
+        search_http: httpx.AsyncClient | None = app.state.search_http
+        if search_http is not None:
+            await search_http.aclose()
         tree_pool: ConversionPool | None = app.state.ui_tree_pool
         if tree_pool is not None:
             tree_pool.shutdown()
@@ -263,10 +269,12 @@ def create_public_app(
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
-    ``app.state.background`` holds the tasks of extractions handed over to a job, which
-    the shutdown waits for; ``app.state.graceful_shutdown`` is begun by the server when its
-    graceful phase starts, and ends the routes' waits for a last-hop pool (``nlp``, ``llm``) with
-    a 202 (``pool_dispatch``, issue #19).
+    ``app.state.search_http`` is the client for SearXNG while ``SEARCH_ENABLED`` (tests may
+    replace it with a fake before the app starts); ``app.state.background`` holds the tasks of
+    extractions handed over to a job, which the shutdown waits for;
+    ``app.state.graceful_shutdown`` is begun by the server when its graceful phase starts, and
+    ends the routes' waits for a last-hop pool (``nlp``, ``llm``) with a 202 (``pool_dispatch``,
+    issue #19).
     """
     app = FastAPI(
         title="Text Extraction API",
@@ -290,6 +298,10 @@ def create_public_app(
     app.state.media_fetcher = (
         create_media_fetcher(settings, registry) if settings.media_enabled else None
     )
+    # SearXNG's client (None while SEARCH_ENABLED is false). SEARCH_URL is the operator's internal
+    # service, not a caller's target: no SSRF guard. Tests may replace it before the app starts;
+    # the lifespan closes it.
+    app.state.search_http = create_search_client(settings)
     app.state.start_documents = start_documents
     app.state.pipeline = create_pipeline(
         settings,
@@ -359,6 +371,7 @@ def create_public_app(
     app.include_router(structured_router)
     app.include_router(jobs_router)
     app.include_router(site_router)
+    app.include_router(search_router)
 
     @app.get("/v1/info", dependencies=[Depends(rate_limited)])
     async def info(

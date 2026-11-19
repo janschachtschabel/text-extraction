@@ -1,0 +1,10 @@
+# image.yml (api variant): the root docker-compose.yml with the API image just built (CHECK_TAG)
+# as its init, instead of the published one, so the check runs the real init, the root file's
+# volumes and the root file's searxng without a registry:
+#
+#   CHECK_TAG=text-extraction-api:check docker compose -p searxng-check \
+#     -f docker-compose.yml -f tests/image/compose.searxng-check.yml up -d --wait searxng
+services:
+  init:
+    image: ${CHECK_TAG:?set CHECK_TAG to the image built for the check}
+    pull_policy: never

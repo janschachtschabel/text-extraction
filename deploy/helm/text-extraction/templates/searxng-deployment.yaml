@@ -1,0 +1,93 @@
+{{- if .Values.searxng.enabled }}
+# SearXNG, the web search backend of the API pods: the unmodified official image. Its entrypoint
+# finds settings.yml in place (the ConfigMap) and starts Granian on port 8080. As the image's user
+# searxng it changes no ownership (it only warns that the mounted folders are not owned by
+# searxng:searxng) and leaves the CA store alone.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "text-extraction.searxngName" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searxng
+spec:
+  replicas: {{ .Values.searxng.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "text-extraction.searxngSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # The settings only: the generated key would change it on every render without a cluster.
+        checksum/settings: {{ .Files.Get "files/searxng-settings.yml" | sha256sum }}
+      labels:
+        {{- include "text-extraction.searxngSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.searxng.podSecurityContext | nindent 8 }}
+      containers:
+        - name: searxng
+          image: "{{ .Values.searxng.image.repository }}:{{ .Values.searxng.image.tag }}"
+          imagePullPolicy: {{ .Values.searxng.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.searxng.securityContext | nindent 12 }}
+          env:
+            # Wins over the placeholder secret_key of the ConfigMap.
+            - name: SEARXNG_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "text-extraction.searxngSecretName" . }}
+                  key: {{ .Values.searxng.secret.existingSecretKey }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.searxng.resources | nindent 12 }}
+          volumeMounts:
+            - name: settings
+              mountPath: /etc/searxng
+              readOnly: true
+            # SearXNG's caches (SQLite) default to the temp folder.
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/searxng
+      volumes:
+        - name: settings
+          configMap:
+            name: {{ include "text-extraction.searxngName" . }}
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -25,8 +25,10 @@ auf Deutsch, mit denselben Seiten.
   Batches ihrer Seiten mit ihren Metadaten und Lizenzen und das Lesen der Jobs.
 - [Strukturierte Daten](structured-data.md): die Strategien von `structured`, das LLM und sein
   Schlüssel und das Chunking.
+- [Suche](search.md): die Websuche über das SearXNG des Dienstes, ihre Quellen und deren
+  Grenzen, und das Extrahieren der Treffer.
 - [MCP](mcp.md): die Einrichtung für Claude Code, Claude Desktop und andere Clients und die
-  11 Tools.
+  12 Tools.
 - [Glossar](glossary.md): die Begriffe dieser Anleitung und der Spielwiese, auf Englisch und
   Deutsch.
 
@@ -39,6 +41,7 @@ auf Deutsch, mit denselben Seiten.
 - Eine ganze Website erfassen und die Metadaten ihrer Seiten lesen:
   [Eine ganze Website und ihre Metadaten](whole-site-and-metadata.md).
 - Strukturierte Daten und Chunks lesen: [Strukturierte Daten](structured-data.md).
+- Seiten zu einem Thema finden und extrahieren: [Suche](search.md).
 - Den MCP-Server nutzen: [MCP](mcp.md).
 - Eine Website extrahieren, die es vertraglich erlaubt hat:
   [Website-Regeln](site-rules.md#maximale-extraktion).

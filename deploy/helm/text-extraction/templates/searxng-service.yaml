@@ -1,0 +1,19 @@
+{{- if .Values.searxng.enabled }}
+# SearXNG for the API pods only (SEARCH_URL); never exposed by the ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "text-extraction.searxngName" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searxng
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "text-extraction.searxngSelectorLabels" . | nindent 4 }}
+{{- end }}

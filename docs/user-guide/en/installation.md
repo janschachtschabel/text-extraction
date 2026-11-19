@@ -65,9 +65,11 @@ uv run pre-commit install    # install the git hooks
 ## Docker Compose
 
 Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, the
-optional workers (OCR, transcription, personal data, LLM) and a Valkey with a password. It switches
-on browser mode, OCR, transcription, personal data handling, the LLM, the MCP server and the
-playground. There are two compose files:
+optional workers (OCR, transcription, personal data, LLM), a Valkey with a password and SearXNG
+for the web search. It switches on browser mode, OCR, transcription, personal data handling, the
+LLM, the web search, the MCP server and the playground. The web search needs the images of
+release 0.1.13 or later; see [Search](search.md) for switching it off. There are two compose
+files:
 
 - `docker-compose.yml` runs the published images from `ghcr.io/janschachtschabel/text-extraction`
   (linux/amd64) and starts without a single variable: for a server, and for Docker panels such as

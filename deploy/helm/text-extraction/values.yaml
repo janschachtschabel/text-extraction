@@ -90,6 +90,11 @@ config:
   # and get_job's longest wait (0-60 s); the most content characters of one tool answer; the
   # most characters of one tool answer's JSON (lists are cut to fit); the largest screenshot
   # attached to a tool answer (0: never attached, only linked).
+  # Web search (POST /v1/search, the MCP tool web_search): off in the chart (ruling D3 a). "true"
+  # needs a SearXNG: `searxng.enabled` runs one in the release (and points SEARCH_URL at it),
+  # otherwise set SEARCH_URL here to your own instance. The other SEARCH_* settings keep the
+  # service's defaults unless set here (docs/configuration.md).
+  SEARCH_ENABLED: "false"
   MCP_ALLOWED_ORIGINS: ""
   MCP_WAIT_SECONDS: "25"
   MCP_MAX_CONTENT_CHARS: "50000"
@@ -757,6 +762,54 @@ ingress:
           pathType: Prefix
   tls: []
 
+# SearXNG, the web search backend of the API pods (package 25; off by default, ruling D3 a): the
+# official image (AGPL-3.0, unmodified, in its own pods), a ClusterIP Service on port 8080 that
+# only the API pods reach (with networkPolicy.enabled), and its settings.yml from a ConfigMap (the
+# chart's files/searxng-settings.yml: only engines with an official, free API; JSON on, limiter
+# and Valkey off). With it on, the API pods get SEARCH_URL=http://<release>-text-extraction-searxng:8080
+# (a config.SEARCH_URL entry is then ignored); switch search on with config.SEARCH_ENABLED: "true".
+# Its engines need egress to the web (443, 80) and DNS.
+searxng:
+  enabled: false
+  image:
+    repository: searxng/searxng
+    # The newest tag that was at least 14 days old when it was pinned (CONTRIBUTING.md); the same
+    # tag as the compose files.
+    tag: 2026.11.2-cccbc9e15
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # server.secret_key, passed as SEARXNG_SECRET (it wins over the placeholder in the ConfigMap;
+  # SearXNG refuses to start with the placeholder). Without `existingSecret` the chart creates a
+  # Secret with a random 64-character key and keeps it across upgrades (lookup; a render without
+  # a cluster generates a new one, which only resets SearXNG's caches).
+  secret:
+    existingSecret: ""
+    existingSecretKey: SEARXNG_SECRET
+  # The image's own user `searxng` (977): its entrypoint then neither changes ownership nor
+  # rewrites the CA store, and needs no capability. /tmp (its caches) and /var/cache/searxng are
+  # emptyDirs; the root file system stays read-only.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 977
+    runAsGroup: 977
+    fsGroup: 977
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  # Not measured yet: one Granian worker with the eight API engines. Raise them for heavy use.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+
 # Single-replica Valkey for rate limits, the result cache, jobs and the job queue.
 # Switch it off and set `externalValkey` to use a managed or shared Valkey/Redis.
 valkey:
@@ -859,12 +912,14 @@ alerts:
   valkeyMemoryRatio: 0.8
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
-# limited: the API must reach arbitrary sites, so egress stays open (it also covers the model
+# limited (SearXNG excepted, below): the API must reach arbitrary sites, so egress stays open (it also covers the model
 # downloads from huggingface.co, github.com (and githubusercontent.com), the external ASR endpoint and the LLM endpoint).
 #   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling, asr, nlp, llm) of
 #            this release only.
 #   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
 #   Workers  (extract, browser, docling, asr, nlp, llm) accept 9090 from `metricsFrom` only.
+#   SearXNG  (searxng.enabled) accepts 8080 from the API pods only; its egress is limited to DNS
+#            (53) and the engines' web APIs (443, 80).
 # Probes of the kubelet run from the node and are normally allowed by the CNI.
 networkPolicy:
   enabled: false

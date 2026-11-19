@@ -1,0 +1,19 @@
+# The live check of the web search (live.yml, step "Web search: real SearXNG, REST and MCP"):
+# docker-compose.build.yml's searxng (the pinned image and its hardening: user 977, read-only
+# root, tmpfs, no capabilities) with the root docker-compose.yml's mount and entry point, and its
+# port on the runner's loopback for the API, which runs from source.
+#
+#   SEARXNG_CONFIG_DIR=<folder text-extraction-init rendered> VALKEY_PASSWORD=<any> \
+#     docker compose -f docker-compose.build.yml -f tests/live/compose.searxng.yml \
+#     up -d --wait searxng
+#
+# The folder stands for the root file's volume searxng-config: settings.yml (0644) in a 0755
+# folder that SearXNG's user does not own, read-only at /etc/searxng. The image's own entry point
+# runs (the build file's wrapper is reset), so the key comes from that file, not SEARXNG_SECRET.
+services:
+  searxng:
+    entrypoint: !reset null
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes: !override
+      - ${SEARXNG_CONFIG_DIR:?set SEARXNG_CONFIG_DIR to the folder text-extraction-init rendered}:/etc/searxng:ro

@@ -1,0 +1,38 @@
+{{- if .Values.searxng.enabled }}
+{{- /* SearXNG's settings.yml: the chart's copy of src/text_extraction/data/searxng-settings.yml
+       (tests/test_searxng_settings.py keeps them identical). Its secret_key is the placeholder:
+       the pods get the real key as SEARXNG_SECRET from a Secret. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "text-extraction.searxngName" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searxng
+data:
+  settings.yml: |-
+    {{- .Files.Get "files/searxng-settings.yml" | trimSuffix "\n" | nindent 4 }}
+{{- if not .Values.searxng.secret.existingSecret }}
+---
+{{- /* The key is generated once and kept: a later render reads it back from the cluster. Without
+       a cluster (helm template) lookup returns nothing and a new one is generated. */}}
+{{- $name := include "text-extraction.searxngSecretName" . }}
+{{- $key := .Values.searxng.secret.existingSecretKey }}
+{{- $secret := randAlphaNum 64 }}
+{{- with lookup "v1" "Secret" .Release.Namespace $name }}
+{{- with index (.data | default dict) $key }}
+{{- $secret = b64dec . }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searxng
+type: Opaque
+data:
+  {{ $key }}: {{ $secret | b64enc | quote }}
+{{- end }}
+{{- end }}

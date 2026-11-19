@@ -144,6 +144,7 @@ def test_operations_name_their_rest_routes() -> None:
         "chunk": ("POST", "/v1/chunk"),
         "batch": ("POST", "/v1/batch"),
         "site-structure": ("POST", "/v1/site-structure"),
+        "search": ("POST", "/v1/search"),
         "job": ("GET", "/v1/jobs/{job_id}"),
         "artifact": ("GET", "/v1/jobs/{job_id}/artifacts/{name}"),
         "cancel": ("DELETE", "/v1/jobs/{job_id}"),
