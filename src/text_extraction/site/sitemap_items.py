@@ -39,16 +39,17 @@ not the other way round:
   and only the kept ones are followed. A child refused by ``SITE_MAX_SITEMAP_FILES`` says
   ``max_files``, with ``sitemap_files_truncated``.
 - **API lists** (package 26): a sitemap item with ``node.api`` (appended by the start page) is
-  fetched as a sitemap but to at most ``API_MAX_BYTES`` (4 MiB, a larger answer fails
-  ``too_large``: JSON is parsed whole), skips the guess logic, fails on a status other than 2xx
-  as a sitemap does, and is parsed by ``site/apis.py`` on the same pool under the same deadline
-  (a 200 that is no JSON fails ``conversion_failed``); grants, parts and warnings are a
-  sitemap's. A
-  WordPress types or Drupal index item lists one child per content type (``scope: path``: only
-  types whose name matches the path prefix), one level deeper; a list page's one child is its
-  next page at its own depth (``page`` + 1), so ``SITE_MAX_SITEMAP_FILES`` ends the chain; so
-  does a page whose entries the crawl's ``SITE_MAX_SITEMAP_URLS`` cut (some or all).
-  Entries get their ``type_guess`` from URL, title and the list's content type.
+  fetched as a sitemap but to at most ``API_MAX_BYTES`` (4 MiB; JSON is parsed whole, so a
+  larger answer fails ``too_large``), skips the guess logic, and fails on a status other than
+  2xx as a sitemap does, except that a 400 on a WordPress list page after the first ends the
+  list (``success`` without entries). It is parsed by ``site/apis.py`` on the same pool under
+  the same deadline (a 200 that is no JSON fails ``conversion_failed``); grants, parts and
+  warnings are a sitemap's. A WordPress types or Drupal index item lists one child per content
+  type (``scope: path``: only types whose name matches the path prefix), one level deeper; a
+  list page's one child is its next page at its own depth (``page`` + 1), so
+  ``SITE_MAX_SITEMAP_FILES`` ends the chain; so does a page whose entries the crawl's
+  ``SITE_MAX_SITEMAP_URLS`` cut (some or all). Entries get their ``type_guess`` from URL,
+  title and the list's content type.
 
 Every item's ``SitemapInfo`` (and its parts') carries the node's ``source``: ``robots`` (listed),
 ``guess``, ``feed``, ``wordpress`` or ``drupal``; an index's children inherit it.
@@ -446,6 +447,13 @@ class SitemapItems:
             more, outcome = await self._guess_next(job, item, url, node)
             absent = [SITEMAP_NOT_FOUND_WARNING, *more]
             return Envelope(status="success", data=result(info, absent)), outcome
+        if node.api == "wordpress_posts" and (node.page or 1) > 1 and fetched.status == 400:
+            # Past a list's last page (``rest_post_invalid_page_number``: a multiple of 100
+            # posts and no ``X-WP-TotalPages``): the list ends here, nothing failed.
+            info = SitemapInfo(
+                format=node.api, source=node.source, type_hint=api_type_hint(node.api, url)
+            )
+            return Envelope(status="success", data=result(info)), _Outcome(links=[])
         if not 200 <= fetched.status < 300:
             retryable = fetched.status >= 500 or fetched.status == 429
             message = f"The sitemap answered with HTTP status {fetched.status}."

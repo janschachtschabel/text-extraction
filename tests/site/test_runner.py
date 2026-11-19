@@ -2150,6 +2150,56 @@ async def test_wordpress_plain_permalinks_chain() -> None:
     assert sitemap_of(items[3]).entries[0].loc == f"{SITE}/kalender/post-100/"
 
 
+@scenario
+async def test_wordpress_400_past_the_last_page_ends_the_list() -> None:
+    """Without ``X-WP-TotalPages`` a list of exactly 100 posts asks for page 2, which WordPress
+    answers 400 (``rest_post_invalid_page_number``): the list ends there, nothing failed."""
+    answers = wp_site(1)
+    answers[wp_list("posts")] = as_json(wp_list("posts"), wp_posts(1))  # no total pages
+    answers[wp_list("posts", 2)] = fetched(
+        wp_list("posts", 2),
+        '{"code":"rest_post_invalid_page_number","data":{"status":400}}',
+        status=400,
+        content_type="application/json",
+    )
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    last = items[3]
+    assert last.result is not None
+    assert (last.result.status, last.result.error) == ("success", None)
+    assert data(last).upstream_status == 400
+    listed = sitemap_of(last)
+    assert (listed.format, listed.source, listed.entries, listed.children) == (
+        "wordpress_posts",
+        "wordpress",
+        [],
+        [],
+    )
+    assert listed.entry_count == 0
+
+
+@scenario
+async def test_wordpress_400_on_the_first_page_fails() -> None:
+    answers = wp_site(1)
+    answers[wp_list("posts")] = fetched(wp_list("posts"), "{}", status=400)
+    crawl = Crawl(answers)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    first = (await crawl.items(job_id))[2]
+    assert first.result is not None
+    assert first.result.status == "failed"
+    assert first.result.error is not None
+    assert first.result.error.code == ErrorCode.TARGET_HTTP_ERROR
+
+
 class CappingFetcher(FakeFetcher):
     """A fake fetcher that honours ``max_bytes`` and ``truncate`` as the real one does."""
 
