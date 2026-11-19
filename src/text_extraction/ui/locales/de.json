@@ -400,6 +400,7 @@
   "result.meta.licence": "Lizenz",
   "result.meta.licences_found": "Gefundene Lizenzen",
   "result.meta.lrmi": "LRMI",
+  "result.meta.place": "Ort",
   "screenshot.not_artifact": "Der Screenshot konnte nicht gelesen werden: Er ist kein Artefakt eines Jobs.",
   "screenshot.http_error": "Der Screenshot konnte nicht gelesen werden: HTTP {status} {message}",
   "screenshot.failed": "Der Screenshot konnte nicht gelesen werden: {message}",

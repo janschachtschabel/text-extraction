@@ -789,3 +789,185 @@ def test_lenient_jsonld_fallback_is_skipped_for_huge_scripts() -> None:
 
 def _jsonld_raw(text: str) -> str:
     return f'<script type="application/ld+json">{text}</script>'
+
+
+# --- places (H2) -------------------------------------------------------------------------------
+
+
+def jsonld(data: object) -> str:
+    return f'<script type="application/ld+json">{json.dumps(data)}</script>'
+
+
+def test_event_location_place() -> None:
+    event = {
+        "@context": "https://schema.org",
+        "@type": "Event",
+        "name": "Lesung",
+        "location": {
+            "@type": "Place",
+            "name": "Stadtbibliothek",
+            "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "Domplatz 1",
+                "postalCode": "99084",
+                "addressLocality": "Erfurt",
+                "addressRegion": "Thüringen",
+                "addressCountry": {"@type": "Country", "name": "DE"},
+            },
+            "geo": {"@type": "GeoCoordinates", "latitude": "50.98", "longitude": 11.03},
+        },
+    }
+    result = meta(page(head=jsonld(event)))
+    assert len(result.places) == 1
+    place = result.places[0]
+    assert place.kind == "Event"
+    assert place.name == "Stadtbibliothek"
+    assert place.street == "Domplatz 1"
+    assert place.postal_code == "99084"
+    assert place.locality == "Erfurt"
+    assert place.region == "Thüringen"
+    assert place.country == "DE"
+    assert place.latitude == 50.98
+    assert place.longitude == 11.03
+
+
+def test_event_location_as_string() -> None:
+    result = meta(page(head=jsonld({"@type": "Event", "location": "Rathaus Erfurt"})))
+    assert [(p.kind, p.name) for p in result.places] == [("Event", "Rathaus Erfurt")]
+
+
+def test_local_business_address() -> None:
+    data = {
+        "@type": "Restaurant",
+        "name": "Zum Anker",
+        "address": {"@type": "PostalAddress", "addressLocality": "Jena", "streetAddress": "Weg 2"},
+    }
+    result = meta(page(head=jsonld(data)))
+    assert [(p.kind, p.name, p.locality, p.street) for p in result.places] == [
+        ("Restaurant", "Zum Anker", "Jena", "Weg 2")
+    ]
+
+
+def test_address_as_string_is_the_street() -> None:
+    result = meta(page(head=jsonld({"@type": "Article", "address": "Hauptstr. 5"})))
+    assert [(p.kind, p.street) for p in result.places] == [("Article", "Hauptstr. 5")]
+
+
+def test_top_level_postal_address_and_geo() -> None:
+    items = [
+        {"@type": "PostalAddress", "addressLocality": "Gera"},
+        {"@type": "GeoCoordinates", "latitude": 50.88, "longitude": 12.08},
+    ]
+    result = meta(page(head=jsonld(items)))
+    assert [p.kind for p in result.places] == ["PostalAddress", "GeoCoordinates"]
+    assert result.places[1].latitude == 50.88
+
+
+def test_geo_meta() -> None:
+    head = (
+        '<meta name="geo.position" content="50.9787;11.0328">'
+        '<meta name="geo.placename" content="Erfurt">'
+        '<meta name="geo.region" content="DE-TH">'
+    )
+    (place,) = meta(page(head=head)).places
+    assert place.kind == "meta"
+    assert (place.name, place.region) == ("Erfurt", "DE-TH")
+    assert (place.latitude, place.longitude) == (50.9787, 11.0328)
+
+
+def test_icbm() -> None:
+    (place,) = meta(page(head='<meta name="ICBM" content="50.9787, 11.0328">')).places
+    assert (place.kind, place.latitude, place.longitude) == ("meta", 50.9787, 11.0328)
+
+
+def test_bad_coordinates() -> None:
+    assert meta(page(head='<meta name="geo.position" content="999;abc">')).places == []
+    head = '<meta name="geo.position" content="999;abc"><meta name="geo.placename" content="Gera">'
+    (place,) = meta(page(head=head)).places
+    assert (place.name, place.latitude, place.longitude) == ("Gera", None, None)
+    data = {"@type": "Place", "name": "X", "geo": {"latitude": 95, "longitude": 10}}
+    (place,) = meta(page(head=jsonld(data))).places
+    assert (place.latitude, place.longitude) == (None, None)
+
+
+def test_microdata_place() -> None:
+    body = (
+        '<div itemscope itemtype="https://schema.org/Place"><span itemprop="name">Museum</span>'
+        '<div itemprop="address" itemscope itemtype="https://schema.org/PostalAddress">'
+        '<span itemprop="addressLocality">Weimar</span></div>'
+        '<div itemprop="geo" itemscope itemtype="https://schema.org/GeoCoordinates">'
+        '<meta itemprop="latitude" content="50.98"><meta itemprop="longitude" content="11.32">'
+        "</div></div>"
+    )
+    (place,) = meta(page(body=body)).places
+    assert (place.kind, place.name, place.locality) == ("Place", "Museum", "Weimar")
+    assert (place.latitude, place.longitude) == (50.98, 11.32)
+
+
+def test_rdfa_place() -> None:
+    body = (
+        '<div vocab="https://schema.org/" typeof="Place"><span property="name">Park</span>'
+        '<div property="address" typeof="PostalAddress">'
+        '<span property="addressLocality">Suhl</span></div></div>'
+    )
+    (place,) = meta(page(body=body)).places
+    assert (place.kind, place.name, place.locality) == ("Place", "Park", "Suhl")
+
+
+def test_cap_and_dedup() -> None:
+    graph = [
+        {"@type": "Place", "name": f"Ort {n}", "address": {"addressLocality": f"Stadt {n}"}}
+        for n in (1, 2, 3, 4, 5, 6)
+    ]
+    graph.insert(1, dict(graph[0]))
+    graph.insert(2, dict(graph[0]))
+    result = meta(page(head=jsonld({"@graph": graph})))
+    assert len(result.places) == metadata.MAX_PLACES == 5
+    assert [p.name for p in result.places] == [f"Ort {n}" for n in (1, 2, 3, 4, 5)]
+
+
+def test_order_events_places_others_meta() -> None:
+    items = [
+        {"@type": "Organization", "name": "Verein", "address": "Weg 1"},
+        {"@type": "Place", "name": "Halle"},
+        {"@type": "Event", "location": "Saal"},
+    ]
+    head = jsonld(items) + '<meta name="geo.placename" content="Erfurt">'
+    assert [p.kind for p in meta(page(head=head)).places] == [
+        "Event",
+        "Place",
+        "Organization",
+        "meta",
+    ]
+
+
+def test_strings_are_collapsed_and_clipped() -> None:
+    data = {"@type": "Place", "name": "  A \n  B " + "x" * 500}
+    (place,) = meta(page(head=jsonld(data))).places
+    assert place.name is not None
+    assert place.name.startswith("A B x")
+    assert len(place.name) == 200
+
+
+def test_no_places() -> None:
+    result = meta(page(head="<title>T</title>", body="<p>Hallo</p>"))
+    assert result.places == []
+    assert "places" in result.model_dump()
+
+
+def test_place_json_drops_nulls() -> None:
+    (place,) = meta(page(head=jsonld({"@type": "Place", "name": "Halle"}))).places
+    assert place.model_dump(mode="json") == {"kind": "Place", "name": "Halle"}
+
+
+def test_failing_place_reader_costs_only_the_places(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("hostile")
+
+    monkeypatch.setattr(metadata, "_place_from_node", boom)
+    head = '<title>Titel</title><meta name="geo.placename" content="Erfurt">' + jsonld(
+        {"@type": "Place", "name": "Halle"}
+    )
+    result = meta(page(head=head))
+    assert result.title == "Halle"  # the rest of the metadata is read
+    assert result.places == []

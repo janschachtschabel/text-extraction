@@ -400,6 +400,7 @@
   "result.meta.licence": "Licence",
   "result.meta.licences_found": "Licences found",
   "result.meta.lrmi": "LRMI",
+  "result.meta.place": "Place",
   "screenshot.not_artifact": "The screenshot could not be read: it is no artifact of a job.",
   "screenshot.http_error": "The screenshot could not be read: HTTP {status} {message}",
   "screenshot.failed": "The screenshot could not be read: {message}",

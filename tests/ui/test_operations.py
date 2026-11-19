@@ -1237,3 +1237,27 @@ def test_a_form_that_cannot_be_read_is_a_fragment(
     assert texts(tree(answer.text), "//div[@class='error']/p") == [
         f"The form could not be read: {cause}"
     ]
+
+
+def test_metadata_row_per_place() -> None:
+    places = [
+        {
+            "kind": "Event",
+            "name": "Stadtbibliothek",
+            "street": "Domplatz 1",
+            "postal_code": "99084",
+            "locality": "Erfurt",
+            "country": "DE",
+            "latitude": 50.98,
+            "longitude": 11.03,
+        },
+        {"kind": "meta", "region": "DE-TH"},
+    ]
+    data = result_data(metadata={"places": places})
+    german = tree(rendered(data, language="de"))
+    assert texts(german, "//dl[@class='meta']//dt") == ["Ort", "Ort"]
+    assert texts(german, "//dl[@class='meta']//dd") == [
+        "Stadtbibliothek, Domplatz 1, 99084 Erfurt, DE, 50.98, 11.03",
+        "DE-TH",
+    ]
+    assert texts(tree(rendered(data)), "//dl[@class='meta']//dt") == ["Place", "Place"]
