@@ -36,6 +36,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
 6. **Respect sites:** robots.txt and EU TDM opt-out checks (`enforce|report|ignore`),
    per-domain outbound limits, honest user agent. No IP/proxy rotation to evade limits.
    Exception: unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) for sites that allowed extraction by contract may present a stealth browser with an unmodified Chrome user agent; outbound limits still apply and IP/proxy rotation stays excluded.
+   Exception: SearXNG asks `google` and `bing` by scraping (Jan's ruling D6, `docs/architecture.md`, web search); `SEARCH_SOURCES` can leave them out, and no other scraping engine is switched on.
 7. **Licences:** no AGPL/GPL dependencies (e.g. PyMuPDF, Marker, MinerU are excluded).
    Exception: an unmodified AGPL service in its own container (SearXNG) is allowed; never an
    AGPL/GPL import.

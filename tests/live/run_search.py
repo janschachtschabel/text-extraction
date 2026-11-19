@@ -13,6 +13,11 @@ cache key and never the cached answer of the try before. Then a second identical
 a cache hit (``data.cache: "hit"``). Only ``success`` answers are cached, so when the answer was
 ``partial`` the check uses a Wikipedia-only search instead.
 
+``--expect wlo`` (SearXNG up): a REST search that names only the source ``wlo`` answers HTTP 200,
+``success``, and at least one hit from ``wlo`` that links a render page of WLO's repository
+(``https://redaktion.openeduhub.net/edu-sharing/components/render/<id>``), with a title. A failed
+try is repeated up to ``--retries`` times, each asking for one more hit.
+
 ``--expect failed`` (SearXNG stopped): a query the service has not cached answers, through REST
 and MCP, HTTP 200 with ``status: failed``, ``error.code: search_failed`` and
 ``error.retryable: true``, and MCP ``isError: false``. Tried once, never repeated; a 5xx is
@@ -44,6 +49,7 @@ DEFAULT_CLIENT_TIMEOUT_SECONDS = 60.0
 FIRST_MAX_RESULTS = 10
 MCP_ACCEPT = "application/json, text/event-stream"
 WIKIPEDIA_HOST = "de.wikipedia.org"
+WLO_RENDER = "https://redaktion.openeduhub.net/edu-sharing/components/render/"
 
 
 @dataclass
@@ -98,6 +104,27 @@ def hit_problems(envelope: dict[str, Any] | None) -> list[str]:
     bad = [hit.get("url") for hit in hits if not _is_web_url(hit.get("url"))]
     if bad:
         problems.append(f"URLs that are not http(s): {bad}")
+    return problems
+
+
+def wlo_problems(envelope: dict[str, Any] | None) -> list[str]:
+    """What keeps ``envelope`` from being a WLO-only answer with a render page hit."""
+    if not isinstance(envelope, dict):
+        return ["no envelope"]
+    problems: list[str] = []
+    if envelope.get("status") != "success":
+        error = envelope.get("error") or {}
+        problems.append(f"status {envelope.get('status')} ({error.get('code')}), expected success")
+    found = [
+        hit
+        for hit in _hits(envelope)
+        if "wlo" in (hit.get("sources") or [])
+        and str(hit.get("url")).startswith(WLO_RENDER)
+        and len(str(hit.get("url"))) > len(WLO_RENDER)
+        and hit.get("title")
+    ]
+    if not found:
+        problems.append(f"no titled hit from wlo under {WLO_RENDER}")
     return problems
 
 
@@ -199,6 +226,27 @@ async def check_hits(
     return report
 
 
+async def check_wlo(
+    client: httpx.AsyncClient,
+    query: str,
+    retries: int = DEFAULT_RETRIES,
+    pause_seconds: float = DEFAULT_PAUSE_SECONDS,
+    sleep: Sleep = asyncio.sleep,
+) -> Report:
+    report = Report()
+    for attempt in range(retries + 1):
+        if attempt:
+            await sleep(pause_seconds)
+        body = {"query": query, "sources": ["wlo"], "max_results": FIRST_MAX_RESULTS + attempt}
+        call = await rest_search(client, body, f"REST WLO try {attempt + 1}")
+        call.problems += wlo_problems(call.envelope)
+        report.calls.append(call)
+        if not call.problems:
+            return report
+    report.problems.append(f"no try of {retries + 1} had a hit from wlo")
+    return report
+
+
 async def check_failure(client: httpx.AsyncClient, query: str, language: str) -> Report:
     report = Report()
     body = {"query": query, "language": language}
@@ -257,7 +305,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--api-key", default=os.environ.get("LIVE_API_KEY"))
-    parser.add_argument("--expect", choices=["hits", "failed"], required=True)
+    parser.add_argument("--expect", choices=["hits", "wlo", "failed"], required=True)
     parser.add_argument("--query", default=DEFAULT_QUERY)
     parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
@@ -280,6 +328,9 @@ async def amain(args: argparse.Namespace) -> int:
         if args.expect == "hits":
             report = await check_hits(client, args.query, args.language, args.retries, args.pause)
             title = f"Web search: {args.query!r} ({args.language})"
+        elif args.expect == "wlo":
+            report = await check_wlo(client, args.query, args.retries, args.pause)
+            title = f"Web search, WLO only: {args.query!r}"
         else:
             report = await check_failure(client, args.query, args.language)
             title = f"Web search with SearXNG stopped: {args.query!r}"

@@ -155,6 +155,28 @@ docker compose run --rm -T init text-extraction-init --show-admin-key
 docker compose logs api | tail -n 20                   # why the API does not start
 ```
 
+#### Update on Hostinger
+
+A redeploy pulls the newest images, but the Docker Manager keeps the `docker-compose.yml` it took
+from the repository on the first deploy. A release whose CHANGELOG "Upgrade" section names a
+change of the root compose file needs the new file once; 0.1.13, for example, added the service
+`searxng`, and without it the playground has no Search tab.
+
+1. In the Docker Manager, open the project's compose file and replace its whole text with the
+   current [docker-compose.yml](../../../docker-compose.yml) from `main`.
+2. Keep the environment variables as they are, save and deploy again.
+
+The same in the web console (`grep -c searxng` printing `0` marks a compose file from before
+0.1.13; the copy `docker-compose.yml.old` keeps the old one):
+
+```bash
+cd /docker/text-extraction
+grep -c searxng docker-compose.yml
+cp docker-compose.yml docker-compose.yml.old
+curl -fsSL https://raw.githubusercontent.com/janschachtschabel/text-extraction/main/docker-compose.yml -o docker-compose.yml
+docker compose pull && docker compose up -d --wait
+```
+
 ### Build from the checkout
 
 ```bash

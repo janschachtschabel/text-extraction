@@ -7,7 +7,9 @@ changes the answer. A Valkey problem never fails a search: a read acts as a miss
 dropped, both with one log line that carries no query. Errors never echo the query or the URL."""
 
 import hashlib
+import html
 import json
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -78,6 +80,26 @@ def _text(value: object) -> str | None:
     return value.strip() or None if isinstance(value, str) else None
 
 
+# A tag-like token: Crossref and OpenAlex hand on JATS XML (<jats:p>), Wikipedia marks the match
+# with <span>. "a < b" is no tag: a letter must follow the bracket.
+_TAG = re.compile(r"</?([A-Za-z][\w:.-]*)(?:\s[^<>]*)?/?>")
+_SPACE = re.compile(r"\s+")
+# Tags that end a block of text and so stand for a space; any other tag (<span>, <i>) is dropped
+# without one, so a highlighted part of a word stays in the word.
+_BLOCK_TAGS = frozenset({"p", "br", "div", "li", "title", "sec", "list-item", "abstract", "label"})
+
+
+def _tag_gap(match: re.Match[str]) -> str:
+    return " " if match.group(1).rsplit(":", 1)[-1].lower() in _BLOCK_TAGS else ""
+
+
+def _plain(value: object) -> str | None:
+    """A title or snippet as plain text: tags dropped, entities decoded, white space collapsed."""
+    if not isinstance(value, str):
+        return None
+    return _SPACE.sub(" ", html.unescape(_TAG.sub(_tag_gap, value))).strip() or None
+
+
 def _hit(raw: Any) -> SearchHit | None:
     if not isinstance(raw, dict) or not _is_web_url(raw.get("url")):
         return None
@@ -89,8 +111,8 @@ def _hit(raw: Any) -> SearchHit | None:
     score = raw.get("score")
     return SearchHit(
         url=url,
-        title=_text(raw.get("title")) or url,
-        snippet=_text(raw.get("content")),
+        title=_plain(raw.get("title")) or url,
+        snippet=_plain(raw.get("content")),
         sources=names,
         published=_text(raw.get("publishedDate")),
         score=float(score)

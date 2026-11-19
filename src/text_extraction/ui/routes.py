@@ -38,6 +38,7 @@ from text_extraction.ui.forms import (
     DEFAULT_SEARCH_RESULTS,
     OPERATIONS,
     REPEATED_FIELDS,
+    SEARCH_LANGUAGE_CHOICES,
     SINGLE_OPERATIONS,
     TIME_RANGE_CHOICES,
     FeatureOffer,
@@ -161,6 +162,7 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "search_max_results": settings.search_max_results,
         # The form's presets: never more hits than SEARCH_MAX_RESULTS allows.
         "search_results_preset": min(DEFAULT_SEARCH_RESULTS, settings.search_max_results),
+        "search_languages": SEARCH_LANGUAGE_CHOICES,
         "search_time_ranges": TIME_RANGE_CHOICES,
         "search_first_page": DEFAULT_SEARCH_PAGE,
         "search_max_page": MAX_PAGE,

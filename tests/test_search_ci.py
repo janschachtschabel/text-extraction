@@ -116,8 +116,17 @@ def test_live_search_checks_hits_then_the_stopped_searxng() -> None:
     run = down["run"]
     assert run.index("docker compose stop searxng") < run.index("--expect failed")
     assert "--retries" not in run
+    # WLO (ruling D6) between the two, with the same API and retries.
+    at_hits, _ = _named(steps, "Web search: hits through REST and MCP")
+    at_wlo, wlo = _named(steps, "Web search: WLO hits")
+    at_down, _ = _named(steps, "Web search: SearXNG stopped answers search_failed")
+    assert at_hits < at_wlo < at_down
+    assert "steps.search_setup.outcome == 'success'" in wlo["if"]
+    assert "tests.live.run_search --base-url http://127.0.0.1:8081" in wlo["run"]
+    assert "--expect wlo" in wlo["run"]
+    assert "--retries 3" in wlo["run"]
     # The summaries are picked up by the step that writes results/summary_*.md to the job summary.
-    for step in (hits, down):
+    for step in (hits, wlo, down):
         assert "--summary-out results/summary_web_search" in step["run"]
     _, summary = _named(steps, "Add the summaries to the job summary")
     assert "results/summary_*.md" in summary["run"]

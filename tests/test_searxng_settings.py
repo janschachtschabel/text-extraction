@@ -1,8 +1,10 @@
 """SearXNG's settings.yml as this project ships it (package 25): the template that
-``text-extraction-init`` renders into the compose stack and the Helm chart mounts. Only engines
-with an official, free API are on (ruling D2 a), SEARCH_SOURCES names exactly them, and the
-instance is a private backend of the API: JSON on, limiter, image proxy and Valkey off."""
+``text-extraction-init`` renders into the compose stack and the Helm chart mounts. The engines
+with an official, free API (ruling D2 a), google and bing, and the added json engine wlo (ruling
+D6) are on, SEARCH_SOURCES names exactly them, and the instance is a private backend of the API:
+JSON on, limiter, image proxy and Valkey off."""
 
+import json
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,11 @@ D2_ENGINES = [
     "arxiv",
     "crossref",
 ]
+# Jan's choice of 2026-11-19 (ruling D6): two scraping engines and WLO's official API.
+SCRAPING_ENGINES = ["google", "bing"]
+KEPT_ENGINES = D2_ENGINES + SCRAPING_ENGINES
+ALL_ENGINES = [*KEPT_ENGINES, "wlo"]
+WLO_RENDER = "https://redaktion.openeduhub.net/edu-sharing/components/render/"
 
 
 def _text() -> str:
@@ -33,23 +40,54 @@ def _settings() -> dict[str, Any]:
     return yaml.safe_load(_text())  # type: ignore[no-any-return]
 
 
-def test_keeps_exactly_the_d2_engines() -> None:
-    assert _settings()["use_default_settings"]["engines"]["keep_only"] == D2_ENGINES
+def test_keeps_exactly_the_d2_and_the_two_scraping_engines() -> None:
+    assert _settings()["use_default_settings"]["engines"]["keep_only"] == KEPT_ENGINES
 
 
-def test_search_sources_default_equals_the_kept_engines() -> None:
+def test_search_sources_default_names_every_engine_of_the_settings() -> None:
     default = Settings.model_fields["search_sources"].default
-    assert default == _settings()["use_default_settings"]["engines"]["keep_only"]
+    assert default == ALL_ENGINES
+    assert sorted(default) == sorted(engine["name"] for engine in _settings()["engines"])
 
 
-def test_every_kept_engine_is_switched_on() -> None:
-    # Five of the eight are `disabled: true` in SearXNG's own settings.yml (2026.11.2): the
-    # override switches each one on, so a search that names no engine reaches all eight too.
+def test_every_engine_is_switched_on() -> None:
+    # Several are `disabled: true` in SearXNG's own settings.yml (2026.11.2): the override
+    # switches each one on, so a search that names no engine reaches all of them too.
     engines = {engine["name"]: engine for engine in _settings()["engines"]}
-    assert sorted(engines) == sorted(D2_ENGINES)
-    for name in D2_ENGINES:
+    assert sorted(engines) == sorted(ALL_ENGINES)
+    for name in ALL_ENGINES:
         assert engines[name]["disabled"] is False, name
     assert engines["wikipedia"]["display_type"] == ["list"]
+
+
+def test_wlo_asks_the_public_edu_sharing_search_and_links_render_pages() -> None:
+    wlo = {engine["name"]: engine for engine in _settings()["engines"]}["wlo"]
+    assert wlo["engine"] == "json_engine"
+    assert wlo["method"] == "POST"
+    assert wlo["headers"]["Content-Type"] == "application/json"
+    assert wlo["search_url"].startswith(
+        "https://redaktion.openeduhub.net/edu-sharing/rest/search/v1/queries/-home-/mds_oeh/"
+        "ngsearch?contentType=FILES&maxItems=10&skipCount={pageno}&"
+    )
+    # json_engine formats the body with str.format: doubled braces are the JSON's own.
+    fields = {
+        "query": "Photosynthese",
+        "lang": "de",
+        "pageno": 0,
+        "time_range": "",
+        "safe_search": "",
+    }
+    body = json.loads(wlo["request_body"].format(**fields))
+    assert body == {"criteria": [{"property": "ngsearchword", "values": ["Photosynthese"]}]}
+    # Page n skips (n - 1) * 10 hits, as maxItems is 10.
+    assert (wlo["paging"], wlo["page_size"], wlo["first_page_num"]) == (True, 10, 0)
+    assert wlo["results_query"] == "nodes"
+    assert (wlo["url_prefix"], wlo["url_query"]) == (WLO_RENDER, "ref/id")
+    assert wlo["title_query"] == "properties/cclom:title/0"
+    assert wlo["content_query"] == "properties/cclom:general_description/0"
+    assert wlo["about"]["use_official_api"] is True
+    # Longer than SearXNG's 3 s default, within the cap that keeps the search below its timeout.
+    assert 3.0 < wlo["timeout"] <= _settings()["outgoing"]["max_request_timeout"]
 
 
 def test_json_is_on() -> None:

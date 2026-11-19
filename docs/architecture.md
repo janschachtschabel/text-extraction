@@ -3733,6 +3733,26 @@ a generated key and answers `/healthz` and a JSON search.
   the ticked URLs to the site tree's batch flow. The admin-only hint of a hidden tab is in the
   Info tab.
 - **D5, no WLO source in this package (a, decided).**
+- **D6, German results: a language choice, WLO, Google and Bing (Jan, 2026-11-19, "A+C").**
+  After his test of v0.1.14 Jan asked for German results. No free, official web search API with
+  a German index exists, so he chose all three offered steps, which partly replaces D2 and D5.
+  (A) The playground's language is a select ("", `de`, `en`) preset to the page's language
+  (`SEARCH_LANGUAGE_CHOICES` in `ui/forms.py`; another value is a form error, not a request).
+  (B, part of C) `wlo` is a SearXNG `json_engine` added in `data/searxng-settings.yml`: a POST of
+  `{"criteria": [{"property": "ngsearchword", "values": ["<query>"]}]}` to
+  `https://redaktion.openeduhub.net/edu-sharing/rest/search/v1/queries/-home-/mds_oeh/ngsearch`
+  (`contentType=FILES`, 10 per page, `skipCount` from the page), title `cclom:title`, snippet
+  `cclom:general_description`, URL the render page `<base>/components/render/<ref.id>`, which
+  package 22 extracts through the repository's REST API. json_engine puts the query into the body
+  unescaped: a `"` or `\` makes the body invalid and WLO a failed source; anything else only
+  changes the criteria of a read-only public search. (C) `google` and `bing` are kept and
+  switched on: they are read by scraping, may block the server's address and then appear in
+  `sources_failed` (`partial`, which is not cached). This goes against D2's reason and is an
+  exception to CLAUDE.md rule 6 that Jan chose; `SEARCH_SOURCES` without `google,bing` keeps them
+  unasked, and DuckDuckGo, Brave and Startpage stay off. `SEARCH_SOURCES` names all eleven
+  engines by default (`tests/test_searxng_settings.py`). The live check is
+  `tests/live/run_search.py --expect wlo` (live.yml "Web search: WLO hits"); Google and Bing get
+  no live check, because CI's addresses are blocked often.
 
 **Rulings of the build (R25-1 to R25-9).**
 

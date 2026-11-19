@@ -38,6 +38,8 @@ DEFAULT_SEARCH_RESULTS: Final = 10
 DEFAULT_SEARCH_PAGE: Final = 1
 # The search form's "Time range": the first sends nothing (any time).
 TIME_RANGE_CHOICES: Final = ("", "day", "month", "year")
+# The search form's languages: "" asks in every language; the form presets the UI language.
+SEARCH_LANGUAGE_CHOICES: Final = ("", "de", "en")
 CHECKED: Final = "on"
 # The "Site rules" choice: its form field and the radio value of the deployment's default step.
 ACCESS_FIELD: Final = "access"
@@ -618,13 +620,13 @@ def _site_fields(form: Mapping[str, str]) -> Fields:
 def _search_fields(form: Mapping[str, str]) -> Fields:
     """The search form (package 25). ``sources`` holds the ticked sources one per line (the view
     joins the repeated field, `REPEATED_FIELDS`); none ticked sends no ``sources``, which asks
-    every source (REST refuses an empty list). An empty language or time range sends nothing."""
+    every source (REST refuses an empty list). "All languages" or "any time" sends nothing."""
     fields: Fields = {}
     _typed(fields, form, "query")
     sources = [line.strip() for line in form.get("sources", "").splitlines() if line.strip()]
     if sources:
         fields["sources"] = _Field(sources, set_by_user=True)
-    _typed(fields, form, "language")
+    _optional_choice(fields, form, "language", SEARCH_LANGUAGE_CHOICES)
     for name, default in (
         ("max_results", DEFAULT_SEARCH_RESULTS),
         ("page", DEFAULT_SEARCH_PAGE),

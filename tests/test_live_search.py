@@ -11,10 +11,15 @@ import httpx
 import pytest
 
 from tests.live import run_search
-from tests.live.run_search import Report, check_failure, check_hits, summarize
+from tests.live.run_search import Report, check_failure, check_hits, check_wlo, summarize
 
 WIKI = {"url": "https://de.wikipedia.org/wiki/Photosynthese", "sources": ["wikipedia"]}
 ARXIV = {"url": "https://arxiv.org/abs/1234.5678", "sources": ["arxiv", "openalex"]}
+WLO = {
+    "url": "https://redaktion.openeduhub.net/edu-sharing/components/render/"
+    "0a1b2c3d-0000-4000-8000-000000000001",
+    "sources": ["wlo"],
+}
 
 
 def envelope(
@@ -275,3 +280,59 @@ def test_main_failed_mode_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     )
 
     assert code == 0
+
+
+def wlo_report(service: FakeService, retries: int = 2) -> tuple[Report, list[float]]:
+    pauses: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        pauses.append(seconds)
+
+    async def run() -> Report:
+        async with service.client() as client:
+            return await check_wlo(client, "Photosynthese", retries, 7.0, sleep)
+
+    return asyncio.run(run()), pauses
+
+
+def test_a_wlo_render_page_hit_passes() -> None:
+    service = FakeService(lambda _b, _n: (200, envelope(WLO)))
+
+    report, pauses = wlo_report(service)
+
+    assert report.problems == []
+    assert pauses == []
+    assert service.bodies == [
+        ("rest", {"query": "Photosynthese", "sources": ["wlo"], "max_results": 10})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "problem"),
+    [
+        (envelope(WIKI), "no titled hit from wlo"),
+        (envelope({**WLO, "url": "https://wirlernenonline.de/"}), "no titled hit from wlo"),
+        (envelope({**WLO, "title": ""}), "no titled hit from wlo"),
+        (envelope(WLO, status="partial"), "status partial"),
+        (DOWN, "status failed (search_failed)"),
+    ],
+)
+def test_a_wlo_search_without_a_render_page_hit_fails(answer: dict[str, Any], problem: str) -> None:
+    service = FakeService(lambda _b, _n: (200, answer))
+
+    report, pauses = wlo_report(service)
+
+    assert report.problems == ["no try of 3 had a hit from wlo"]
+    assert pauses == [7.0, 7.0]
+    assert [body["max_results"] for _, body in service.bodies] == [10, 11, 12]
+    assert any(problem in p for call in report.calls for p in call.problems)
+
+
+def test_main_wlo_mode_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FakeService(lambda _b, _n: (200, envelope(WLO)))
+    monkeypatch.setattr(run_search, "_transport", lambda: httpx.MockTransport(service.handle))
+
+    code = run_search.main(["--expect", "wlo", "--summary-out", str(tmp_path / "s.md")])
+
+    assert code == 0
+    assert "Web search, WLO only" in (tmp_path / "s.md").read_text()

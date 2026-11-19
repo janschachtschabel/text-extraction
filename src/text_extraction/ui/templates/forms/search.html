@@ -13,7 +13,9 @@ sends no ``sources`` (every source is asked). -#}
     <p class="hint" id="search-sources-hint">{{ t("hint.search_sources", setting=code("SEARCH_SOURCES")) }}</p>
   </fieldset>
   <label for="search-language">{{ t("form.search_language") }}</label>
-  <input id="search-language" name="language" type="text" maxlength="10" spellcheck="false" autocomplete="off" aria-describedby="search-language-hint">
+  <select id="search-language" name="language" aria-describedby="search-language-hint">
+    {% for value in search_languages %}<option value="{{ value }}"{% if value == lang %} selected{% endif %}>{{ t("form.search_language." ~ (value or "any")) }}</option>{% endfor %}
+  </select>
   <p class="hint" id="search-language-hint">{{ t("hint.search_language") }}</p>
   <label for="search-max-results">{{ t("form.search_max_results") }}</label>
   <input id="search-max-results" name="max_results" type="number" min="1" max="{{ search_max_results }}" value="{{ search_results_preset }}" aria-describedby="search-max-results-hint">
