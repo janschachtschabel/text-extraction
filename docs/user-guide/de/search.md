@@ -31,9 +31,9 @@ nennt die Quellen, die ihn gefunden haben.
 | `arxiv` | Preprints aus arXiv (Physik, Mathematik, Informatik und mehr) | Nur Wissenschaft, fast alles englisch. |
 | `crossref` | Wissenschaftliche Werke mit DOI aus Crossref | Nur Wissenschaft; Metadaten, oft ohne Zusammenfassung. |
 | `bing` | Allgemeine Webseiten von Bing, in der Sprache von `language` | Keine offizielle API: SearXNG liest die Ergebnisseiten von Bing aus (Scraping). Eine Suchmaschine kann die Adresse eines Servers nach einiger Zeit sperren; die Quelle steht dann in `sources_failed`, und die Antwort ist `partial`. |
-| `duckduckgo` | Allgemeine Webseiten von DuckDuckGo | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre. |
-| `mojeek` | Allgemeine Webseiten von Mojeek, einer Suchmaschine mit eigenem Index | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre; ein kleinerer Index als der von Bing. |
-| `startpage` | Allgemeine Webseiten von Startpage, das die Ergebnisse von Google weitergibt | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre. |
+| `duckduckgo` | Allgemeine Webseiten von DuckDuckGo, in der Sprache von `language` | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre. |
+| `mojeek` | Allgemeine Webseiten von Mojeek, einer Suchmaschine mit eigenem Index, in der Sprache von `language` | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre; ein kleinerer Index als der von Bing. |
+| `startpage` | Allgemeine Webseiten von Startpage, das die Ergebnisse von Google weitergibt, in der Sprache von `language` | Scraping wie bei `bing`, mit derselben Gefahr einer Sperre. |
 
 Deutsche Ergebnisse kommen also von Bing, DuckDuckGo, Mojeek und Startpage, Wikipedia-Wissen aus
 den Wikimedia-Quellen und Wissenschaft aus OpenAlex, arXiv und Crossref. Google und Brave bleiben
@@ -41,8 +41,8 @@ aus: Google hat einen Server schon am ersten Tag gesperrt. Ein Betreiber kann di
 gelesenen Suchmaschinen ausschalten oder eine weitere einschalten (siehe
 [Weitere Quellen](#weitere-quellen)).
 
-Werden mehrere Quellen gefragt, wechseln sich die Treffer ab: zuerst der beste Treffer jeder
-Quelle, dann der zweite jeder Quelle und so weiter. Eine Seite, die mehrere Quellen gefunden haben
+Werden mehrere Quellen gefragt, kommen die besten Treffer der Quellen zuerst: zuerst die Treffer,
+die in der Liste einer Quelle ganz oben stehen, dann die auf dem zweiten Platz und so weiter. Eine Seite, die mehrere Quellen gefunden haben
 (auch als `http` und `https`, mit oder ohne `www.`, Schrägstrich am Ende oder `utm_`-Parameter),
 steht nur einmal da, an ihrem besten Platz, mit allen ihren Quellen.
 
@@ -102,12 +102,15 @@ reiner Text: Der Dienst entfernt die Auszeichnung, die manche Quellen mitliefern
 Crossref und OpenAlex, die Hervorhebungen von Wikipedia). `data.suggestions` listet andere
 Suchbegriffe.
 
-Die Treffer sind nach ihrem Platz in der eigenen Liste jeder Quelle geordnet: Zuerst kommt der beste
-Treffer jeder Quelle, dann der zweite jeder Quelle und so weiter. Eine Seite, die mehrere Quellen
-gefunden haben, ist ein Treffer an ihrem besten Platz, dessen `sources` alle nennt; als dieselbe
-Seite gilt eine Adresse ohne Rücksicht auf `http` oder `https`, ein führendes `www.`, einen
-Schrägstrich am Ende, den Teil nach `#` oder `utm_`-Parameter. `max_results` kürzt die Liste nach
-dieser Ordnung.
+Die Treffer sind nach ihrem besten Platz in der eigenen Liste einer Quelle geordnet: Zuerst kommen
+die Treffer, die in der Liste einer Quelle ganz oben stehen, dann die auf dem zweiten Platz und so
+weiter; innerhalb eines Platzes zählt die Reihenfolge von SearXNG. Eine Seite, die mehrere Quellen
+gefunden haben, ist ein Treffer an ihrem besten Platz, dessen `sources` alle nennt, und ihre `url`
+ist die https-Adresse, wo eine der Quellen sie hat. Als dieselbe Seite gilt eine Adresse ohne
+Rücksicht auf `http` oder `https`, den Standard-Port, ein führendes `www.`, Groß- und
+Kleinschreibung des Hosts, einen Schrägstrich am Ende, die Reihenfolge der Abfrage,
+`utm_`-Parameter oder einen Teil nach `#` wie `#top` (eine Route wie `#/seite` zählt).
+`max_results` kürzt die Liste nach dieser Ordnung.
 
 Haben manche Quellen nicht geantwortet, ist die Antwort `partial`, und `data.sources_failed` nennt
 jede mit dem Grund von SearXNG (etwa eine Zeitüberschreitung oder eine abgelehnte Verbindung). Die

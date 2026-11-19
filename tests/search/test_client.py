@@ -321,12 +321,76 @@ async def test_duplicates_are_merged_into_the_best_ranked_hit(settings: Settings
 
     assert envelope.data is not None
     first, other = envelope.data.results
-    assert first.url == "http://example.org/page?id=1"
+    # The best ranked hit's title, snippet and place; the https address of its duplicate.
+    assert first.url == "https://www.Example.org/page/?utm_source=x&id=1#top"
     assert first.title == "Second"
     assert first.sources == ["duckduckgo", "bing"]
     assert first.published == "2026-01-01"
     assert first.score == 3.0
     assert other.url == "https://example.org/page?id=2"
+
+
+@pytest.mark.parametrize(
+    ("one", "other"),
+    [
+        ("https://a.example/?UTM_Source=x&b=1&a=2", "https://a.example?a=2&b=1"),
+        ("https://a.example:443/p", "https://a.example/p"),
+        ("http://a.example:80/p", "https://a.example/p"),
+    ],
+)
+@runs_async
+async def test_more_spellings_of_one_page_are_merged(
+    settings: Settings, one: str, other: str
+) -> None:
+    body = answer(
+        [
+            hit(one, engines=["bing"], positions=[1]),
+            hit(other, engines=["mojeek"], positions=[1]),
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert [h.sources for h in envelope.data.results] == [["bing", "mojeek"]]
+
+
+@pytest.mark.parametrize(
+    ("one", "other"),
+    [
+        ("https://a.example/#/p1", "https://a.example/#/p2"),  # routes of a single-page app
+        ("https://a.example/#!p1", "https://a.example/#!p2"),
+        ("https://a.example:8443/p", "https://a.example/p"),
+    ],
+)
+@runs_async
+async def test_different_pages_stay_apart(settings: Settings, one: str, other: str) -> None:
+    body = answer(
+        [
+            hit(one, engines=["bing"], positions=[1]),
+            hit(other, engines=["mojeek"], positions=[1]),
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert [h.url for h in envelope.data.results] == [one, other]
+
+
+@runs_async
+async def test_a_merged_hit_keeps_an_address_without_credentials(settings: Settings) -> None:
+    body = answer(
+        [
+            hit("https://user:pw@a.example/p", engines=["bing"], positions=[1]),
+            hit("https://a.example/p", engines=["mojeek"], positions=[2]),
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert [h.url for h in envelope.data.results] == ["https://a.example/p"]
 
 
 @runs_async

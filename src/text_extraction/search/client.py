@@ -134,30 +134,48 @@ def _rank(raw: Any) -> float:
     return float(min(ranks)) if ranks else math.inf
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 def _page_key(url: str) -> str:
-    """One key per page: scheme, ``www.``, a trailing slash, the fragment and ``utm_`` parameters
-    do not matter, the case of the host neither."""
+    """One key per page: the scheme, its default port, ``www.``, the case of the host, a trailing
+    slash, the order of the query, ``utm_`` parameters and a plain fragment (``#top``) do not
+    matter. A fragment that is a route of a single-page app (``#/p``, ``#!p``) does."""
     parts = urlsplit(url)
     try:
-        port = f":{parts.port}" if parts.port else ""
+        port_number = parts.port
+        port = (
+            ""
+            if port_number in (None, _DEFAULT_PORTS.get(parts.scheme.lower()))
+            else f":{port_number}"
+        )
     except ValueError:  # a port that is no number: kept as written
         port = ":" + parts.netloc.rpartition(":")[2]
     host = (parts.hostname or "").lower().removeprefix("www.")
     query = urlencode(
-        [
+        sorted(
             (k, v)
             for k, v in parse_qsl(parts.query, keep_blank_values=True)
-            if not k.startswith("utm_")
-        ]
+            if not k.lower().startswith("utm_")
+        )
     )
-    return f"{host}{port}{parts.path.rstrip('/')}?{query}"
+    route = f"#{parts.fragment}" if parts.fragment.startswith(("/", "!")) else ""
+    return f"{host}{port}{parts.path.rstrip('/')}?{query}{route}"
+
+
+def _address_rank(url: str) -> tuple[bool, bool]:
+    """Lower is better: an https address before an http one, one without credentials first."""
+    parts = urlsplit(url)
+    return (parts.scheme.lower() != "https", "@" in parts.netloc)
 
 
 def _merge(first: SearchHit, other: SearchHit) -> SearchHit:
-    """``first`` (the better ranked) with the sources of ``other`` added and its gaps filled."""
+    """``first`` (the better ranked) with the sources of ``other`` added and its gaps filled; the
+    address is the better one of the two (``first``'s when they are equally good)."""
     scores = [s for s in (first.score, other.score) if s is not None]
     return first.model_copy(
         update={
+            "url": min((first.url, other.url), key=_address_rank),
             "sources": list(dict.fromkeys([*first.sources, *other.sources])),
             "snippet": first.snippet or other.snippet,
             "published": first.published or other.published,

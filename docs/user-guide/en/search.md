@@ -30,19 +30,19 @@ that found it.
 | `arxiv` | Preprints from arXiv (physics, mathematics, computer science and more) | Science only, almost all English. |
 | `crossref` | Scholarly works with a DOI from Crossref | Science only; metadata, often without a summary. |
 | `bing` | General web pages from Bing, in the language of `language` | No official API: SearXNG reads Bing's result pages (scraping). A search engine may block a server's address after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
-| `duckduckgo` | General web pages from DuckDuckGo | Scraping as with `bing`, with the same risk of a block. |
-| `mojeek` | General web pages from Mojeek, a search engine with its own index | Scraping as with `bing`, with the same risk of a block; a smaller index than Bing's. |
-| `startpage` | General web pages from Startpage, which passes on Google's results | Scraping as with `bing`, with the same risk of a block. |
+| `duckduckgo` | General web pages from DuckDuckGo, in the language of `language` | Scraping as with `bing`, with the same risk of a block. |
+| `mojeek` | General web pages from Mojeek, a search engine with its own index, in the language of `language` | Scraping as with `bing`, with the same risk of a block; a smaller index than Bing's. |
+| `startpage` | General web pages from Startpage, which passes on Google's results, in the language of `language` | Scraping as with `bing`, with the same risk of a block. |
 
 So German results come from Bing, DuckDuckGo, Mojeek and Startpage, Wikipedia knowledge from
 the Wikimedia sources and science from OpenAlex, arXiv and Crossref. Google and Brave stay off:
 Google blocked a server on its first day. An operator can switch the four scraped engines off, or
 switch another engine on (see [More sources](#more-sources)).
 
-When several sources are asked, the hits take turns: first every source's top hit, then every
-source's second hit, and so on. A page that several sources found (also as `http` and `https`,
-with or without `www.`, a trailing slash or `utm_` parameters) is listed once, at its best place,
-with all its sources.
+When several sources are asked, the top hits of the sources come first: first the hits that are
+at the top of some source's list, then those in second place, and so on. A page that several
+sources found (also as `http` and `https`, with or without `www.`, a trailing slash or `utm_`
+parameters) is listed once, at its best place, with all its sources.
 
 ## In the playground
 
@@ -96,11 +96,14 @@ where the source has one) and SearXNG's `score`. `title` and `snippet` are plain
 service drops the markup some sources hand on (Crossref's and OpenAlex's JATS tags, Wikipedia's
 highlights). `data.suggestions` lists other search terms.
 
-The hits are ordered by their place in each source's own list: every source's top hit comes
-first, then every source's second, and so on. A page found by several sources is one hit, at its
-best place, whose `sources` names all of them; the address counts as the same page without regard
-to `http` or `https`, a leading `www.`, a trailing slash, the `#` part or `utm_` parameters.
-`max_results` cuts the list after this ordering.
+The hits are ordered by their best place in any source's own list: the hits that are at the top
+of some source's list come first, then those in second place, and so on; within one place,
+SearXNG's order counts. A page found by several sources is one hit, at its best place, whose
+`sources` names all of them, and its `url` is the https address where one of them has it. The
+address counts as the same page without regard to `http` or `https`, the default port, a leading
+`www.`, the case of the host, a trailing slash, the order of the query, `utm_` parameters or a
+`#` part such as `#top` (a route such as `#/page` counts). `max_results` cuts the list after
+this ordering.
 
 When some sources did not answer, the answer is `partial`, and `data.sources_failed` names each
 with SearXNG's reason (such as a timeout or a refused connection). The hits then come from the
