@@ -110,6 +110,7 @@ def test_offered_features_match_the_ui() -> None:
             "llm": offer.llm,
             "llm_needs_key": offer.llm_needs_key,
             "semantic": offer.semantic,
+            "search": offer.search,
         }
         assert admin_only == offer.admin_only
 

@@ -34,7 +34,9 @@ from text_extraction.ui.answers import (
 )
 from text_extraction.ui.forms import (
     OPERATIONS,
+    REPEATED_FIELDS,
     SINGLE_OPERATIONS,
+    FeatureOffer,
     OptionsError,
     access_offer,
     build_body,
@@ -120,22 +122,51 @@ TABS: Final[tuple[Tab, ...]] = (
     ),
     Tab("info", "tab.info", "help.info.intro", OPERATIONS["info"].form, "usage"),
 )
+# The "Search" tab (package 25): shown before Info, only to a key that can search.
+SEARCH_TAB: Final = Tab(
+    "search", "tab.search", "help.search.intro", OPERATIONS["search"].form, "search"
+)
+
+
+def shown_tabs(features: FeatureOffer) -> tuple[Tab, ...]:
+    """The tabs a caller sees: ``TABS``, with the Search tab before Info while its key can search
+    (``features.search``)."""
+    if not features.search:
+        return TABS
+    return (*TABS[:-1], SEARCH_TAB, TABS[-1])
+
+
 NO_FILE: Final = Message("form.no_file")
 _MODES: Final = frozenset(get_args(RequestedMode))
 _COMPLIANCE_MODES: Final = frozenset(get_args(ComplianceMode))
 
 
 def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
+    features = feature_offer(role, settings)
     return {
         "principal_name": name,
         "role": role,
         "auth_none": settings.auth_mode == "none",
         "banner": BANNER,
-        "tabs": TABS,
+        "tabs": shown_tabs(features),
         "help_url": partial(help_url, settings),
         "access": access_offer(role, settings),
         "browser_enabled": settings.browser_enabled,
+        "features": features,
+        "search_sources": settings.search_sources,
+        "search_max_results": settings.search_max_results,
+    }
+
+
+def _result_extra(op: str, role: str, settings: Settings) -> dict[str, Any] | None:
+    """What the result of ``op`` needs besides the answer: a search's hits form has the batch
+    options, offered as to the caller of ``role``."""
+    if op != "search":
+        return None
+    return {
+        "access": access_offer(role, settings),
         "features": feature_offer(role, settings),
+        "browser_enabled": settings.browser_enabled,
     }
 
 
@@ -186,6 +217,9 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
         if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
         fields = text_fields(form)
+        for name in REPEATED_FIELDS.get(op, ()):
+            values = form.getlist(name)
+            fields[name] = "\n".join(value for value in values if isinstance(value, str))
         try:
             body = build_body(op, fields)
         except OptionsError as error:
@@ -215,6 +249,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             screenshot_detail=screenshot_detail,
             form=fields,
             language=request_language(request),
+            extra=_result_extra(op, principal.role, settings),
         )
         return HTMLResponse(html)
 

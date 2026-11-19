@@ -1,5 +1,7 @@
 {#- The short summary ui.js writes to #ui-status (ruling P12-S9). -#}
 {%- if job %}{% set summary = t("status.result_job", id=job["id"]) %}
+{%- elif status and hits is defined %}
+{%- set summary = t("status.search_result", status=t(status_text(status)) if status_text(status) else status, hits=tn("search.hits", hits|length)) %}
 {%- elif status and data and data["timings"] is mapping and data["timings"]["total_ms"] is number %}
 {%- set seconds = "%.2f"|format(data["timings"]["total_ms"] / 1000) %}
 {%- set summary = t("status.result_time", status=t(status_text(status)) if status_text(status) else status, seconds=seconds|replace(".", ",") if lang == "de" else seconds) %}
@@ -70,7 +72,9 @@ level lower. -#}
     <div class="fact"><dt>{{ t("result.time") }}</dt><dd>{{ t("progress.seconds", seconds=total|replace(".", ",") if lang == "de" else total) }}</dd></div>
     {% endif %}
     {% if compliance_mode %}<div class="fact"><dt>{{ t("access.compliance") }}</dt><dd>{{ code(compliance_mode) }}</dd></div>{% endif %}
+    {% if hits is defined %}<div class="fact"><dt>{{ t("search.hits_label") }}</dt><dd>{{ hits|length }}</dd></div>{% endif %}
   </dl>
+  {% if hits is defined %}{% include "search_hits.html" %}{% endif %}
   {% if op == "extract" and (screenshot or screenshot_note) %}
   <details class="card fold">
     <summary><{{ card_heading }} class="fold-title">{{ t("result.screenshot_title") }}</{{ card_heading }}></summary>

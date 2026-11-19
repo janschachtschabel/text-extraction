@@ -263,6 +263,8 @@
       writeKey(KEYS.asr, valueOf("keys-asr"));
     } else if (action === "tree-all" || action === "tree-none") {
       selectAll(button.closest("form"), action === "tree-all");
+    } else if (action === "hits-all" || action === "hits-none") {
+      selectHits(button.closest("form"), action === "hits-all");
     } else if (action === "tree-content") {
       selectContent(button.closest("form"), button.getAttribute("data-exclude") || "");
     } else if (action === "tree-unfold-all" || action === "tree-fold-all") {
@@ -317,7 +319,7 @@
   }
 
   function countSelected(form) {
-    var counter = form.querySelector(".tree-counter");
+    var counter = form.querySelector(".tree-counter, .hits-counter");
     if (counter) {
       counter.textContent = text("selected", {
         count: form.querySelectorAll("input[name=url]:checked").length
@@ -906,6 +908,21 @@
     settle(item);
     settleParents(item);
     countSelected(box.closest("form"));
+  });
+
+  // A search's hits (package 25): "Select all" and "Select none", and the counter of ticked hits.
+  function selectHits(form, value) {
+    form.querySelectorAll(".search-hits input[name=url]").forEach(function (box) {
+      box.checked = value;
+    });
+    countSelected(form);
+  }
+
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (box instanceof HTMLInputElement && box.form && box.closest(".search-hits")) {
+      countSelected(box.form);
+    }
   });
 
   // The screenshot form's custom fields apply only with the preset "custom".

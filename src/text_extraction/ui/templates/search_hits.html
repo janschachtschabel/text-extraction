@@ -1,0 +1,51 @@
+{#- The hits of a web search (package 25): every field of SearXNG's answer is escaped by the
+template, a hit's URL is a link and a box only when it is http(s). "Extract selected" posts the
+ticked boxes to the site tree's batch flow (/ui/run/batch-urls), whose progress view, or its
+form error when nothing is ticked, goes into the box after the form. Each box is named by its
+hit's title (aria-labelledby) and described by its URL. -#}
+{% if sources_failed %}
+<div class="notice search-sources-failed" role="note">
+  <p>{{ t("search.sources_failed") }}</p>
+  <ul>
+    {% for failure in sources_failed %}<li><code>{{ failure["source"] }}</code>: <span lang="en">{{ failure["reason"] }}</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% if suggestions %}<p class="search-suggestions">{{ t("search.suggestions") }} {{ suggestions|join(", ") }}</p>{% endif %}
+{% if hits %}
+<section class="card search-results" aria-labelledby="search-hits-title">
+  <{{ card_heading }} id="search-hits-title">{{ t("search.hits_title") }}</{{ card_heading }}>
+  {% set prefix = "search-hits" %}
+  <form id="search-hits-form" class="search-hits-form" hx-post="/ui/run/batch-urls" hx-target="next .search-jobs" hx-swap="innerHTML">
+    <p class="search-tools">
+      <button type="button" class="secondary" data-action="hits-all">{{ t("search.select_all") }}</button>
+      <button type="button" class="secondary" data-action="hits-none">{{ t("search.select_none") }}</button>
+      <span class="hits-counter" aria-live="polite">{{ t("status.selected", count=0) }}</span>
+    </p>
+    <ol class="search-hits">
+      {% for hit in hits %}
+      {% set hit_id = "search-hit-" ~ loop.index %}
+      <li class="hit">
+        {% if hit["http"] %}<input type="checkbox" id="{{ hit_id }}" name="url" value="{{ hit['url'] }}" aria-labelledby="{{ hit_id }}-title" aria-describedby="{{ hit_id }}-url">{% endif %}
+        <{{ sub_heading }} class="hit-title">{% if hit["http"] %}<a class="hit-link" href="{{ hit['url'] }}" target="_blank" rel="noopener noreferrer"><span id="{{ hit_id }}-title">{{ hit["title"] or hit["url"] }}</span><span class="visually-hidden"> {{ t("help.new_tab") }}</span></a>{% else %}<span id="{{ hit_id }}-title">{{ hit["title"] or hit["url"] }}</span>{% endif %}</{{ sub_heading }}>
+        <p class="hit-url" id="{{ hit_id }}-url">{{ hit["url"] }}</p>
+        {% if hit["snippet"] %}<p class="hit-snippet">{{ hit["snippet"] }}</p>{% endif %}
+        {% if hit["sources"] or hit["published"] %}
+        <p class="hit-meta">
+          {%- if hit["sources"] %}<span class="hit-sources">{{ t("search.found_by", sources=hit["sources"]|join(", ")) }}</span>{% endif %}
+          {%- if hit["sources"] and hit["published"] %} · {% endif %}
+          {%- if hit["published"] %}<span class="hit-published">{{ t("search.published", date=hit["published"]) }}</span>{% endif %}</p>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    <div class="search-actions" id="search-hits-actions">
+      {% include "forms/batch_options.html" %}
+      <button type="submit">{{ t("tree.extract_selected") }}</button>
+    </div>
+  </form>
+  <div class="search-jobs"></div>
+</section>
+{% else %}
+<p class="search-empty">{{ t("search.no_hits") }}</p>
+{% endif %}

@@ -318,6 +318,30 @@ def _warnings(data: Mapping[str, Any]) -> list[tuple[str, Message | None]]:
     return [(_shown(name), warning_message(_shown(name))) for name in data.get("warnings") or []]
 
 
+def _search(data: Mapping[str, Any]) -> dict[str, Any]:
+    """A web search's hits (package 25), each with ``http`` (only an http(s) URL becomes a link
+    or a box), its sources and its date; the sources that failed and the suggestions."""
+    hits = [
+        {
+            "url": _shown(hit.get("url")),
+            "http": is_http(hit.get("url")),
+            "title": _shown(hit.get("title") or ""),
+            "snippet": _shown(hit.get("snippet") or ""),
+            "sources": [_shown(name) for name in hit.get("sources") or []],
+            "published": _shown(hit.get("published") or ""),
+        }
+        for hit in data.get("results") or []
+        if isinstance(hit, Mapping)
+    ]
+    failed = [
+        {"source": _shown(item.get("source")), "reason": _shown(item.get("reason") or "")}
+        for item in data.get("sources_failed") or []
+        if isinstance(item, Mapping)
+    ]
+    suggestions = [_shown(text) for text in data.get("suggestions") or []]
+    return {"hits": hits, "sources_failed": failed, "suggestions": suggestions}
+
+
 def result_context(
     *,
     op: str,
@@ -389,6 +413,9 @@ def result_context(
     context["download"] = _download(data)
     context["response_download"] = _response_download(envelope_json)
     context["response_too_large"] = context["response_download"] is None
+    if op == "search":
+        context.update(_search(data))
+        return context
     context["page_type"] = _page_type(data)
     content = data.get("content")
     context["content_lang"] = _content_language(data.get("language"))
@@ -441,9 +468,11 @@ def render_result(
     item: JobItem | None = None,
     form: Mapping[str, str] | None = None,
     language: Language = "en",
+    extra: Mapping[str, Any] | None = None,
 ) -> str:
     """``result.html`` rendered in ``language`` with `result_context` of the other
-    arguments."""
+    arguments, and ``extra`` (what an operation's view adds, such as a search's batch
+    options)."""
     context = result_context(
         op=op,
         http_status=http_status,
@@ -458,4 +487,6 @@ def render_result(
         item=item,
         form=form,
     )
-    return templates.get_template("result.html").render({**language_context(language), **context})
+    return templates.get_template("result.html").render(
+        {**language_context(language), **(extra or {}), **context}
+    )

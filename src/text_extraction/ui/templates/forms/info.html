@@ -1,3 +1,5 @@
 <form id="info-form" class="op" hx-post="/ui/run/info" hx-target="#result" hx-swap="innerHTML">
+  {#- A tab the service keeps for admin keys is not shown to a user key: this says why. #}
+  {% if "search" in features.admin_only %}<p class="hint feature-off">{{ t("hint.search_admin_only") }}</p>{% endif %}
   <button type="submit">{{ t("form.show_info") }}</button>
 </form>
