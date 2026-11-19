@@ -3634,7 +3634,8 @@ page names itself.
 - **R26-2** Caps: each API list page counts as a sitemap file (`SITE_MAX_SITEMAP_FILES`), each
   entry as a sitemap entry (`SITE_MAX_SITEMAP_URLS`). An API answer is read to at most
   `API_MAX_BYTES` (4 MiB, or `SITE_SITEMAP_MAX_BYTES` if smaller): JSON is parsed whole, so a
-  larger answer fails `too_large` without a parse. A 401/403/404 answer fails that item
+  larger answer fails `too_large` without a parse. A list page whose entries the URL cap cut
+  (some or all) ends its chain: its next page is not appended. A 401/403/404 answer fails that item
   (`target_http_error`, not retryable) and the crawl goes on. robots.txt, the TDM checks and the
   per-host pauses apply to these fetches as to any other.
 - **R26-3** `scope: path`: only content types whose name matches a segment of the start URL's

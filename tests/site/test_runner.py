@@ -2105,6 +2105,19 @@ async def test_api_caps() -> None:
     assert second.result is not None
     assert second.result.status == "partial"
 
+    # The chain ends on the page whose entries the cap cut: no request that keeps nothing.
+    crawl = Crawl(wp_site(50), site_max_sitemap_urls=150)
+    job_id = await crawl.start(depth=0, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT, TYPES, wp_list("posts"), wp_list("posts", 2)]
+    assert sitemap_of(items[3]).children == []
+    list_calls = [url for url, _ in crawl.fetcher.calls if "/wp/v2/posts" in url]
+    assert list_calls == [wp_list("posts"), wp_list("posts", 2)]
+
 
 @scenario
 async def test_wordpress_plain_permalinks_chain() -> None:

@@ -46,7 +46,8 @@ not the other way round:
   sitemap's. A
   WordPress types or Drupal index item lists one child per content type (``scope: path``: only
   types whose name matches the path prefix), one level deeper; a list page's one child is its
-  next page at its own depth (``page`` + 1), so ``SITE_MAX_SITEMAP_FILES`` ends the chain.
+  next page at its own depth (``page`` + 1), so ``SITE_MAX_SITEMAP_FILES`` ends the chain; so
+  does a page whose entries the crawl's ``SITE_MAX_SITEMAP_URLS`` cut (some or all).
   Entries get their ``type_guess`` from URL, title and the list's content type.
 
 Every item's ``SitemapInfo`` (and its parts') carries the node's ``source``: ``robots`` (listed),
@@ -142,6 +143,8 @@ _SITEMAP_NO_ROOT_MESSAGE = "The sitemap was read until its time limit without re
 _SITEMAP_TIMEOUT_MESSAGE = "The sitemap was read until its time limit: the entries before it."
 _SITEMAP_CUT_MESSAGE = "The sitemap was cut: the entries before the cut."
 
+# The API items that are one page of a content list, whose one child is the next page.
+_API_LISTS: Final[frozenset[ApiFormat | None]] = frozenset({"wordpress_posts", "drupal_nodes"})
 # How long past the item's deadline the runner waits for a parse that stops itself at it.
 _PARSE_GRACE_SECONDS = 5.0
 # Room in an item's JSON for the warnings and error the runner adds after it sized the item.
@@ -508,6 +511,12 @@ class SitemapItems:
 
         granted = await self._sites.reserve_entries(job.id, item.index, len(parsed.entries))
         entries = parsed.entries[:granted]
+        if node.api in _API_LISTS and parsed.entry_count > len(entries):
+            # The crawl's entries ran out on this page (none or only some of its entries were
+            # granted): its next page could keep none. The grant is the stored one on a rerun,
+            # so a rerun ends the chain alike. (``left`` is not asked: a rerun reads its grant
+            # there, which is 0 for a page without entries that had some left.)
+            parsed.children = []
         warnings: list[str] = []
         caps: set[str] = set()
         codes: list[tuple[ErrorCode, str]] = []
