@@ -9,6 +9,15 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- Web search: `duckduckgo` replaces `google` (ruling D7). Google blocked the first server that
+  ran v0.1.15 ("Suspended: access denied"), so a default search listed it in `sources_failed`
+  every time and was never cached. `SEARCH_SOURCES` now defaults to
+  `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,bing,duckduckgo,wlo`;
+  a request naming `google` is refused with 422. A compose install gets the new SearXNG settings
+  with the new image.
+
 ## [0.1.15] - 2026-11-19
 
 ### Added

@@ -691,8 +691,8 @@ def test_search_settings_defaults() -> None:
         "openalex",
         "arxiv",
         "crossref",
-        "google",
         "bing",
+        "duckduckgo",
         "wlo",
     ]
 

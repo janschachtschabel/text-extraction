@@ -404,8 +404,8 @@ class Settings(BaseSettings):
         "openalex",
         "arxiv",
         "crossref",
-        "google",
         "bing",
+        "duckduckgo",
         "wlo",
     ]
     search_allow_users: bool = True  # may non-admin keys search?

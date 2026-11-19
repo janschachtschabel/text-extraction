@@ -11,9 +11,10 @@
 
 use_default_settings:
   engines:
-    # Engines with an official, free API (ruling D2 a), plus google and bing on Jan's choice of
-    # 2026-11-19 (ruling D6): they are read by scraping, may block the server's address and then
-    # appear in sources_failed. Every other scraping engine stays off.
+    # Engines with an official, free API (ruling D2 a), plus bing and duckduckgo on Jan's choices
+    # of 2026-11-19 (rulings D6 and D7; google left out after it blocked the server): they are
+    # read by scraping, may block the server's address and then appear in sources_failed. Every
+    # other scraping engine stays off.
     keep_only:
       - wikipedia
       - wikibooks
@@ -23,8 +24,8 @@ use_default_settings:
       - openalex
       - arxiv
       - crossref
-      - google
       - bing
+      - duckduckgo
 
 general:
   instance_name: text-extraction search
@@ -76,9 +77,9 @@ engines:
     disabled: false
   - name: crossref
     disabled: false
-  - name: google
-    disabled: false
   - name: bing
+    disabled: false
+  - name: duckduckgo
     disabled: false
   # WirLernenOnline: German teaching material from the official, free, public search API of its
   # edu-sharing repository (no key). Each hit links to the material's render page, which the

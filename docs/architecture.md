@@ -3753,6 +3753,12 @@ a generated key and answers `/healthz` and a JSON search.
   engines by default (`tests/test_searxng_settings.py`). The live check is
   `tests/live/run_search.py --expect wlo` (live.yml "Web search: WLO hits"); Google and Bing get
   no live check, because CI's addresses are blocked often.
+- **D7, DuckDuckGo instead of Google (Jan, 2026-11-19).** On the first day of v0.1.15 Google
+  answered the Hostinger server with "Suspended: access denied" (SearXNG's suspension after a
+  CAPTCHA or 403), while Bing answered. Jan asked for DuckDuckGo instead: `duckduckgo` replaces
+  `google` in `keep_only`, the engine list and the `SEARCH_SOURCES` default, so a default search
+  no longer lists a blocked Google in `sources_failed` on every call (and stays cacheable while
+  the other engines answer). DuckDuckGo is scraped as well; the D6 notes on blocks apply.
 
 **Rulings of the build (R25-1 to R25-9).**
 

@@ -16,7 +16,7 @@ your key may search (`features.search`) and how many hits one search may return
 
 ## The sources
 
-Every source is free. All but Google and Bing have an official API. Each hit names the sources
+Every source is free. All but Bing and DuckDuckGo have an official API. Each hit names the sources
 that found it.
 
 | Source | What it finds | Limits |
@@ -29,13 +29,14 @@ that found it.
 | `openalex` | Scholarly works (articles, books, data sets) from OpenAlex | Science only; titles are often English. |
 | `arxiv` | Preprints from arXiv (physics, mathematics, computer science and more) | Science only, almost all English. |
 | `crossref` | Scholarly works with a DOI from Crossref | Science only; metadata, often without a summary. |
-| `google` | General web pages from Google, in the language of `language` | No official API: SearXNG reads Google's result pages (scraping). Google blocks server addresses after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
-| `bing` | General web pages from Bing, in the language of `language` | Scraping as with `google`, with the same risk of a block. |
+| `bing` | General web pages from Bing, in the language of `language` | No official API: SearXNG reads Bing's result pages (scraping). A search engine may block a server's address after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
+| `duckduckgo` | General web pages from DuckDuckGo | Scraping as with `bing`, with the same risk of a block. |
 | `wlo` | Teaching material from WirLernenOnline (WLO), through the official, free search API of its repository | German material only; `language` does not apply. Each hit links the material's page in the repository (`https://redaktion.openeduhub.net/edu-sharing/components/render/<id>`), whose text, licence and file the extraction reads through the repository's API. Search terms with a double quote (`"`) or a backslash make WLO fail. |
 
-So German results come from Google, Bing and WLO, Wikipedia knowledge from the Wikimedia sources
-and science from OpenAlex, arXiv and Crossref. DuckDuckGo, Brave and Startpage stay off. An
-operator can switch Google and Bing off, or switch another engine on (see
+So German results come from Bing, DuckDuckGo and WLO, Wikipedia knowledge from the Wikimedia
+sources and science from OpenAlex, arXiv and Crossref. Google, Brave and Startpage stay off:
+Google blocked a server on its first day. An operator can switch Bing and DuckDuckGo off, or
+switch another engine on (see
 [More sources](#more-sources)).
 
 ## In the playground
@@ -170,18 +171,18 @@ published: with an older image SearXNG gets no settings and does not start. If
 `docker compose logs init` shows `init_searxng_settings_failed`, remove the volume
 `searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's
 own address. The sources with an official API do not block a server; Mwmbl counts requests per
-address. Google and Bing may block the VPS's address after a while: they then appear in
+address. Bing and DuckDuckGo may block the VPS's address after a while: they then appear in
 `sources_failed`, and the other sources still answer. Such an answer is `partial` and is not
-cached, so while a block lasts every search asks all sources again; leave Google and Bing out of
+cached, so while a block lasts every search asks all sources again; leave a blocked engine out of
 `SEARCH_SOURCES` if that happens for long (see [More sources](#more-sources)).
 
 ### More sources
 
-To keep Google and Bing off, set `SEARCH_SOURCES` without them (for example
+To keep Bing and DuckDuckGo off, set `SEARCH_SOURCES` without them (for example
 `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,wlo`): the service then
 never asks them. A source outside `SEARCH_SOURCES` is refused with a 422.
 
-To switch on another SearXNG engine (such as `duckduckgo`), at your own risk:
+To switch on another SearXNG engine (such as `google` or `startpage`), at your own risk:
 
 1. Add its name to `use_default_settings.engines.keep_only` and to the `engines:` list (with
    `disabled: false`) of SearXNG's `settings.yml`.
@@ -201,6 +202,6 @@ Where the settings come from depends on the setup:
   chart, or set `searxng.enabled=false` and `config.SEARCH_URL` to a SearXNG of your own.
 
 Scraping search engines gets the server's address blocked and goes against their terms. The
-project keeps Google and Bing on by default because German web results need them (ruling D6 in
+project keeps Bing and DuckDuckGo on by default because German web results need them (rulings D6 and D7 in
 [architecture.md](../../architecture.md#web-search)); every other
 scraping engine stays off.

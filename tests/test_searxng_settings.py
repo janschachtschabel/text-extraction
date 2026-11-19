@@ -1,8 +1,8 @@
 """SearXNG's settings.yml as this project ships it (package 25): the template that
 ``text-extraction-init`` renders into the compose stack and the Helm chart mounts. The engines
-with an official, free API (ruling D2 a), google and bing, and the added json engine wlo (ruling
-D6) are on, SEARCH_SOURCES names exactly them, and the instance is a private backend of the API:
-JSON on, limiter, image proxy and Valkey off."""
+with an official, free API (ruling D2 a), bing and duckduckgo (rulings D6 and D7), and the added
+json engine wlo (ruling D6) are on, SEARCH_SOURCES names exactly them, and the instance is a
+private backend of the API: JSON on, limiter, image proxy and Valkey off."""
 
 import json
 from importlib.resources import files
@@ -25,8 +25,9 @@ D2_ENGINES = [
     "arxiv",
     "crossref",
 ]
-# Jan's choice of 2026-11-19 (ruling D6): two scraping engines and WLO's official API.
-SCRAPING_ENGINES = ["google", "bing"]
+# Jan's choices of 2026-11-19 (rulings D6, D7): two scraping engines and WLO's official API.
+# google is left out: it blocked the server ("Suspended: access denied") on the first day.
+SCRAPING_ENGINES = ["bing", "duckduckgo"]
 KEPT_ENGINES = D2_ENGINES + SCRAPING_ENGINES
 ALL_ENGINES = [*KEPT_ENGINES, "wlo"]
 WLO_RENDER = "https://redaktion.openeduhub.net/edu-sharing/components/render/"
