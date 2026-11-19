@@ -82,7 +82,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 Each hit in `data.results` has its `url` (always http or https; SearXNG's other links are
 dropped), its `title`, a `snippet` (or null), the `sources` that found it, `published` (a date,
-where the source has one) and SearXNG's `score`. `data.suggestions` lists other search terms.
+where the source has one) and SearXNG's `score`. `title` and `snippet` are plain text: the
+service drops the markup some sources hand on (Crossref's and OpenAlex's JATS tags, Wikipedia's
+highlights). `data.suggestions` lists other search terms.
 
 When some sources did not answer, the answer is `partial`, and `data.sources_failed` names each
 with SearXNG's reason (such as a timeout or a refused connection). The hits then come from the

@@ -1507,6 +1507,25 @@ ol.search-hits > li > input[type="checkbox"] {
   max-width: 380px;
 }
 
+/* The hits card has the padding of the other result cards; its title sits as theirs does. */
+.card.search-results {
+  padding: 20px 24px;
+}
+
+.card.search-results > :is(h3, h4) {
+  margin: 0 0 12px;
+  font-size: 1em;
+}
+
+/* A long snippet (a whole abstract from Crossref or OpenAlex) shows its first four lines. */
+.hit-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+}
+
 /* The type pill (package 18), one colour pair per kind of type, each at 4.5:1 or more. The cell
    cuts a long name with an ellipsis. */
 .page-type {

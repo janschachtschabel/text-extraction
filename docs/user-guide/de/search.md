@@ -88,8 +88,10 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 Jeder Treffer in `data.results` hat seine `url` (immer http oder https; andere Links von SearXNG
 fallen weg), seinen `title`, einen `snippet` (oder null), die `sources`, die ihn gefunden haben,
-`published` (ein Datum, wo die Quelle eines hat) und SearXNGs `score`. `data.suggestions` listet
-andere Suchbegriffe.
+`published` (ein Datum, wo die Quelle eines hat) und SearXNGs `score`. `title` und `snippet` sind
+reiner Text: Der Dienst entfernt die Auszeichnung, die manche Quellen mitliefern (die JATS-Tags von
+Crossref und OpenAlex, die Hervorhebungen von Wikipedia). `data.suggestions` listet andere
+Suchbegriffe.
 
 Haben manche Quellen nicht geantwortet, ist die Antwort `partial`, und `data.sources_failed` nennt
 jede mit dem Grund von SearXNG (etwa eine Zeitüberschreitung oder eine abgelehnte Verbindung). Die

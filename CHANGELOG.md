@@ -9,6 +9,13 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Web search: `title` and `snippet` are plain text. The tags some sources hand on (Crossref's and
+  OpenAlex's JATS XML such as `<jats:p>`, Wikipedia's highlights) are dropped and entities decoded,
+  in REST, MCP and the playground. The playground's hits card has the padding of the other result
+  cards, and a long snippet shows its first four lines.
+
 ### Changed
 
 - Install guides (English and German): a section "Update on Hostinger". A redeploy in Hostinger's

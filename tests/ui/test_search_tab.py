@@ -21,6 +21,7 @@ from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from tests.ui.conftest import AUTH, HX, USER_KEY, make_settings
 from tests.ui.test_a11y_markup import _described, _ids, _labelled
 from tests.ui.test_jobs_views import job_items, jobs_of
+from tests.ui.test_operations import UI_CSS
 from text_extraction.app import create_public_app
 from text_extraction.fetch import Fetcher
 from text_extraction.pipeline import create_pipeline
@@ -33,7 +34,10 @@ ADMIN_KEY = "search-admin-key-0123456789-secret"
 ADMIN = {"Authorization": f"Bearer {ADMIN_KEY}"}
 SOURCES = ["wikipedia", "arxiv", "crossref"]
 ORIGIN = "https://example.org"
+# The client drops tags and decodes entities, so a title that names a tag reaches the template
+# as text that must still be escaped.
 EVIL_TITLE = "<script>alert(1)</script> Photosynthesis"
+EVIL_TITLE_RAW = "&lt;script&gt;alert(1)&lt;/script&gt; Photosynthesis"
 CONTROLS = (
     ".//input[not(@type='hidden') and not(@type='submit') and not(@type='button')]"
     " | .//select | .//textarea"
@@ -82,7 +86,7 @@ def hit(url: str, title: str, **extra: Any) -> dict[str, Any]:
 HITS = [
     hit(
         f"{ORIGIN}/photosynthesis",
-        EVIL_TITLE,
+        EVIL_TITLE_RAW,
         content="Plants <b>make</b> sugar.",
         engines=["wikipedia", "arxiv"],
         publishedDate="2025-03-01T00:00:00",
@@ -250,7 +254,7 @@ def test_hits_render_escaped_with_safe_links() -> None:
     assert (box.get("name"), box.get("value")) == ("url", f"{ORIGIN}/photosynthesis")
     assert box.get("checked") is None
     assert texts(first, ".//*[contains(@class, 'hit-url')]") == [f"{ORIGIN}/photosynthesis"]
-    assert texts(first, ".//*[contains(@class, 'hit-snippet')]") == ["Plants <b>make</b> sugar."]
+    assert texts(first, ".//*[contains(@class, 'hit-snippet')]") == ["Plants make sugar."]
     assert "wikipedia, arxiv" in " ".join(texts(first, ".//*[contains(@class, 'hit-meta')]"))
     assert "2025-03-01" in " ".join(texts(first, ".//*[contains(@class, 'hit-meta')]"))
     assert items[2].xpath(".//input[@type='checkbox']")[0].get("value") == f'{ORIGIN}/q"uote'
@@ -542,3 +546,12 @@ def test_json_of_the_answer_is_shown() -> None:
     assert json.loads(raw.text_content())["data"]["results"][0]["title"] == EVIL_TITLE
     (curl,) = root.xpath("//pre[@class='curl']")
     assert "/v1/search" in curl.text_content()
+
+
+def test_hits_card_is_padded_and_long_snippets_are_clamped() -> None:
+    """The hits card has the result cards' padding, and a snippet shows at most four lines."""
+    css = UI_CSS.read_text(encoding="utf-8")
+    card = css.split(".card.search-results {", 1)[1].split("}", 1)[0]
+    assert "padding: 20px 24px;" in card
+    snippet = css.split(".hit-snippet {", 1)[1].split("}", 1)[0]
+    assert "line-clamp: 4;" in snippet

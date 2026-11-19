@@ -163,6 +163,57 @@ async def test_sparse_hit_gets_defaults(settings: Settings) -> None:
 
 
 @runs_async
+async def test_markup_in_snippet_and_title_becomes_plain_text(settings: Settings) -> None:
+    # Crossref and OpenAlex hand on JATS XML; Wikipedia marks the match with <span>.
+    body = answer(
+        [
+            hit(
+                "https://a.example/",
+                title="Learning <i>objects</i> &amp; portals",
+                content=(
+                    "<jats:title>Abstract</jats:title> <jats:p>For <jats:italic>learning\n"
+                    "objects</jats:italic> , see a &lt; b and 3 <  4.</jats:p>"
+                ),
+            )
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    [first] = envelope.data.results
+    assert first.title == "Learning objects & portals"
+    assert first.snippet == "Abstract For learning objects , see a < b and 3 < 4."
+
+
+@runs_async
+async def test_inline_markup_inside_a_word_keeps_the_word(settings: Settings) -> None:
+    body = answer(
+        [
+            hit(
+                "https://a.example/",
+                content='<span class="searchmatch">Photo</span>synthese ist<br/>ein Prozess.',
+            )
+        ]
+    )
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert envelope.data.results[0].snippet == "Photosynthese ist ein Prozess."
+
+
+@runs_async
+async def test_snippet_of_markup_only_is_none(settings: Settings) -> None:
+    body = answer([hit("https://a.example/", content="<jats:p> </jats:p>")])
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.data is not None
+    assert envelope.data.results[0].snippet is None
+
+
+@runs_async
 async def test_urls_that_are_not_absolute_http_are_dropped(settings: Settings) -> None:
     body = answer(
         [
