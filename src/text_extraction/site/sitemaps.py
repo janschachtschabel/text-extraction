@@ -9,13 +9,13 @@ is read, so the tree never holds more than the open path. ``pack_parts`` splits 
 entries into parts that each fit an item's result.
 
 Formats: ``urlset`` (``url/loc``, ``lastmod``, ``changefreq``, ``priority``), ``index``
-(``sitemapindex``: ``sitemap/loc``, ``lastmod``), ``rss`` (``channel/item/link``, ``pubDate``, ``title``),
-``atom`` (``feed/entry/link[@href]`` with ``rel`` ``alternate`` or none, ``updated``, ``title``) and
-``text`` (one URL per line). Namespaces and prefixes are ignored; elements match by local name,
-and a file that uses a prefix without declaring it (``image:`` with no ``xmlns:image``) is read
-again with its tag prefixes dropped. Nesting deeper than ``MAX_XML_DEPTH``, an encoding Python
-cannot read incrementally (``shift_jis``, ``big5``, an unknown name) and a UTF-16 file are
-``invalid``.
+(``sitemapindex``: ``sitemap/loc``, ``lastmod``), ``rss`` (``channel/item/link``, ``pubDate``,
+``title``), ``atom`` (``feed/entry/link[@href]`` with ``rel`` ``alternate`` or none, ``updated``,
+``title``) and ``text`` (one URL per line). Namespaces and prefixes are ignored; elements match
+by local name, and a file that uses a prefix without declaring it (``image:`` with no
+``xmlns:image``) is read again with its tag prefixes dropped. Nesting deeper than
+``MAX_XML_DEPTH``, an encoding Python cannot read incrementally (``shift_jis``, ``big5``, an
+unknown name) and a UTF-16 file are ``invalid``.
 Not read: the ``image:``, ``video:``, ``news:`` and ``xhtml:link`` extensions.
 """
 
