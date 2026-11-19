@@ -2860,7 +2860,8 @@ a report-only step of the live workflow.
   the site sees one extra request within its per-host limits. It needs a lost lease, so it is
   rare.
 - **Valkey.** A crawl's state lives with its job until `JOB_TTL_SECONDS`: each page item holds up to
-  `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes. The memory guard stops a
+  `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes (about 300 bytes with a
+  title, up to 200 characters, from a feed or API list). The memory guard stops a
   crawl from appending (`site_memory_guard`) and refuses new ones (503).
 
 **Known limits.**
