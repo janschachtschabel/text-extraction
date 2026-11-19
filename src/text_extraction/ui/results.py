@@ -171,6 +171,10 @@ def _details(error: Mapping[str, Any]) -> list[str]:
     for detail in error.get("details") or []:
         if not isinstance(detail, Mapping):
             continue
+        if "msg" not in detail and "source" in detail:
+            # A failed search's sources that did not answer: {"source", "reason"}.
+            lines.append(f"{detail['source']}: {detail.get('reason', '')}")
+            continue
         loc = ".".join(str(part) for part in detail.get("loc") or [])
         lines.append(f"{loc}: {detail.get('msg', '')}" if loc else str(detail.get("msg", "")))
     return lines

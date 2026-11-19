@@ -328,6 +328,28 @@ def test_a_partial_search_lists_the_failed_sources() -> None:
     assert len(root.xpath("//ol[@class='search-hits']/li")) == 1
 
 
+def test_a_failed_search_lists_the_sources_that_did_not_answer() -> None:
+    body = answer([], unresponsive=[[name, "timeout"] for name in SOURCES])
+    with running(serving(body)) as client:
+        root = fragment(search(client).text)
+
+    (error,) = root.xpath("//div[@class='error'][@role='alert']")
+    assert texts(error, ".//span[@class='error-code']") == ["search_failed"]
+    assert texts(error, ".//ul[@class='details']/li") == [f"{name}: timeout" for name in SOURCES]
+
+
+def test_no_hits_with_a_failed_source_is_partial_and_names_it() -> None:
+    with running(serving(answer([], unresponsive=[["arxiv", "timeout"]]))) as client:
+        root = fragment(search(client).text)
+
+    assert texts(root, "//header[@class='answer']/span[contains(@class, 'badge')]") == [
+        translate("en", "status.partial")
+    ]
+    assert texts(root, "//p[@class='search-empty']") == [translate("en", "search.no_hits")]
+    (notice,) = root.xpath("//*[contains(@class, 'search-sources-failed')]")
+    assert texts(notice, ".//li") == ["arxiv: timeout"]
+
+
 def test_no_hits_says_so() -> None:
     with running(serving(answer([]))) as client:
         root = fragment(search(client).text)

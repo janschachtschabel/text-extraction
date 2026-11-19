@@ -16,7 +16,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   sources that have an official, free API: Wikipedia, Wikibooks, Wikiversity, Wikinews, Mwmbl,
   OpenAlex, arXiv and Crossref. The answer lists the hits (URL, title, snippet, sources, date),
   is `partial` with `data.sources_failed` when some sources did not answer and `failed` with the
-  new error code `search_failed` when SearXNG did not answer; `success` answers are cached for
+  new error code `search_failed` when SearXNG or every source asked did not answer (then
+  `error.details` lists the sources); `success` answers are cached for
   `SEARCH_CACHE_SECONDS`. The playground has a Search tab ("Suche") whose ticked hits are
   extracted as a batch. `GET /v1/info` reports `features.search` and `limits.search_max_results`.
   The root and build compose files run the service `searxng` and switch the search on; the Helm

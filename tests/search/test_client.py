@@ -222,6 +222,12 @@ async def test_no_hits_and_every_engine_unresponsive_is_failed(settings: Setting
     assert envelope.error is not None
     assert envelope.error.code == "search_failed"
     assert envelope.error.retryable is True
+    assert envelope.error.message == "No search source answered."
+    # A failed answer has no data, so the failed sources travel in the error.
+    assert envelope.error.details == [
+        {"source": "wikipedia", "reason": "timeout"},
+        {"source": "arxiv", "reason": "HTTP error"},
+    ]
 
 
 @runs_async
@@ -239,10 +245,59 @@ async def test_no_hits_and_unresponsive_names_in_other_case_is_failed(settings: 
     assert envelope.error is not None
     assert envelope.error.code == "search_failed"
     assert envelope.error.retryable is True
+    assert envelope.error.details == [
+        {"source": "Wikipedia", "reason": "timeout"},
+        {"source": "ArXiv", "reason": "HTTP error"},
+    ]
 
 
 @runs_async
-async def test_no_hits_and_a_requested_engine_in_neither_list_is_still_failed(
+async def test_every_configured_engine_unresponsive_is_failed(settings: Settings) -> None:
+    unresponsive = [[name, "timeout"] for name in settings.search_sources]
+
+    envelope = await search(
+        SearchRequest(query="q"), settings, serving(answer([], unresponsive)).client(), None
+    )
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.details is not None
+    assert [d["source"] for d in envelope.error.details] == settings.search_sources
+
+
+@runs_async
+async def test_the_only_asked_source_blocked_is_failed_and_named(settings: Settings) -> None:
+    body = answer([], unresponsive=[["mwmbl", "Suspended: too many requests"]])
+
+    envelope = await search(
+        SearchRequest(query="q", sources=["mwmbl"]), settings, serving(body).client(), None
+    )
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == "search_failed"
+    assert envelope.error.details == [{"source": "mwmbl", "reason": "Suspended: too many requests"}]
+
+
+@runs_async
+async def test_no_hits_and_some_sources_failed_is_an_empty_partial(settings: Settings) -> None:
+    # Seven sources answered without a hit, one was suspended: the query has no hits, which is
+    # no failure of the search; the blocked source is listed.
+    body = answer([], unresponsive=[["mwmbl", "Suspended: too many requests"]])
+
+    envelope = await search(SearchRequest(query="q"), settings, serving(body).client(), None)
+
+    assert envelope.status == "partial"
+    assert envelope.error is None
+    assert envelope.data is not None
+    assert envelope.data.results == []
+    assert [(f.source, f.reason) for f in envelope.data.sources_failed] == [
+        ("mwmbl", "Suspended: too many requests")
+    ]
+
+
+@runs_async
+async def test_no_hits_and_a_requested_engine_in_neither_list_is_partial(
     settings: Settings,
 ) -> None:
     body = answer([], unresponsive=[["arxiv", "timeout"]])
@@ -254,11 +309,10 @@ async def test_no_hits_and_a_requested_engine_in_neither_list_is_still_failed(
         None,
     )
 
-    assert envelope.status == "failed"
-    assert envelope.data is None
-    assert envelope.error is not None
-    assert envelope.error.code == "search_failed"
-    assert envelope.error.retryable is True
+    assert envelope.status == "partial"
+    assert envelope.data is not None
+    assert envelope.data.results == []
+    assert [f.source for f in envelope.data.sources_failed] == ["arxiv"]
 
 
 @runs_async

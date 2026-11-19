@@ -53,10 +53,14 @@ def cache_key(request: SearchRequest, engines: list[str]) -> str:
     return f"search:{{{digest}}}"
 
 
-def _failed(message: str, *, retryable: bool = True) -> Envelope[SearchResult]:
+def _failed(
+    message: str, *, retryable: bool = True, details: list[dict[str, Any]] | None = None
+) -> Envelope[SearchResult]:
     return Envelope[SearchResult](
         status="failed",
-        error=ErrorInfo(code=ErrorCode.SEARCH_FAILED, message=message, retryable=retryable),
+        error=ErrorInfo(
+            code=ErrorCode.SEARCH_FAILED, message=message, retryable=retryable, details=details
+        ),
     )
 
 
@@ -105,7 +109,7 @@ def _failures(raw: Any) -> list[SourceFailure]:
     return failures
 
 
-def _map(body: Any, request: SearchRequest) -> Envelope[SearchResult]:
+def _map(body: Any, request: SearchRequest, engines: list[str]) -> Envelope[SearchResult]:
     if not isinstance(body, dict):
         return _failed("The search service answered in an unexpected format.")
     raw_results = body.get("results")
@@ -116,10 +120,16 @@ def _map(body: Any, request: SearchRequest) -> Envelope[SearchResult]:
     ][: request.max_results]
     failures = _failures(body.get("unresponsive_engines"))
     suggestions = body.get("suggestions")
-    # SearXNG names engines by display name, so names are not matched: no hit and any engine
-    # that did not answer is a failed search.
-    if not hits and failures:
-        return _failed("No search source answered.")
+    # SearXNG reports an engine by the name it was asked for (``engines=``); compared in lower
+    # case. Only when every asked engine failed is the search failed; the failures then travel in
+    # error.details, as a failed answer has no data. No hit with some failures is an empty
+    # partial answer: the query may simply have no hits.
+    failed_names = {failure.source.strip().lower() for failure in failures}
+    if not hits and failures and failed_names.issuperset(engines):
+        return _failed(
+            "No search source answered.",
+            details=[failure.model_dump() for failure in failures],
+        )
     result = SearchResult(
         query=request.query,
         results=hits,
@@ -213,7 +223,7 @@ async def search(
     except ValueError:
         return _failed("The search service did not answer with JSON.")
 
-    envelope = _map(body, request)
+    envelope = _map(body, request, engines)
     if envelope.data is None:
         return envelope
     if not caching:

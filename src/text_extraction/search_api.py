@@ -126,10 +126,11 @@ async def search_web(
     cached for `SEARCH_CACHE_SECONDS` (`data.cache` says `hit`, `miss` or `bypass`). To read a
     hit's text, send its `url` to `POST /v1/extract` or several to `POST /v1/batch`.
 
-    A search whose sources did not all answer is `partial` and lists them in
-    `data.sources_failed`; when the search service is unreachable or slow, or no source
-    answered, the answer is 200 with `status: failed` and `search_failed` (retryable; not when
-    SearXNG refuses JSON answers, a setting of the service).
+    A search whose sources did not all answer is `partial` (also without a hit) and lists them
+    in `data.sources_failed`; when the search service is unreachable or slow, or no source asked
+    answered (`error.details` lists each), the answer is 200 with `status: failed` and
+    `search_failed` (retryable; not when SearXNG refuses JSON answers, a setting of the
+    service).
 
     4xx answers: an invalid body, a `max_results` over `SEARCH_MAX_RESULTS`, an empty `sources`
     list or a source outside `SEARCH_SOURCES` (422; for a source outside, the message lists the

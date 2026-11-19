@@ -86,7 +86,9 @@ where the source has one) and SearXNG's `score`. `data.suggestions` lists other 
 
 When some sources did not answer, the answer is `partial`, and `data.sources_failed` names each
 with SearXNG's reason (such as a timeout or a refused connection). The hits then come from the
-other sources. A source that answered without a hit is not a failure.
+other sources; `data.results` may also be empty when the other sources found nothing. A source that
+answered without a hit is not a failure. Only when every source asked did not answer is the search
+`failed`, and `error.details` lists each source with its reason.
 
 The service keeps a `success` answer in its cache for `SEARCH_CACHE_SECONDS` (one hour by
 default). The same search terms with the same language, page, time range, sources and
@@ -121,8 +123,8 @@ setup and the other tools are in [MCP](mcp.md).
 
 | Answer | Meaning |
 | --- | --- |
-| 200, `status: partial` | Some sources did not answer; `data.sources_failed` names them. The hits are there. |
-| 200, `status: failed`, `search_failed`, `retryable: true` | SearXNG is not reachable or did not answer within `SEARCH_TIMEOUT_SECONDS` (10 s by default), or no source returned a hit and at least one did not answer. Try again later. |
+| 200, `status: partial` | Some sources did not answer; `data.sources_failed` names them. The hits of the others are there; no hits means the others found nothing. |
+| 200, `status: failed`, `search_failed`, `retryable: true` | SearXNG is not reachable or did not answer within `SEARCH_TIMEOUT_SECONDS` (10 s by default), or every source asked did not answer (`error.details` lists each with its reason). Try again later. |
 | 200, `status: failed`, `search_failed`, `retryable: false` | SearXNG refused the request because its JSON format is off: a setting of the operator (`search.formats` in SearXNG's `settings.yml`). |
 | 200, `status: success`, no hits | Every source answered, and none had a hit. Try other words, another language or more sources. |
 | 400 `invalid_request` | The search is off on this service (`SEARCH_ENABLED=false`). |

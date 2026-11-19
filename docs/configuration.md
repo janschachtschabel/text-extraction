@@ -830,9 +830,10 @@ fetches the hits; the caller extracts the ones it wants. SearXNG must have the `
 | `SEARCH_ALLOW_USERS` | `true` | May non-admin keys search? `false`: only admin keys; a user key gets `403` `forbidden`, and the playground shows such a key no Search tab (the Info tab says why). |
 
 A search is one hit of the key's rate limit. An answer is `partial` when some sources did not
-answer (`data.sources_failed` names each with SearXNG's reason) and `failed` / `search_failed`
-when SearXNG is unreachable, too slow or answers no JSON, or when no source returned a hit and at
-least one did not answer. `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the
+answer (`data.sources_failed` names each with SearXNG's reason), even when the others found no
+hit, and `failed` / `search_failed` when SearXNG is unreachable, too slow or answers no JSON, or
+when every source asked did not answer (then `error.details` lists each as `{"source",
+"reason"}`). `SEARXNG_SECRET` (SearXNG's `server.secret_key`) is a secret of the
 SearXNG container, not of this service: the root compose file's `init` keeps it in the volume
 `secrets` (`searxng-secret`) and renders `searxng/settings.yml` from it on every start; Helm keeps
 it in a Secret (see [Secrets](#secrets)).

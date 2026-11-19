@@ -93,8 +93,10 @@ andere Suchbegriffe.
 
 Haben manche Quellen nicht geantwortet, ist die Antwort `partial`, und `data.sources_failed` nennt
 jede mit dem Grund von SearXNG (etwa eine Zeitüberschreitung oder eine abgelehnte Verbindung). Die
-Treffer kommen dann von den übrigen Quellen. Eine Quelle, die ohne Treffer geantwortet hat, ist
-kein Ausfall.
+Treffer kommen dann von den übrigen Quellen; `data.results` kann auch leer sein, wenn die übrigen
+nichts gefunden haben. Eine Quelle, die ohne Treffer geantwortet hat, ist kein Ausfall. Nur wenn
+keine der gefragten Quellen geantwortet hat, ist die Suche `failed`, und `error.details` listet jede
+Quelle mit ihrem Grund.
 
 Der Dienst behält eine `success`-Antwort für `SEARCH_CACHE_SECONDS` (standardmäßig eine Stunde) in
 seinem Cache. Dieselben Suchbegriffe mit derselben Sprache, Seite, demselben Zeitraum, denselben
@@ -130,8 +132,8 @@ Route. Die Einrichtung und die anderen Tools beschreibt [MCP](mcp.md).
 
 | Antwort | Bedeutung |
 | --- | --- |
-| 200, `status: partial` | Manche Quellen haben nicht geantwortet; `data.sources_failed` nennt sie. Die Treffer sind da. |
-| 200, `status: failed`, `search_failed`, `retryable: true` | SearXNG ist nicht erreichbar oder hat nicht innerhalb von `SEARCH_TIMEOUT_SECONDS` (standardmäßig 10 s) geantwortet, oder keine Quelle hat einen Treffer geliefert und mindestens eine hat nicht geantwortet. Versuchen Sie es später noch einmal. |
+| 200, `status: partial` | Manche Quellen haben nicht geantwortet; `data.sources_failed` nennt sie. Die Treffer der übrigen sind da; keine Treffer heißt, die übrigen haben nichts gefunden. |
+| 200, `status: failed`, `search_failed`, `retryable: true` | SearXNG ist nicht erreichbar oder hat nicht innerhalb von `SEARCH_TIMEOUT_SECONDS` (standardmäßig 10 s) geantwortet, oder keine der gefragten Quellen hat geantwortet (`error.details` listet jede mit ihrem Grund). Versuchen Sie es später noch einmal. |
 | 200, `status: failed`, `search_failed`, `retryable: false` | SearXNG hat die Anfrage abgelehnt, weil sein JSON-Format aus ist: eine Einstellung des Betreibers (`search.formats` in SearXNGs `settings.yml`). |
 | 200, `status: success`, keine Treffer | Alle Quellen haben geantwortet, und keine hatte einen Treffer. Versuchen Sie andere Wörter, eine andere Sprache oder mehr Quellen. |
 | 400 `invalid_request` | Die Suche ist in diesem Dienst aus (`SEARCH_ENABLED=false`). |
