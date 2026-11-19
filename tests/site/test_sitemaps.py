@@ -104,17 +104,73 @@ def test_text_rss_atom_formats() -> None:
         SitemapEntry(
             loc="https://lernen.example.org/mathe/bruchrechnung",
             lastmod="Thu, 29 Oct 2026 10:00:00 GMT",
+            title="Bruchrechnung",
         ),
-        SitemapEntry(loc="https://lernen.example.org/physik/optik"),
+        SitemapEntry(loc="https://lernen.example.org/physik/optik", title="Optik"),
     ]  # the channel's own <link> is no entry
     assert atom.format == "atom"
     assert atom.entries == [
         SitemapEntry(
-            loc="https://lernen.example.org/mathe/bruchrechnung", lastmod="2026-10-29T10:00:00Z"
+            loc="https://lernen.example.org/mathe/bruchrechnung",
+            lastmod="2026-10-29T10:00:00Z",
+            title="Bruchrechnung",
         ),
-        SitemapEntry(loc="https://lernen.example.org/physik/optik"),
+        SitemapEntry(loc="https://lernen.example.org/physik/optik", title="Optik"),
     ]  # rel="edit" and the feed's rel="self" are no entries
     assert (text.error, rss.error, atom.error) == (None, None, None)
+
+
+def test_rss_titles() -> None:
+    body = (
+        b"<rss><channel><title>Kanal</title>"
+        b"<item><title>Erster Beitrag</title><link>https://a.example/1</link></item>"
+        b"<item><title><![CDATA[Tom & Jerry]]></title><link>https://a.example/2</link></item>"
+        b"<item><title>Mit &amp; Entity</title><link>https://a.example/3</link></item>"
+        b"</channel></rss>"
+    )
+    entries = parse_sitemap(body, BASE, max_entries=10).entries
+    assert [e.title for e in entries] == ["Erster Beitrag", "Tom & Jerry", "Mit & Entity"]
+
+
+def test_rss_cdata_title_is_plain_text() -> None:
+    body = (
+        b"<rss><channel><item><title><![CDATA[Tom & Jerry]]></title>"
+        b"<link>https://a.example/1</link></item></channel></rss>"
+    )
+    assert parse_sitemap(body, BASE, max_entries=10).entries[0].title == "Tom & Jerry"
+
+
+def test_atom_titles() -> None:
+    body = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom"><title>Feed</title>'
+        b'<entry><title>Tom &amp; Jerry</title><link href="https://a.example/1"/></entry>'
+        b'<entry><link href="https://a.example/2"/></entry></feed>'
+    )
+    entries = parse_sitemap(body, BASE, max_entries=10).entries
+    assert [e.title for e in entries] == ["Tom & Jerry", None]
+
+
+def test_title_bounded() -> None:
+    long = ("wort  \n " * 200).encode()  # about 1,800 characters
+    body = b"<rss><channel><item><title>" + long + b"</title><link>https://a.example/1</link>"
+    body += b"</item></channel></rss>"
+    title = parse_sitemap(body, BASE, max_entries=10).entries[0].title
+    assert title is not None
+    assert len(title) == 200
+    assert "  " not in title
+    assert "\n" not in title
+    huge = b"<rss><channel><item><title>" + b"x " * 500_000 + b"</title>"
+    huge += b"<link>https://a.example/1</link></item></channel></rss>"
+    title = parse_sitemap(huge, BASE, max_entries=10).entries[0].title
+    assert title is not None
+    assert len(title) == 200
+
+
+def test_urlset_no_title() -> None:
+    body = (
+        f"<urlset {NS}><url><loc>https://a.example/1</loc><title>Nope</title></url></urlset>"
+    ).encode()
+    assert parse_sitemap(body, BASE, max_entries=10).entries[0].title is None
 
 
 def test_blank_fields_do_not_hide_later_ones() -> None:

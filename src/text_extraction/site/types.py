@@ -298,7 +298,8 @@ class SitemapEntry(BaseModel):
     @classmethod
     def _bounded_title(cls, value: object) -> object:
         if isinstance(value, str):
-            return " ".join(value.split())[:LINK_TEXT_MAX_CHARS] or None
+            # Slice first: collapsing a megabyte of text would build a word list that long.
+            return " ".join(value[: 4 * LINK_TEXT_MAX_CHARS].split())[:LINK_TEXT_MAX_CHARS] or None
         return value
 
     @field_validator("lastmod", mode="before")
