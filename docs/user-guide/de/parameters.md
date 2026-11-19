@@ -220,8 +220,8 @@ Eine Websuche über das SearXNG des Dienstes (wenn der Betreiber sie eingeschalt
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `query` | String, 1 bis 500 Zeichen | Pflicht | Die Suchbegriffe. |
-| `max_results` | Ganzzahl, 1 bis `SEARCH_MAX_RESULTS` | `10` | Höchstens so viele Treffer. |
-| `language` | String, 2 bis 10 Zeichen | nicht gesetzt | Ein Sprachcode wie `de` oder `en`: Treffer in dieser Sprache, wo eine Quelle das unterstützt. Nicht gesetzt: jede Sprache. |
+| `max_results` | Ganzzahl, 1 bis `SEARCH_MAX_RESULTS` | `10` (`SEARCH_MAX_RESULTS`, wenn das kleiner ist) | Höchstens so viele Treffer. |
+| `language` | String: 2 oder 3 Kleinbuchstaben, wahlweise mit `-` und einer Region aus 2 Buchstaben | nicht gesetzt | Ein Sprachcode wie `de`, `en` oder `de-DE`: Treffer in dieser Sprache, wo eine Quelle das unterstützt. Nicht gesetzt: jede Sprache. Eine andere Form ergibt 422. |
 | `page` | Ganzzahl, 1 bis 10 | `1` | Die Ergebnisseite: `2` liefert die nächsten Treffer. |
 | `time_range` | `day`, `month` oder `year` | nicht gesetzt | Nur Treffer aus dem letzten Tag, Monat oder Jahr, wo eine Quelle das unterstützt. |
 | `sources` | Liste von Strings | nicht gesetzt | Die Quellen, die gefragt werden, aus `SEARCH_SOURCES` (in beliebiger Schreibung). Nicht gesetzt: alle Quellen. Eine leere Liste, ein leerer Name oder ein anderer Name ergibt 422. |

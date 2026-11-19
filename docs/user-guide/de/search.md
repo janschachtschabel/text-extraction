@@ -138,7 +138,7 @@ Route. Die Einrichtung und die anderen Tools beschreibt [MCP](mcp.md).
 | 200, `status: success`, keine Treffer | Alle Quellen haben geantwortet, und keine hatte einen Treffer. Versuchen Sie andere Wörter, eine andere Sprache oder mehr Quellen. |
 | 400 `invalid_request` | Die Suche ist in diesem Dienst aus (`SEARCH_ENABLED=false`). |
 | 403 `forbidden` | Die Suche ist Admin-Schlüsseln vorbehalten (`SEARCH_ALLOW_USERS=false`), und Ihr Schlüssel ist ein Nutzer-Schlüssel. |
-| 422 `invalid_request` | Der Body ist falsch: keine `query`, `max_results` über `SEARCH_MAX_RESULTS`, eine Quelle außerhalb von `SEARCH_SOURCES` (die Meldung listet die erlaubten), ein leerer Name oder `sources: []` (lassen Sie `sources` weg, um alle Quellen zu fragen). |
+| 422 `invalid_request` | Der Body ist falsch: keine `query`, `max_results` über `SEARCH_MAX_RESULTS`, eine `language`, die kein Sprachcode ist (etwa `German` statt `de`), eine Quelle außerhalb von `SEARCH_SOURCES` (die Meldung listet die erlaubten), ein leerer Name oder `sources: []` (lassen Sie `sources` weg, um alle Quellen zu fragen). |
 | 429 `rate_limited` | Die Ratenbegrenzung Ihres Schlüssels ist aufgebraucht. |
 
 ## Für Betreiber
@@ -156,7 +156,10 @@ Im Helm-Chart ist beides aus. `searxng.enabled=true` startet SearXNG im Release 
 
 Die übrigen Einstellungen (`SEARCH_TIMEOUT_SECONDS`, `SEARCH_MAX_RESULTS`, `SEARCH_CACHE_SECONDS`,
 `SEARCH_SOURCES`, `SEARCH_ALLOW_USERS`) stehen in der
-[Konfigurationsreferenz](../../configuration.md#web-search) (Englisch).
+[Konfigurationsreferenz](../../configuration.md#web-search) (Englisch). Lassen Sie
+`SEARCH_TIMEOUT_SECONDS` über 8: SearXNG bricht jede Quelle nach 8 s ab, mit einem kleineren Wert
+lässt also eine einzige langsame Quelle die ganze Suche scheitern, statt in
+`data.sources_failed` zu stehen.
 
 SearXNG läuft als unveränderter, eigener Container und hat keinen veröffentlichten Port: Nur die
 API erreicht es. Seine Lizenz ist die AGPL-3.0; der Dienst importiert nie seinen Code.

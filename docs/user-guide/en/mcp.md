@@ -124,8 +124,8 @@ call again with, and the next call returns the content from there.
 A whole answer is at most `MCP_MAX_ANSWER_CHARS` (200,000) characters of envelope JSON (the
 answer carries the envelope twice, as `structuredContent` and as its last text). A `get_job` page over it
 holds fewer items, and its `next_offset` names where the next page starts. In a single result the
-lists `chunks`, `links`, `structured.tables` and `site.links` are cut from the end, in that order,
-with the warning `mcp_answer_truncated`; the REST route returns them whole.
+lists `chunks`, `links`, `structured.tables` and `site.links`, and the hits `results` of
+`web_search`, are cut from the end, in that order, with the warning `mcp_answer_truncated`; the REST route returns them whole.
 
 ## Errors
 

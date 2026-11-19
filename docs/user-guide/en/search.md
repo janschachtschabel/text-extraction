@@ -129,7 +129,7 @@ setup and the other tools are in [MCP](mcp.md).
 | 200, `status: success`, no hits | Every source answered, and none had a hit. Try other words, another language or more sources. |
 | 400 `invalid_request` | The search is off on this service (`SEARCH_ENABLED=false`). |
 | 403 `forbidden` | The search is kept for admin keys (`SEARCH_ALLOW_USERS=false`), and your key is a user key. |
-| 422 `invalid_request` | The body is wrong: no `query`, `max_results` over `SEARCH_MAX_RESULTS`, a source outside `SEARCH_SOURCES` (the message lists the allowed ones), an empty name, or `sources: []` (leave `sources` out to ask every source). |
+| 422 `invalid_request` | The body is wrong: no `query`, `max_results` over `SEARCH_MAX_RESULTS`, a `language` that is not a language code (such as `German` instead of `de`), a source outside `SEARCH_SOURCES` (the message lists the allowed ones), an empty name, or `sources: []` (leave `sources` out to ask every source). |
 | 429 `rate_limited` | Your key's rate limit is used up. |
 
 ## For operators
@@ -147,7 +147,9 @@ In the Helm chart both are off. `searxng.enabled=true` runs SearXNG in the relea
 
 The other settings (`SEARCH_TIMEOUT_SECONDS`, `SEARCH_MAX_RESULTS`, `SEARCH_CACHE_SECONDS`,
 `SEARCH_SOURCES`, `SEARCH_ALLOW_USERS`) are in the
-[configuration reference](../../configuration.md#web-search) (English).
+[configuration reference](../../configuration.md#web-search) (English). Keep
+`SEARCH_TIMEOUT_SECONDS` above 8: SearXNG cuts each source at 8 s, so with a lower value one slow
+source fails the whole search instead of being listed in `data.sources_failed`.
 
 SearXNG runs as an unmodified container of its own and has no published port: only the API
 reaches it. Its licence is AGPL-3.0; the service never imports its code.

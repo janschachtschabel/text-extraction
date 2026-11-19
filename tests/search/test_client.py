@@ -365,6 +365,20 @@ async def test_403_names_the_json_format_setting(settings: Settings) -> None:
     assert "search.formats" in envelope.error.message
 
 
+@runs_async
+async def test_400_is_not_retryable(settings: Settings) -> None:
+    # SearXNG refuses a parameter it does not accept: asking again changes nothing.
+    envelope = await search(
+        SearchRequest(query="q"), settings, serving({}, status=400).client(), None
+    )
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == "search_failed"
+    assert envelope.error.retryable is False
+    assert "400" in envelope.error.message
+
+
 @pytest.mark.parametrize("status", [429, 500, 502])
 @runs_async
 async def test_other_http_errors_are_failed_and_retryable(settings: Settings, status: int) -> None:
@@ -580,11 +594,24 @@ async def test_an_unreadable_cache_entry_is_a_miss(settings: Settings) -> None:
         {"query": "q", "page": 11},
         {"query": "q", "time_range": "week"},
         {"query": "q", "unknown": 1},
+        {"query": "q", "language": "german"},
+        {"query": "q", "language": "DE"},
+        {"query": "q", "language": "de_DE"},
+        {"query": "q", "language": "d"},
+        {"query": "q", "language": "de-DEU"},
+        {"query": "q", "language": "de-"},
     ],
 )
 def test_request_bounds(bad: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         SearchRequest(**bad)
+
+
+@pytest.mark.parametrize("language", ["de", "en", "deu", "de-DE", "pt-br", "all"])
+def test_language_takes_what_searxng_accepts(language: str) -> None:
+    # SearXNG's VALID_LANGUAGE_CODE (searx/webutils.py): 2-3 lower-case letters and an optional
+    # region of 2 letters. Anything else it answers with HTTP 400.
+    assert SearchRequest(query="q", language=language).language == language
 
 
 def test_request_defaults() -> None:

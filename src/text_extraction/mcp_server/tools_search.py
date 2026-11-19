@@ -18,7 +18,7 @@ from text_extraction.mcp_server.calls import ModelTool
 from text_extraction.mcp_server.results import fit_answer, payload_result
 from text_extraction.mcp_server.tools_extract import check_body_size, lean_schema
 from text_extraction.search.types import SearchRequest
-from text_extraction.search_api import run_search
+from text_extraction.search_api import default_max_results, run_search
 from text_extraction.settings import Settings
 
 
@@ -47,6 +47,7 @@ class WebSearchTool(ModelTool):
         # The deployment's bounds, so an agent need not learn them from a refusal.
         properties = self.parameters["properties"]
         properties["max_results"]["maximum"] = settings.search_max_results
+        properties["max_results"]["default"] = default_max_results(settings)
         properties["sources"]["description"] = (
             f"Sources to ask, any of: {', '.join(settings.search_sources)}; leave out to ask "
             "all of them."

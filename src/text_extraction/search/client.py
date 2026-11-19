@@ -209,6 +209,9 @@ async def search(
         _log.warning("search_backend_unreachable", error=type(error).__name__)
         return _failed("The search service is not reachable.")
 
+    if response.status_code == 400:
+        # SearXNG refuses a parameter it does not accept; asking again changes nothing.
+        return _failed("The search service refused the request (HTTP 400).", retryable=False)
     if response.status_code == 403:
         return _failed(
             "The search service refused the request: enable the json format in SearXNG "

@@ -294,6 +294,17 @@ def test_a_malformed_number_is_a_form_error_on_its_field() -> None:
     assert searx.requests == []
 
 
+def test_a_language_that_is_no_code_is_refused_before_searxng() -> None:
+    searx = serving(answer(HITS))
+    with running(searx) as client:
+        response = search(client, language="German")
+
+    root = fragment(response.text)
+    assert root.xpath("//div[@role='alert']")
+    assert "language" in " ".join(texts(root, "//ul[@class='details']/li"))
+    assert searx.requests == []
+
+
 def test_a_failed_search_shows_its_error() -> None:
     def down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)

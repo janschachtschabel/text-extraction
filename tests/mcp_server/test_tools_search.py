@@ -55,11 +55,21 @@ def test_tools_list_web_search() -> None:
     assert "options" not in properties
     # The deployment's bounds, so an agent need not learn them from a refusal.
     assert properties["max_results"]["maximum"] == 20
+    assert properties["max_results"]["default"] == 10
     assert "wikipedia, arxiv, crossref" in properties["sources"]["description"]
     assert tool["annotations"]["readOnlyHint"] is True
     assert tool["annotations"]["openWorldHint"] is True
     assert "extract_url" in tool["description"]
     assert "batch_extract" in tool["description"]
+
+
+def test_max_results_default_follows_a_low_limit() -> None:
+    # The schema never shows a default above its own maximum.
+    with running(serving(searx_answer()), search_max_results=5) as client:
+        properties = listed_tool(client)["inputSchema"]["properties"]
+
+    assert properties["max_results"]["maximum"] == 5
+    assert properties["max_results"]["default"] == 5
 
 
 def test_web_search_is_listed_while_search_is_off() -> None:

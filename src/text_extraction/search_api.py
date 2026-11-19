@@ -20,7 +20,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.feature_access import check_feature_access
 from text_extraction.ratelimit import rate_limited
 from text_extraction.search.client import search
-from text_extraction.search.types import SearchRequest, SearchResult
+from text_extraction.search.types import DEFAULT_MAX_RESULTS, SearchRequest, SearchResult
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
@@ -29,6 +29,7 @@ __all__ = [
     "SEARCH_DISABLED_MESSAGE",
     "check_search_enabled",
     "create_search_client",
+    "default_max_results",
     "router",
     "run_search",
 ]
@@ -85,6 +86,12 @@ async def require_search_enabled(
 
 def _invalid(field: str, message: str) -> RequestValidationError:
     return RequestValidationError([{"type": "value_error", "loc": ("body", field), "msg": message}])
+
+
+def default_max_results(settings: Settings) -> int:
+    """``max_results`` of a request that leaves it out: 10, or ``SEARCH_MAX_RESULTS`` when that
+    is lower, so a low limit never refuses a request that names no number."""
+    return min(DEFAULT_MAX_RESULTS, settings.search_max_results)
 
 
 def _check(body: SearchRequest, settings: Settings) -> None:
@@ -154,6 +161,8 @@ async def run_search(
     settings: Settings = state.settings
     check_search_enabled(settings)
     check_feature_access(principal, settings, search=True)
+    if "max_results" not in body.model_fields_set:  # before the cache key
+        body = body.model_copy(update={"max_results": default_max_results(settings)})
     _check(body, settings)
     http: httpx.AsyncClient = state.search_http
     envelope = await search(body, settings, http, state.valkey)

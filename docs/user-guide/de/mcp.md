@@ -132,7 +132,8 @@ Eine ganze Antwort umfasst höchstens `MCP_MAX_ANSWER_CHARS` (200.000) Zeichen U
 Antwort trägt den Umschlag zweimal, als `structuredContent` und als letzten Text). Eine größere
 `get_job`-Seite enthält weniger Einträge, und ihr `next_offset` nennt den Beginn der nächsten Seite.
 In einem einzelnen Ergebnis werden die Listen `chunks`, `links`, `structured.tables` und
-`site.links` in dieser Reihenfolge vom Ende her gekürzt, mit der Warnung `mcp_answer_truncated`;
+`site.links` sowie die Treffer `results` von `web_search` in dieser Reihenfolge vom Ende her
+gekürzt, mit der Warnung `mcp_answer_truncated`;
 die REST-Route liefert sie vollständig.
 
 ## Fehler

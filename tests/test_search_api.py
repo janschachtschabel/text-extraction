@@ -185,6 +185,34 @@ def test_user_key_without_search_allow_users_is_403() -> None:
     assert len(searx.requests) == 1
 
 
+def test_without_max_results_a_low_limit_is_the_default() -> None:
+    # SEARCH_MAX_RESULTS below 10: a request that leaves max_results out asks for the limit
+    # instead of a 422; an explicit value over it stays a 422.
+    urls = [f"https://example.org/{i}" for i in range(8)]
+    searx = serving(searx_answer(*urls))
+    with running(searx, search_max_results=5) as client:
+        implicit = search(client, {"query": "plants"})
+        explicit = search(client, {"query": "plants", "max_results": 5})
+        over = search(client, {"query": "plants", "max_results": 10})
+
+    assert implicit.status_code == 200
+    assert len(implicit.json()["data"]["results"]) == 5
+    # The default is applied before the cache key: the same search as max_results 5.
+    assert explicit.json()["data"]["cache"] == "hit"
+    assert len(searx.requests) == 1
+    assert over.status_code == 422
+
+
+def test_an_invalid_language_is_422() -> None:
+    searx = serving(searx_answer())
+    with running(searx) as client:
+        response = search(client, {"query": "plants", "language": "German"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["loc"] == ["body", "language"]
+    assert searx.requests == []
+
+
 def test_max_results_over_the_setting_is_422() -> None:
     searx = serving(searx_answer("https://example.org/a"))
     with running(searx) as client:
