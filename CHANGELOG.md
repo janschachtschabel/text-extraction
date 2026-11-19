@@ -9,6 +9,13 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- Install guides (English and German): a section "Update on Hostinger". A redeploy in Hostinger's
+  Docker Manager pulls the newest images but keeps the compose file of the first deploy, so a
+  release that changes the root `docker-compose.yml` (0.1.13 added `searxng`) needs the new file
+  once; the README's "Updating" points there.
+
 ## [0.1.14] - 2026-11-19
 
 ### Added

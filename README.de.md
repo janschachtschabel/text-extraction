@@ -153,7 +153,7 @@ Einstellungen.
 
 ## Aktualisieren
 
-Stellen Sie neu bereit (bei Hostinger: über die URL des Repositorys neu bereitstellen) oder
+Stellen Sie neu bereit oder
 führen Sie `docker compose up -d --wait` aus: Die `docker-compose.yml` im Hauptordner lädt bei
 jedem `docker compose up` und jedem Neu-Bereitstellen die neueste Version `0.1.x` (Tag `0.1`,
 `pull_policy: always`); ein Container, den Docker nur neu startet, behält sein Image, und
@@ -163,6 +163,8 @@ Sie einen alten festen Wert, damit wieder die neueste geladen wird. Ihre `.env` 
 und ein Wert darin geht einem geänderten Standard vor: Vergleichen Sie sie nach einem Update mit
 `.env.example`.
 [CHANGELOG.md](CHANGELOG.md) (Englisch) nennt jede Änderung und unter „Upgrade“, was zu tun ist.
+Bei Hostinger behält ein erneutes Bereitstellen die erste Compose-Datei: Ein Release, das sie
+ändert, braucht [Auf Hostinger aktualisieren](docs/user-guide/de/installation.md#auf-hostinger-aktualisieren).
 
 ## Anwendungsfälle
 

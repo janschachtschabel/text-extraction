@@ -160,6 +160,29 @@ docker compose run --rm -T init text-extraction-init --show-admin-key
 docker compose logs api | tail -n 20                   # why the API does not start
 ```
 
+#### Auf Hostinger aktualisieren
+
+Ein erneutes Bereitstellen lädt die neuesten Images, aber der Docker Manager behält die
+`docker-compose.yml`, die er bei der ersten Bereitstellung aus dem Repository geholt hat. Ein
+Release, dessen Abschnitt „Upgrade“ im CHANGELOG eine Änderung der Compose-Datei im Hauptordner
+nennt, braucht einmal die neue Datei; 0.1.13 etwa hat den Dienst `searxng` hinzugefügt, und ohne
+ihn hat die Spielwiese keinen Tab „Suche“.
+
+1. Im Docker Manager die Compose-Datei des Projekts öffnen und ihren ganzen Text durch die
+   aktuelle [docker-compose.yml](../../../docker-compose.yml) aus `main` ersetzen.
+2. Die Umgebungsvariablen lassen, wie sie sind, speichern und erneut bereitstellen.
+
+Dasselbe in der Webkonsole (gibt `grep -c searxng` `0` aus, stammt die Compose-Datei von vor
+0.1.13; die Kopie `docker-compose.yml.old` behält die alte):
+
+```bash
+cd /docker/text-extraction
+grep -c searxng docker-compose.yml
+cp docker-compose.yml docker-compose.yml.old
+curl -fsSL https://raw.githubusercontent.com/janschachtschabel/text-extraction/main/docker-compose.yml -o docker-compose.yml
+docker compose pull && docker compose up -d --wait
+```
+
 ### Aus dem Checkout bauen
 
 ```bash
