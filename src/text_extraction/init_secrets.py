@@ -23,6 +23,10 @@ in the environment must be a bare host name: the Traefik labels take it unchange
 
 The command does not read ``Settings``: they need API keys, which do not exist yet. It never logs
 the Valkey password.
+
+``--new-key NAME`` touches no secret: it prints a new API key and the matching ``API_KEYS`` value
+(for ``.env``, a Docker panel's variable form and a POSIX shell), so nobody has to compute a
+SHA-256 or write the JSON by hand. It runs wherever the image or the package runs.
 """
 
 import argparse
@@ -48,6 +52,10 @@ _SECRET = re.compile(r"^[0-9A-Za-z]{32,}$")
 # A DNS host name: labels of letters, digits and inner hyphens, dot-separated, no scheme, port,
 # path or trailing dot.
 _HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+# A key name that needs no quoting in JSON, a shell or a panel's form.
+_KEY_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# The name of the key that ensure_secrets generates; a second key of that name stops the service.
+_GENERATED_KEY_NAME = "admin"
 
 
 class SecretsError(Exception):
@@ -129,6 +137,37 @@ def ensure_secrets(directory: Path, valkey_host: str = "valkey") -> SecretsResul
     return SecretsResult(admin_key_created=admin_key if admin_created else None)
 
 
+def new_key_text(name: str, role: Literal["user", "admin"]) -> str:
+    """A new API key and the ``API_KEYS`` value that admits it, as text for a person."""
+    key = secrets.token_hex(32)
+    entry = {"name": name, "role": role, "sha256": hashlib.sha256(key.encode()).hexdigest()}
+    value = json.dumps([entry], separators=(",", ":"))
+    return (
+        "Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; "
+        "it is shown only now):\n"
+        f"  {key}\n"
+        ".env line (docker compose; replace the API_KEYS line, then run docker compose up -d):\n"
+        f"  API_KEYS={value}\n"
+        "Shell (uv run without Docker; run it in each terminal):\n"
+        f"  export API_KEYS='{value}'\n"
+        "Docker panel variable (such as Hostinger): name API_KEYS, value:\n"
+        f"  {value}\n"
+        "More than one key: put every entry, comma-separated, into one list: [{...},{...}]\n"
+    )
+
+
+def _key_name(value: str) -> str:
+    if not _KEY_NAME.match(value):
+        raise argparse.ArgumentTypeError(
+            "the name must be 1 to 64 letters, digits, '.', '_' or '-'"
+        )
+    if value == _GENERATED_KEY_NAME:
+        raise argparse.ArgumentTypeError(
+            "the name 'admin' belongs to the key that docker-compose.yml generates; choose another"
+        )
+    return value
+
+
 def _configure_logging() -> None:
     level = os.environ.get("LOG_LEVEL", "INFO")
     fmt: Literal["json", "console"] = (
@@ -156,12 +195,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="valkey",
         help="Host name of Valkey in the generated URL (default valkey).",
     )
-    parser.add_argument(
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
         "--show-admin-key",
         action="store_true",
         help="Print the generated admin API key and exit (1: there is none yet).",
     )
+    action.add_argument(
+        "--new-key",
+        metavar="NAME",
+        type=_key_name,
+        help="Print a new API key named NAME and the API_KEYS value for it, then exit. "
+        "Touches no secret.",
+    )
+    parser.add_argument(
+        "--role",
+        choices=("user", "admin"),
+        help="Role of the key that --new-key prints (default user).",
+    )
     args = parser.parse_args(argv)
+    if args.role is not None and args.new_key is None:
+        parser.error("--role goes with --new-key")
+
+    if args.new_key is not None:
+        print(new_key_text(args.new_key, args.role or "user"), end="")
+        sys.exit(0)
 
     if args.show_admin_key:
         try:

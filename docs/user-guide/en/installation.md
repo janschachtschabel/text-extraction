@@ -2,9 +2,19 @@
 
 Deutsch: [Installation](../de/installation.md)
 
-The service runs in three ways: locally with uv (for development), with Docker Compose (one
-machine) and on Kubernetes with the Helm chart. Every way needs a Valkey (or Redis 7) for the
-shared state: jobs, results, the cache and the rate limits. The service itself keeps no state.
+The service runs in three ways: with Docker Compose (one machine, the easiest way), locally with
+uv (without Docker images, for development) and on Kubernetes with the Helm chart. Every way needs
+a Valkey (or Redis 7) for the shared state: jobs, results, the cache and the rate limits. The
+service itself keeps no state.
+
+Every request needs an API key of the service (unless you switch keys off with `AUTH_MODE=none`).
+Docker Compose creates the first one for you; [API keys: show, create, enter](#api-keys-show-create-enter)
+explains how to see it, how to make more and where they go, for every way and on Windows.
+
+On Windows, Docker Compose runs in [Docker Desktop](https://docs.docker.com/desktop/), in
+PowerShell or the command prompt. The local way without Docker images needs Linux or macOS; on
+Windows run it in [WSL 2](https://learn.microsoft.com/windows/wsl/install) (Ubuntu), because the
+document workers use Linux process limits.
 
 ## Local with uv
 
@@ -18,15 +28,29 @@ UI_ENABLED=true uv run text-extraction                      # terminal 1: API on
 INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extract worker (jobs)
 ```
 
+`uv run` does not read `.env`: each terminal takes its settings from the shell, so `export` them
+there (or put them in a file and run `set -a; . ./my.env; set +a` in each terminal).
 `AUTH_MODE=none` lets anyone who reaches the port use the service: use it on your own machine
 only, and only while you need it. It answers only the host names of `ALLOWED_HOSTS` (`localhost`,
 `127.0.0.1`, `[::1]` and `api`), so a web page that points its own domain at your machine (DNS
 rebinding) is refused. Every process reads the same settings, so each terminal needs
-`AUTH_MODE=none` (or the same `API_KEYS`), and each serves its internal port: give every further
+`AUTH_MODE=none` (or, without it, the same `API_KEYS`), and each serves its internal port: give every further
 process its own `INTERNAL_PORT`. The browser worker needs the extra `browser` and Chromium
 (`uv sync --extra browser`, then `uv run playwright install chromium`); start it with
 `INTERNAL_PORT=9092 uv run text-extraction-browser-worker` and set `BROWSER_ENABLED=true` on the
 API, the extract worker and the browser worker.
+
+With an API key instead of `AUTH_MODE=none` (for example when other machines reach the port),
+first take `AUTH_MODE=none` away again, or the keys are ignored:
+
+```bash
+uv run text-extraction-init --new-key me --role admin   # prints a key and an "export API_KEYS=..." line
+unset AUTH_MODE                                         # in each terminal: keys are on again
+export API_KEYS='[{"name":"me","role":"admin","sha256":"..."}]'  # the printed line, in each terminal
+UI_ENABLED=true uv run text-extraction                  # log in to http://localhost:8080/ui with the key
+```
+
+Keep the single quotes around the value: they keep the JSON's double quotes for the shell.
 
 For development:
 
@@ -64,9 +88,23 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 On its first start the one-shot service `init` creates the secrets in the volume `secrets` and
 keeps them afterwards: the Valkey password and an admin API key. The key appears once in the log
-of `init`; the `--show-admin-key` command above prints it at any time. Your own keys go into
-`API_KEYS` in `.env` (see below); they count together with the generated one. The internal port
-9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
+of `init`; the `--show-admin-key` command above prints it at any time. More keys (for other
+people, or with the role `user`) go into `API_KEYS` in `.env`; they count together with the
+generated one: see [API keys: show, create, enter](#api-keys-show-create-enter).
+
+In Windows PowerShell the same steps read:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --wait
+$KEY = docker compose run --rm -T init text-extraction-init --show-admin-key
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $KEY" } http://localhost:8080/v1/info
+Invoke-RestMethod -Method Post -Headers @{ Authorization = "Bearer $KEY" } `
+  -ContentType "application/json" -Body '{"url": "https://example.org/"}' `
+  http://localhost:8080/v1/extract
+```
+
+The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. The playground is at
 http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
 
 The file follows the newest `0.1.x` release on its own: its default image tag is `0.1`, and every
@@ -92,13 +130,18 @@ repository. Plan a VPS with 8 GB of memory or more: with every worker the stack 
    `https://github.com/janschachtschabel/text-extraction`, keep the suggested name
    (`text-extraction`) and deploy. The first deploy downloads the images and the models (about
    3 GB of models) and takes several minutes.
-2. Open the project's logs, or the web console, and take the admin key from the service `init`
-   (event `init_admin_key_created`).
+2. Take the admin key: in the web console (see below) run
+   `cd /docker/text-extraction && docker compose run --rm -T init text-extraction-init --show-admin-key`,
+   or find it in the project's logs of the service `init` (event `init_admin_key_created`, field
+   `admin_key`).
 3. Edit the project: set `DOMAIN` in `.env` (for example the VPS host name
    `srvNNNNNN.hstgr.cloud` or your own domain with an A record pointing at the VPS), optionally
    `API_PORT=127.0.0.1:8080`, then deploy again. Traefik gets the certificate itself. Until
    `DOMAIN` is set, Traefik's log shows an error about an empty `Host()` rule: that is harmless.
 4. Open `https://<DOMAIN>/ui` and log in with the key.
+5. Optional, more keys: create them in the web console with `--new-key` and enter them in the
+   project's environment variables, as [Hostinger and other Docker panels](#hostinger-and-other-docker-panels)
+   shows.
 
 A failed deploy shows only "Deployment failed" or "Project not found"; the web console (a root
 shell) has the real message:
@@ -107,21 +150,25 @@ shell) has the real message:
 cat /docker/text-extraction/.build.log                 # the real error of a failed deploy
 cd /docker/text-extraction && docker compose logs init  # the admin key
 docker compose run --rm -T init text-extraction-init --show-admin-key
+docker compose logs api | tail -n 20                   # why the API does not start
 ```
 
 ### Build from the checkout
 
 ```bash
-cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
-KEY=$(openssl rand -hex 32)                    # your API key: keep it
-printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
+cp .env.example .env                           # then set VALKEY_PASSWORD and API_KEYS in it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
+uv run text-extraction-init --new-key me --role admin   # a key and its API_KEYS line for .env
 docker compose -f docker-compose.build.yml up --build -d --wait
 ```
 
-`API_KEYS` holds the SHA-256 of each key, never the key itself. `.env.example` has one admin key
-named `local`, whose SHA-256 you replace; [API keys](usage.md#api-keys) explains the keys and
-their roles. This file has no `init` service: it needs `API_KEYS` and `VALKEY_PASSWORD` in `.env`.
+This file has no `init` service: it needs `API_KEYS` and `VALKEY_PASSWORD` in `.env`. Replace the
+`API_KEYS` line of `.env` with the line that `--new-key` printed and keep the key itself for your
+requests and the playground. Without uv, run the command in the image once it is built and
+`VALKEY_PASSWORD` is set (the file refuses to load without it):
+`docker compose -f docker-compose.build.yml run --rm --no-deps api text-extraction-init --new-key me --role admin`.
+A `VALKEY_PASSWORD` may hold only letters and digits. Without `openssl` (on Windows, Git Bash has it),
+`python -c "import secrets; print(secrets.token_hex(24))"` makes one too.
 
 ### Optional workers
 
@@ -168,6 +215,120 @@ Maximum extraction (for sites that allowed extraction by contract) needs
 `BROWSER_UNBLOCK_ENABLED=true`, which docker compose and `.env.example` set since 0.1.9 (an
 admin still has to choose `compliance: ignore`); `false` in `.env` switches it off. See
 [Site rules](site-rules.md#maximum-extraction).
+
+## API keys: show, create, enter
+
+The service checks every request against a list of keys. For each key the list holds a name, a
+role and the key's SHA-256, never the key itself: so there are always two parts.
+
+- The key: 64 letters and digits. You keep it, send it with every request as
+  `Authorization: Bearer <key>` and log in to the playground with it. Nobody can recover it from
+  the list: lost is lost, so make a new one.
+- Its entry in `API_KEYS`: `[{"name":"jan","role":"user","sha256":"…"}]`, a JSON list in the
+  settings. Several keys share one list: `[{…},{…}]`.
+
+The role is `user` or `admin`: an admin may also switch the site rules off (and with it use
+maximum extraction), use XPath selectors and the `evaluate` action, and read every job.
+[API keys](usage.md#api-keys) in the usage guide describes the roles and the error answers.
+
+### Show the generated admin key
+
+The root `docker-compose.yml` creates an admin key named `admin` on its first start and keeps it
+in the volume `secrets`. It prints it at any time, the same in bash, PowerShell and Hostinger's web
+console (there, first `cd /docker/text-extraction`):
+
+```bash
+docker compose run --rm -T init text-extraction-init --show-admin-key
+```
+
+For most single-person setups this key is enough. `docker compose down -v` deletes the volumes and
+with them this key (and the downloaded models); the next start creates a new one.
+
+### Create another key
+
+`--new-key` prints a new key and its entry, ready to paste; it changes nothing on its own. Give
+each key a name of its own (letters, digits, `.`, `_` or `-`; `admin` is taken by the generated
+key) and the role it needs, `user` by default:
+
+```bash
+docker compose run --rm -T init text-extraction-init --new-key anna                 # a user key
+docker compose run --rm -T init text-extraction-init --new-key jan --role admin     # an admin key
+uv run text-extraction-init --new-key anna                                          # without Docker
+```
+
+The answer has four parts (shortened here; your key and hash differ):
+
+```text
+Key (send it as 'Authorization: Bearer <key>' or enter it in the playground; it is shown only now):
+  9f2c…
+.env line (docker compose; replace the API_KEYS line, then run docker compose up -d):
+  API_KEYS=[{"name":"anna","role":"user","sha256":"4be1…"}]
+Shell (uv run without Docker; run it in each terminal):
+  export API_KEYS='[{"name":"anna","role":"user","sha256":"4be1…"}]'
+Docker panel variable (such as Hostinger): name API_KEYS, value:
+  [{"name":"anna","role":"user","sha256":"4be1…"}]
+More than one key: put every entry, comma-separated, into one list: [{...},{...}]
+```
+
+Copy the key somewhere safe now: it is not stored anywhere. `--new-key` needs version `0.1.13` or
+later; without it (older images) [API keys](usage.md#api-keys) shows how to make a key with
+`openssl`.
+
+### Enter the key
+
+| Where the service runs | What to do |
+| --- | --- |
+| `docker compose` (either file) | Open `.env` in a text editor, replace the whole line that starts with `API_KEYS=` with the printed `.env` line, save, run `docker compose up -d --wait` (with `-f docker-compose.build.yml` for the build file). |
+| Hostinger and other Docker panels | See [below](#hostinger-and-other-docker-panels). |
+| `uv run` without Docker | Run the printed `export API_KEYS=…` line in every terminal, then start the processes again. |
+| Kubernetes | The value goes into `secrets.apiKeys` (or your own Secret), see the [Helm chart](../../../deploy/helm/text-extraction/README.md). |
+
+For several keys, the line holds one list with every entry, for example
+`API_KEYS=[{"name":"anna","role":"user","sha256":"…"},{"name":"jan","role":"admin","sha256":"…"}]`.
+Keep it on one line and without quotes around the list. The generated `admin` key is not in this
+list (it comes from the volume) and keeps working. To take a key away, remove its entry and run
+`docker compose up -d --wait` again.
+
+Compose passes `.env` to the containers only when it creates them: `docker compose up -d` does
+that after a change, while `docker compose restart` keeps the old values.
+
+### Hostinger and other Docker panels
+
+1. Create the key in the VPS's web console (a root shell):
+   `cd /docker/text-extraction && docker compose run --rm -T init text-extraction-init --new-key anna`.
+2. Docker Manager, the project, "Edit" (environment variables): add a variable.
+   - Name: `API_KEYS`
+   - Value: the line under "Docker panel variable", the one that starts with `[`. Not the
+     `.env` line: `API_KEYS=` in the value field makes the name appear twice, and the API and
+     the workers stop with "API_KEYS must be a JSON list".
+3. Deploy again. The variables go into `.env`, and the containers start with the new list.
+
+If a variable `API_KEYS` already exists (from `.env.example`, with zeros as the hash), replace its
+value instead of adding a second one.
+
+### Check the key
+
+```bash
+curl -H "Authorization: Bearer <key>" http://localhost:8080/v1/info
+```
+
+```powershell
+Invoke-RestMethod -Headers @{ Authorization = "Bearer <key>" } http://localhost:8080/v1/info
+```
+
+The answer names the key's `role`. In Windows PowerShell 5, `curl` is a different command: use
+`curl.exe` or `Invoke-RestMethod`. Behind a domain, use `https://<DOMAIN>` instead of
+`http://localhost:8080`.
+
+### When it does not work
+
+| What you see | Cause and fix |
+| --- | --- |
+| 401 `unauthorized` | The key does not match an entry: copy it again, without spaces. After a change of `.env`, run `docker compose up -d --wait` (a restart keeps the old list). |
+| The API does not start, its log says `API_KEYS must be a JSON list` | The value is not a bare list: it starts with `API_KEYS=` (panel value field), is wrapped in quotes in a panel field, or spans several lines. |
+| The log says `duplicate API key name` | Two entries share a name, or one is named `admin` next to the generated key: rename it (for `--new-key`, choose another name). |
+| The log says `AUTH_MODE=api_key requires API_KEYS or API_KEYS_FILE` | There is no key at all: enter one, or use the root `docker-compose.yml`, which creates one. |
+| The key is lost | A key of your own cannot be recovered: create a new one and replace its entry. The generated admin key: `--show-admin-key`. |
 
 ## Kubernetes with Helm
 

@@ -13,7 +13,16 @@ Schlüssel in der Shell-Variable `KEY`.
 
 Jede Anfrage sendet einen API-Schlüssel des Dienstes als `Authorization: Bearer <key>`. Der
 Betreiber listet die Schlüssel in `API_KEYS` (oder `API_KEYS_FILE`), jeden mit einem Namen, einer
-Rolle und dem SHA-256 des Schlüssels, nie dem Schlüssel selbst:
+Rolle und dem SHA-256 des Schlüssels, nie dem Schlüssel selbst. Ein Befehl gibt einen neuen
+Schlüssel mit seinem Eintrag zum Einfügen aus;
+[API-Schlüssel: anzeigen, erzeugen, eintragen](installation.md#api-schlüssel-anzeigen-erzeugen-eintragen) zeigt, wohin der Eintrag
+gehört:
+
+```bash
+docker compose run --rm -T init text-extraction-init --new-key anna --role user
+```
+
+Von Hand, mit `openssl` und `sha256sum` (Linux, macOS, Git Bash unter Windows):
 
 ```bash
 KEY=$(openssl rand -hex 32)                       # the key you send

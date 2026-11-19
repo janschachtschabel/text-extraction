@@ -19,6 +19,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `get_job_screenshot`. `GET /v1/jobs/{id}` and `get_job` take `view=summary`: the items without
   content, metadata and links, `get_job` about 150 site pages a call instead of 50; without `view`
   nothing changes.
+- `text-extraction-init --new-key NAME [--role user|admin]` prints a new API key and the matching
+  `API_KEYS` value, as a `.env` line, a shell `export` line and a Docker panel value, so nobody
+  computes a SHA-256 or writes the JSON by hand. It reads and writes no secret and runs wherever the
+  image or the package runs (`docker compose run --rm -T init text-extraction-init --new-key anna`,
+  the same in PowerShell).
+  The name `admin` is refused: the root compose file's generated key has it.
 
 ### Changed
 
@@ -27,7 +33,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   done so far, the failed ones, the elapsed time and "Cancel"; the list of single fetches
   (robots.txt, sitemaps, pages, each with "Show") is a fold under the head that loads when
   opened. One refresh (the tree's, every 4 s) replaces two. The REST API and MCP are unchanged.
-
+- Install guides (English and German): a section "API keys: show, create, enter" for docker
+  compose, Hostinger and other Docker panels (name and value fields), the setup without Docker and
+  Kubernetes, with Windows PowerShell commands, a key check and a troubleshooting table. The guide
+  says that `uv run` does not read `.env` and that the setup without Docker images needs Linux or
+  macOS (WSL 2 on Windows).
 - Valkey 8.1 → 9.1 everywhere: both compose files, the Helm chart default
   (`valkey.image.tag: 9.1-alpine`), the e2e and live workflows and the install guides
   (supersedes Dependabot PR #60, which changed only the compose files). Valkey reads the data an
