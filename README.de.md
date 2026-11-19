@@ -86,7 +86,7 @@ Jede Antwort hat dieselbe Ergebnishülle (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototyp `v0.1.15`: Die Pakete 0 bis 26 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.16`: Die Pakete 0 bis 26 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und

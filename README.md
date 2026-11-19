@@ -79,7 +79,7 @@ Every answer is the same result envelope (`status`, `error.code`, `error.retryab
 
 ## Status
 
-Prototype `v0.1.15`: packages 0-26 are merged (foundation, service skeleton, fast extraction, jobs
+Prototype `v0.1.16`: packages 0-26 are merged (foundation, service skeleton, fast extraction, jobs
 and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
 bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign,

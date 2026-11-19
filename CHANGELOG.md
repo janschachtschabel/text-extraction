@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-19
+
 ### Changed
 
 - Web search: `duckduckgo` replaces `google`, and `wlo` is gone (ruling D7). Google blocked the
@@ -840,7 +842,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.12...v0.1.13
