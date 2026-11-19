@@ -178,7 +178,11 @@ def test_tab_is_shown_with_features_search() -> None:
     assert form.xpath(".//fieldset[.//input[@name='sources']]/legend")
     (most,) = form.xpath(".//input[@name='max_results']")
     assert (most.get("max"), most.get("value")) == ("20", "10")
-    assert form.xpath(".//input[@name='language']")
+    assert [o.get("value") for o in form.xpath(".//select[@name='language']/option")] == [
+        "",
+        "de",
+        "en",
+    ]
     assert [o.get("value") for o in form.xpath(".//select[@name='time_range']/option")] == [
         "",
         "day",
@@ -298,14 +302,35 @@ def test_a_malformed_number_is_a_form_error_on_its_field() -> None:
     assert searx.requests == []
 
 
-def test_a_language_that_is_no_code_is_refused_before_searxng() -> None:
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_language_is_preset_to_the_ui_language(language: Language) -> None:
+    """German results by default for a German playground: Wikipedia and its sisters search in
+    the chosen language."""
+    with running() as client:
+        app = login(client, language=language)
+
+    (form,) = app.xpath("//form[@id='search-form']")
+    assert [o.get("value") for o in form.xpath(".//select[@name='language']/option[@selected]")] == [
+        language
+    ]
+
+
+def test_all_languages_sends_no_language() -> None:
+    searx = serving(answer(HITS))
+    with running(searx) as client:
+        search(client, language="")
+
+    assert "language" not in searx.requests[0].url.params
+
+
+def test_a_language_outside_the_list_is_refused_before_searxng() -> None:
     searx = serving(answer(HITS))
     with running(searx) as client:
         response = search(client, language="German")
 
     root = fragment(response.text)
-    assert root.xpath("//div[@role='alert']")
-    assert "language" in " ".join(texts(root, "//ul[@class='details']/li"))
+    assert root.xpath("//div[@role='alert'][@data-error-for='search-language']")
+    assert "German" in " ".join(texts(root, "//div[@role='alert']/p"))
     assert searx.requests == []
 
 
@@ -447,6 +472,9 @@ NEW_KEYS = (
     "form.search_query",
     "form.search_sources",
     "form.search_language",
+    "form.search_language.any",
+    "form.search_language.de",
+    "form.search_language.en",
     "form.search_max_results",
     "form.search_time_range",
     "form.search_time_range.any",
