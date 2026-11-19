@@ -131,6 +131,20 @@ zeigt außerdem `run`, seine letzte Zuteilung an einen Worker (`pool`, `attempts
 null, solange er wartet): `attempts` über 1 heißt, dass der Eintrag nach einem verlorenen Lease oder
 einer Zurückstellung erneut läuft.
 
+`view=summary` (`/v1/jobs/<job id>?view=summary&limit=500`) zeigt jeden Eintrag ohne `content`,
+`quality`, `metadata`, `links`, `fingerprint`, `structured`, `chunks`, `image_descriptions` und
+`server_errors`, ohne die `signals` seines Seitentyps und die Fundstellen eines `pii`-Berichts,
+und einen Website-Eintrag ohne seine `links` und die `entries` und `children` seiner Sitemap: Status, Titel, Wortzahl, Seitentyp, Warnungen sowie Rolle, Tiefe und Elternteil in
+der Website bleiben. Das eignet sich für einen Überblick über einen großen Batch- oder
+Website-Job; ohne `view` (oder mit `view=full`) sind die Einträge vollständig.
+
+`GET /v1/info` nennt Dienst und Schlüssel und listet, was der Schlüssel nutzen kann (`features`:
+`jobs`, `browser`, `screenshots`, `unblock`, `media`, `ocr`, `pii`, `transcribe`, `llm`,
+`llm_needs_key`, `semantic_chunking`, `describe_images`, `site_structure`, `compliance_choice`,
+`compliance_default`), sowie die Grenzen (`limits`: `batch_max_urls`, `site_max_depth`,
+`site_max_pages`, `document_max_bytes`, `media_upload_max_bytes`, `request_max_body_bytes`,
+`rate_limit_per_minute`).
+
 ### Einen Job abbrechen
 
 `DELETE /v1/jobs/{id}` bricht einen Job ab (sein Eigentümer oder ein Admin). Es löscht den Job mit

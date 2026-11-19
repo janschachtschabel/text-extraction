@@ -9,6 +9,17 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- MCP agent usability (package 24). Each tool's `options` description lists the fields it takes
+  with a short hint, so an agent finds `pii`, `ocr`, `compliance`, `screenshot` and the others
+  without the API docs. `GET /v1/info` and `service_info` list the features the caller's key can
+  use (`features`) and the limits (`limits`). `extract_url`, `extract_structured` and `chunk`
+  attach their screenshot as `screenshot_url` does, and `get_job` points to
+  `get_job_screenshot`. `GET /v1/jobs/{id}` and `get_job` take `view=summary`: the items without
+  content, metadata and links, `get_job` about 150 site pages a call instead of 50; without `view`
+  nothing changes.
+
 ### Changed
 
 - Playground, "Site structure" (package 23): the site tree appears at once in place of the job

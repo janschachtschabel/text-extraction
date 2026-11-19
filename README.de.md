@@ -72,7 +72,7 @@ Englisch.
 | `POST /v1/site-structure` | Die Karte einer Website, als Job. |
 | `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Zustand und Ergebnisse eines Jobs; ihn abbrechen. |
 | `GET /v1/jobs/{id}/artifacts/{name}` | Eine Datei eines Jobs, etwa ein Screenshot. |
-| `GET /v1/info` | Die Version des Dienstes und die Rolle des Schlüssels. |
+| `GET /v1/info` | Die Version des Dienstes, die Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. |
 
 Jede Antwort hat dieselbe Ergebnishülle (`status`, `error.code`, `error.retryable`,
 `upstream_status`, `mode_used`, Zeiten): Wenn das Ziel scheitert, antwortet die API trotzdem mit

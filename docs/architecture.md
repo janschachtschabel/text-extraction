@@ -420,7 +420,7 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `discovery` (`crawl` or `sitemap_first`), `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 400 `invalid_request` while jobs are off (`JOBS_ENABLED=false`), 503 while Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
-| `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
+| `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500; `view=summary` drops the large result fields, package 24); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`, as `image/png`, `image/jpeg` or `image/webp`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 400 `invalid_request` while jobs are disabled, 503 while Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
 | `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
@@ -3585,6 +3585,35 @@ the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for
 - **Not in this package:** OAuth, MCP resources, prompts, sampling and the stdio transport,
   server-sent events, a UI password apart from the API keys, a UI session or cookie, a Node
   build, CSV export of results, resizing of preview images.
+
+**Package 24: what an agent needs to know (2026-11-18, Jan: "MCP Lücken beheben").** A review
+found every public route behind exactly one tool, with REST's defaults, but four things an agent
+could not learn or use well:
+
+- **R24-1 option hints.** Each tool's `options` description lists the fields `options` carries
+  (the REST model's fields that are not a tool argument, `mcp_server/option_hints.py`), each with
+  a hint of at most 70 characters (`OPTION_HINTS`, `ROUTE_HINTS` for a field whose meaning differs
+  on one route, such as the screenshot's image `format`). A test fails for a REST field without a
+  hint. D2 a stays: the schema of `options` is still `{"type": "object"}`, and each tool's input
+  schema stays under 4 KiB.
+- **R24-2 features and limits in `GET /v1/info`.** `data.features` says what the caller's key can
+  use (`info.offered_features`, shared with the UI's `feature_offer`, so a feature kept for admin
+  keys is false for a user key) and `data.limits` the limits that apply (the key's own rate limit
+  before the service's, null while rate limiting is off; `document_max_bytes`, and
+  `media_upload_max_bytes` only for a key whose uploads are transcribed). `service_info` answers the same.
+- **R24-3 screenshots of every extraction tool.** The attachment of `data.screenshot` moved from
+  `screenshot_url` to the base class, so `extract_url`, `extract_structured` and `chunk` with
+  `screenshot: true` attach the image (or link it over `MCP_IMAGE_MAX_BYTES`). `get_job` attaches
+  no image but names `get_job_screenshot` for each item with a screenshot.
+- **R24-4 `view=summary`.** `GET /v1/jobs/{id}` and `get_job` take `view` (`full`, the default and
+  unchanged, or `summary`). `summary` sets `content`, `quality`, `metadata`, `links`,
+  `fingerprint`, `structured`, `chunks`, `image_descriptions` and `server_errors` to null, empties
+  the page type's `signals`, drops a `pii` report's `items`, and of `site` the `links` and the
+  sitemap's `entries` and `children` (its `entry_count` stays); the stored item is not changed.
+  `get_job` takes up to 50 items with `full` (they share `max_chars`) and up to 500 with
+  `summary`; `MCP_MAX_ANSWER_CHARS` still bounds the answer, so a summary page holds about 150
+  site items (the required `timings` and `compliance` stay), and `next_offset` reads on. The UI's
+  live tree keeps reading the full view.
 
 ## Observability
 

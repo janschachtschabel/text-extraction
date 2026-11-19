@@ -23,10 +23,12 @@ class ServiceInfoTool(ModelTool):
     def __init__(self) -> None:
         super().__init__(
             name="service_info",
-            description="Name and version of the service, and the caller's key name and role.",
+            description="Name and version of the service, the caller's key name and role, "
+            "which features the key can use (browser, screenshots, OCR, PII, transcription, "
+            "LLM, unblock ...) and the limits (batch size, site pages, upload bytes, rate).",
             parameters=NoArguments.model_json_schema(),
             annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
         )
 
     async def call(self, state: State, principal: Principal, args: BaseModel) -> object:
-        return service_info(principal)
+        return service_info(principal, state.settings)

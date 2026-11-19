@@ -85,12 +85,14 @@ def test_info_ok_with_user_key(public: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["trace_id"] == "trace-42"
     assert response.json()["status"] == "success"
-    assert response.json()["data"] == {
+    data = response.json()["data"]
+    assert {key: data[key] for key in ("name", "version", "principal", "role")} == {
         "name": "text-extraction",
         "version": __version__,
         "principal": "alice",
         "role": "user",
     }
+    assert set(data) == {"name", "version", "principal", "role", "features", "limits"}
 
 
 def test_openapi_has_no_internal_paths(public: TestClient) -> None:
