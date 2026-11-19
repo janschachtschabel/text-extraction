@@ -3119,9 +3119,11 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   Literals, so an unknown value in a request is still 422. Job options still forbid unknown
   fields: `_options_json` leaves an option out while it is at its default (`site.discovery` while
   it is `crawl`), so a new option needs an upgrade order only once a request sets it. The other
-  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SitemapInfo.format`,
-  `SiteInfo.role`) stay strict, so a new value there still needs the upgrade order (API pods
-  first).
+  result enums (`PageSignal`, `SiteLink.kind`, `source` and `region`, `SiteInfo.role`) stay
+  strict, so a new value there still needs the upgrade order (API pods first). Since package 26
+  `SitemapInfo.format` and `source` are tolerant too (`TolerantSitemapFormat`,
+  `TolerantSitemapSource`): an unknown format reads as `urlset`, an unknown source as null.
+  Package 26's own new values still need the order, since 0.1.13 readers are strict.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
   marked guessed with its reason; a URL that `guess_type` cannot type shows "Type open" with its

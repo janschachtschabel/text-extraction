@@ -22,6 +22,16 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   (schema.org Place, LocalBusiness, address, geo, an Event's location, geo meta tags); PII handling
   covers their text.
 
+### Upgrade
+
+- New setting and its default: `SITE_APIS_ENABLED=true`. `SITE_APIS_ENABLED=false` makes a crawl
+  ignore `apis`.
+- On a rolling deploy, update the API pods first, then the workers: a 0.1.13 API pod answers 500
+  for a job that holds a `wordpress_*` or `drupal_*` sitemap item, and an API item leased by a
+  0.1.13 worker fails `conversion_failed` while the rollout runs. Since this release,
+  `SitemapInfo.format` and `source` read an unknown value as `urlset` and null, so later new
+  values need no upgrade order there.
+
 ## [0.1.13] - 2026-11-19
 
 ### Added
