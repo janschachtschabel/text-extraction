@@ -502,8 +502,9 @@ def _options_json(options: JobOptions) -> str:
     ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none),
     ``describe_images`` (none), ``site`` (none) and ``screenshot_options`` (none) are left out
     while they are the default: pods of a release before them parse the options strictly, and
-    during a rolling upgrade they read the jobs that new pods create. So is ``site.discovery``
-    while it is ``crawl`` (ruling AU3-R1: ``SiteOptions`` of 0.1.5 forbids unknown fields)."""
+    during a rolling upgrade they read the jobs that new pods create. So are ``site.discovery``
+    while it is ``crawl`` and ``site.apis`` while it is true
+    (ruling AU3-R1: ``SiteOptions`` of 0.1.5 forbids unknown fields)."""
     defaults = JobOptions.model_fields
     omit = {
         name
@@ -522,8 +523,15 @@ def _options_json(options: JobOptions) -> str:
     }
     exclude: dict[str, Any] = dict.fromkeys(omit, True)
     site = options.site
-    if site is not None and site.discovery == SiteOptions.model_fields["discovery"].default:
-        exclude["site"] = {"discovery": True}
+    if site is not None:
+        site_defaults = SiteOptions.model_fields
+        later = {
+            name: True
+            for name in ("discovery", "apis")
+            if getattr(site, name) == site_defaults[name].default
+        }
+        if later:
+            exclude["site"] = later
     return options.model_dump_json(exclude=exclude or None)
 
 
