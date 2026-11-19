@@ -243,10 +243,10 @@ def test_the_default_sources_are_listed_for_an_agent() -> None:
         tool = listed_tool(client)
 
     description = tool["inputSchema"]["properties"]["sources"]["description"]
-    for engine in ("bing", "duckduckgo", "mojeek", "startpage", "wikipedia", "openalex"):
+    for engine in ("bing", "duckduckgo", "wikipedia", "openalex"):
         assert engine in description
-    assert "google" not in description
-    assert "wlo" not in description
+    for engine in ("google", "wlo", "mojeek", "startpage"):  # blocked or dropped (ruling D7)
+        assert engine not in description
     # The order of the hits and German hits are explained, so an agent need not guess them.
     assert "top hit" in tool["description"]
     assert "duplicate" in tool["description"]

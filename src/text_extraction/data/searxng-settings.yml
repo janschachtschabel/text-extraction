@@ -11,10 +11,10 @@
 
 use_default_settings:
   engines:
-    # Engines with an official, free API (ruling D2 a), plus bing, duckduckgo, mojeek and
-    # startpage on Jan's choices of 2026-11-19 (rulings D6 and D7; google left out after it
-    # blocked the server): they are read by scraping, may block the server's address and then
-    # appear in sources_failed. Every other scraping engine stays off.
+    # Engines with an official, free API (ruling D2 a), plus bing and duckduckgo on Jan's
+    # choices of 2026-11-19 (rulings D6 and D7; google, mojeek and startpage left out after they
+    # blocked a server at once): they are read by scraping, may block the server's address and
+    # then appear in sources_failed. Every other scraping engine stays off.
     keep_only:
       - wikipedia
       - wikibooks
@@ -26,8 +26,6 @@ use_default_settings:
       - crossref
       - bing
       - duckduckgo
-      - mojeek
-      - startpage
 
 general:
   instance_name: text-extraction search
@@ -81,11 +79,4 @@ engines:
   - name: bing
     disabled: false
   - name: duckduckgo
-    disabled: false
-  # Not loaded by SearXNG's own settings (inactive): each is loaded and switched on here.
-  - name: mojeek
-    inactive: false
-    disabled: false
-  - name: startpage
-    inactive: false
     disabled: false

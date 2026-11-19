@@ -50,7 +50,7 @@ FIRST_MAX_RESULTS = 10
 MCP_ACCEPT = "application/json, text/event-stream"
 WIKIPEDIA_HOST = "de.wikipedia.org"
 # The engines that read a search engine's result pages (rulings D6 and D7): each can be blocked.
-SCRAPING_ENGINES = ("bing", "duckduckgo", "mojeek", "startpage")
+SCRAPING_ENGINES = ("bing", "duckduckgo")
 
 
 @dataclass

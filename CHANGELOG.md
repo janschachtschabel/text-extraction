@@ -11,11 +11,12 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Changed
 
-- Web search: `google` and `wlo` are gone; `duckduckgo`, `mojeek` and `startpage` are new
-  (ruling D7). Google blocked the first server that ran v0.1.15 ("Suspended: access denied"), so
-  a default search listed it in `sources_failed` every time and was never cached. Each new engine
-  passed a live check from a GitHub runner. `SEARCH_SOURCES` now defaults to
-  `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,bing,duckduckgo,mojeek,startpage`;
+- Web search: `duckduckgo` replaces `google`, and `wlo` is gone (ruling D7). Google blocked the
+  first server that ran v0.1.15 ("Suspended: access denied"), so a default search listed it in
+  `sources_failed` every time and was never cached. A new live check asks each scraped engine
+  alone from a GitHub runner: Bing and DuckDuckGo answered, Mojeek and Startpage refused at once
+  and stay off. `SEARCH_SOURCES` now defaults to
+  `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref,bing,duckduckgo`;
   a request naming `google` or `wlo` is refused with 422. A compose install gets the new SearXNG
   settings with the new image.
 - Web search: with several sources, every source's top hit comes first, then every source's

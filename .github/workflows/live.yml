@@ -272,8 +272,8 @@ jobs:
           uv run python -m tests.live.run_search --base-url http://127.0.0.1:8081 \
             --expect hits --retries 3 --summary-out results/summary_web_search.md
 
-      # The engines that scrape a search engine's result pages (rulings D6, D7: bing, duckduckgo,
-      # mojeek, startpage), each asked alone in German: each must answer success with a hit of
+      # The engines that scrape a search engine's result pages (rulings D6, D7: bing,
+      # duckduckgo), each asked alone in German: each must answer success with a hit of
       # its own, so no dead source ships. Up to three retries per engine
       # (tests/live/run_search.py --expect engines).
       - name: "Web search: each scraping engine answers"

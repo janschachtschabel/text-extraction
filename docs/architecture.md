@@ -3754,17 +3754,20 @@ a generated key and answers `/healthz` and a JSON search.
   engines by default (`tests/test_searxng_settings.py`). The live check is
   `tests/live/run_search.py --expect wlo` (live.yml "Web search: WLO hits"); Google and Bing get
   no live check, because CI's addresses are blocked often.
-- **D7, four scraped engines, no Google, no WLO, top hits first (Jan, 2026-11-19).** On the
-  first day of v0.1.15 Google answered the Hostinger server with "Suspended: access denied"
-  (SearXNG's suspension after a CAPTCHA or 403), while Bing answered. Jan chose "google out, wlo
-  out, duckduckgo, mojeek, startpage in", each tested live so that no dead source is shipped. This
-  replaces D6's `google` and `wlo` (B): `keep_only`, the engine list and the `SEARCH_SOURCES`
-  default name the eight D2 engines plus `bing`, `duckduckgo`, `mojeek` and `startpage`;
-  `mojeek` and `startpage` are `inactive` in SearXNG's own settings and are loaded with
-  `inactive: false`. All four are scraped; the D6 notes on blocks apply. The live check is
-  `tests/live/run_search.py --expect engines` (live.yml "Web search: each scraping engine
-  answers"): each engine is asked alone from a GitHub runner, with up to three tries, and must
-  answer `success` with a hit naming it; an engine that fails there is not shipped.
+- **D7, DuckDuckGo instead of Google, no WLO, top hits first (Jan, 2026-11-19).** On the first
+  day of v0.1.15 Google answered the Hostinger server with "Suspended: access denied" (SearXNG's
+  suspension after a CAPTCHA or 403), while Bing answered. Jan chose "google out, wlo out,
+  duckduckgo, mojeek, startpage in", each tested live so that no dead source is shipped. The live
+  check (`tests/live/run_search.py --expect engines`, live.yml "Web search: each scraping engine
+  answers") asks each scraped engine alone from a GitHub runner, with up to three retries, and
+  needs `success` with a hit naming it. On its first run (PR #72, 2026-11-19) `bing` and
+  `duckduckgo` answered with 10 hits each, while `mojeek` answered "Suspended: access denied" and
+  `startpage` "Suspended: CAPTCHA" on the first request. So only `duckduckgo` is added: it
+  replaces D6's `google`, and `wlo` (D6 B) is removed; `keep_only`, the engine list and the
+  `SEARCH_SOURCES` default name the eight D2 engines plus `bing` and `duckduckgo`. Mojeek and
+  Startpage stay off with Google and Brave; an operator can switch them on as any other engine
+  (`inactive: false` as well, since SearXNG does not load them by default). DuckDuckGo is
+  scraped as well; the D6 notes on blocks apply.
   Jan also asked that a search across several sources lists every source's top hits first and
   drops duplicates. SearXNG orders by its score, which favours a page found by several engines,
   and merges duplicates only on the full URL without the scheme. So the client reorders

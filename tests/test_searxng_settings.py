@@ -1,7 +1,7 @@
 """SearXNG's settings.yml as this project ships it (package 25): the template that
 ``text-extraction-init`` renders into the compose stack and the Helm chart mounts. The engines
-with an official, free API (ruling D2 a) and the scraping engines bing, duckduckgo, mojeek and
-startpage (rulings D6 and D7) are on, SEARCH_SOURCES names exactly them, and the instance is a
+with an official, free API (ruling D2 a) and the scraping engines bing and duckduckgo (rulings D6
+and D7) are on, SEARCH_SOURCES names exactly them, and the instance is a
 private backend of the API: JSON on, limiter, image proxy and Valkey off."""
 
 from importlib.resources import files
@@ -24,9 +24,10 @@ D2_ENGINES = [
     "arxiv",
     "crossref",
 ]
-# Jan's choices of 2026-11-19 (rulings D6, D7): four scraping engines. google is left out (it
-# blocked the server, "Suspended: access denied", on the first day), and so is the wlo json engine.
-SCRAPING_ENGINES = ["bing", "duckduckgo", "mojeek", "startpage"]
+# Jan's choices of 2026-11-19 (rulings D6, D7): two scraping engines. google, mojeek and
+# startpage are left out (each blocked a server at once: "Suspended: access denied" or
+# "Suspended: CAPTCHA"), and so is the wlo json engine.
+SCRAPING_ENGINES = ["bing", "duckduckgo"]
 KEPT_ENGINES = D2_ENGINES + SCRAPING_ENGINES
 ALL_ENGINES = KEPT_ENGINES
 
@@ -57,14 +58,6 @@ def test_every_engine_is_switched_on() -> None:
     for name in ALL_ENGINES:
         assert engines[name]["disabled"] is False, name
     assert engines["wikipedia"]["display_type"] == ["list"]
-
-
-def test_engines_inactive_in_searxng_are_loaded() -> None:
-    # mojeek and startpage are `inactive: true` in SearXNG's own settings.yml (2026.11.2), so
-    # SearXNG would not load them at all without the override.
-    engines = {engine["name"]: engine for engine in _settings()["engines"]}
-    for name in ("mojeek", "startpage"):
-        assert engines[name]["inactive"] is False, name
 
 
 def test_json_is_on() -> None:

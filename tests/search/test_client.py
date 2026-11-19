@@ -840,8 +840,6 @@ def test_search_settings_defaults() -> None:
         "crossref",
         "bing",
         "duckduckgo",
-        "mojeek",
-        "startpage",
     ]
 
 

@@ -358,10 +358,5 @@ def test_main_engines_mode_asks_the_scraping_engines_by_default(
     code = run_search.main(["--expect", "engines", "--summary-out", str(tmp_path / "s.md")])
 
     assert code == 0
-    assert [body["sources"] for _, body in service.bodies] == [
-        ["bing"],
-        ["duckduckgo"],
-        ["mojeek"],
-        ["startpage"],
-    ]
+    assert [body["sources"] for _, body in service.bodies] == [["bing"], ["duckduckgo"]]
     assert "Web search, each engine alone" in (tmp_path / "s.md").read_text()

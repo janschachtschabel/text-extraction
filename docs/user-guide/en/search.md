@@ -16,7 +16,7 @@ your key may search (`features.search`) and how many hits one search may return
 
 ## The sources
 
-Every source is free. All but Bing, DuckDuckGo, Mojeek and Startpage have an official API. Each hit names the sources
+Every source is free. All but Bing and DuckDuckGo have an official API. Each hit names the sources
 that found it.
 
 | Source | What it finds | Limits |
@@ -31,13 +31,12 @@ that found it.
 | `crossref` | Scholarly works with a DOI from Crossref | Science only; metadata, often without a summary. |
 | `bing` | General web pages from Bing, in the language of `language` | No official API: SearXNG reads Bing's result pages (scraping). A search engine may block a server's address after a while; the source is then listed in `sources_failed`, and the answer is `partial`. |
 | `duckduckgo` | General web pages from DuckDuckGo, in the language of `language` | Scraping as with `bing`, with the same risk of a block. |
-| `mojeek` | General web pages from Mojeek, a search engine with its own index, in the language of `language` | Scraping as with `bing`, with the same risk of a block; a smaller index than Bing's. |
-| `startpage` | General web pages from Startpage, which passes on Google's results, in the language of `language` | Scraping as with `bing`, with the same risk of a block. |
 
-So German results come from Bing, DuckDuckGo, Mojeek and Startpage, Wikipedia knowledge from
-the Wikimedia sources and science from OpenAlex, arXiv and Crossref. Google and Brave stay off:
-Google blocked a server on its first day. An operator can switch the four scraped engines off, or
-switch another engine on (see [More sources](#more-sources)).
+So German results come from Bing and DuckDuckGo, Wikipedia knowledge from the Wikimedia sources
+and science from OpenAlex, arXiv and Crossref. Google, Mojeek, Startpage and Brave stay off:
+Google blocked a server on its first day, and Mojeek and Startpage refused the test servers at
+once. An operator can switch Bing and DuckDuckGo off, or switch another engine on (see
+[More sources](#more-sources)).
 
 When several sources are asked, the top hits of the sources come first: first the hits that are
 at the top of some source's list, then those in second place, and so on. A page that several
@@ -185,18 +184,18 @@ published: with an older image SearXNG gets no settings and does not start. If
 `docker compose logs init` shows `init_searxng_settings_failed`, remove the volume
 `searxng-config` (it holds only these settings) and deploy again. SearXNG answers from the VPS's
 own address. The sources with an official API do not block a server; Mwmbl counts requests per
-address. Bing, DuckDuckGo, Mojeek and Startpage may block the VPS's address after a while: they then appear in
+address. Bing and DuckDuckGo may block the VPS's address after a while: they then appear in
 `sources_failed`, and the other sources still answer. Such an answer is `partial` and is not
 cached, so while a block lasts every search asks all sources again; leave a blocked engine out of
 `SEARCH_SOURCES` if that happens for long (see [More sources](#more-sources)).
 
 ### More sources
 
-To keep the scraped engines off, set `SEARCH_SOURCES` without them (for example
+To keep Bing and DuckDuckGo off, set `SEARCH_SOURCES` without them (for example
 `wikipedia,wikibooks,wikiversity,wikinews,mwmbl,openalex,arxiv,crossref`): the service then
 never asks them. A source outside `SEARCH_SOURCES` is refused with a 422.
 
-To switch on another SearXNG engine (such as `google` or `brave`), at your own risk:
+To switch on another SearXNG engine (such as `mojeek` or `startpage`), at your own risk:
 
 1. Add its name to `use_default_settings.engines.keep_only` and to the `engines:` list (with
    `disabled: false`, and `inactive: false` for an engine SearXNG does not load by default) of
@@ -217,6 +216,6 @@ Where the settings come from depends on the setup:
   chart, or set `searxng.enabled=false` and `config.SEARCH_URL` to a SearXNG of your own.
 
 Scraping search engines gets the server's address blocked and goes against their terms. The
-project keeps Bing, DuckDuckGo, Mojeek and Startpage on by default because German web results need them (rulings D6 and D7 in
+project keeps Bing and DuckDuckGo on by default because German web results need them (rulings D6 and D7 in
 [architecture.md](../../architecture.md#web-search)); every other
 scraping engine stays off.
