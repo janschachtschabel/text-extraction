@@ -971,3 +971,23 @@ def test_failing_place_reader_costs_only_the_places(monkeypatch: pytest.MonkeyPa
     result = meta(page(head=head))
     assert result.title == "Halle"  # the rest of the metadata is read
     assert result.places == []
+
+
+def test_huge_coordinate_number_is_no_coordinate() -> None:
+    """A JSON-LD integer too large for a float overflows: no coordinates, the place stays."""
+    head = (
+        '<script type="application/ld+json">{"@type": "Place", "name": "Halle", '
+        '"geo": {"latitude": 1' + "0" * 400 + ', "longitude": 11}}</script>'
+    )
+    (place,) = meta(page(head=head)).places
+    assert (place.name, place.latitude, place.longitude) == ("Halle", None, None)
+
+
+def test_unhashable_id_costs_only_its_node() -> None:
+    graph = [
+        {"@id": ["x"], "@type": "Place", "name": "Kaputt", "address": {"@id": {"a": 1}}},
+        {"@type": "Place", "name": "Halle", "address": {"@id": "#adr"}},
+        {"@id": "#adr", "@type": "PostalAddress", "addressLocality": "Erfurt"},
+    ]
+    names = [(p.name, p.locality) for p in meta(page(head=jsonld({"@graph": graph}))).places]
+    assert names == [("Halle", "Erfurt")]

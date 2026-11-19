@@ -484,7 +484,7 @@ def _number(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except ValueError:
+    except (ValueError, OverflowError):  # an integer too large for a float overflows
         return None
     return number if math.isfinite(number) else None
 
@@ -585,7 +585,9 @@ _PLACE_REFERENCES = ("address", "geo", "location")
 def _resolved(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The nodes with the address, geo and location objects they refer to by ``@id`` (RDFa and
     ``@graph`` write them as separate nodes) put in place; referred nodes are not places of their
-    own then."""
+    own then. A node whose ``@id`` is no string or null (a list, an object) is skipped, and only
+    a string ``@id`` refers."""
+    nodes = [node for node in nodes if isinstance(node.get("@id"), str | None)]
     by_id = {
         node["@id"]: node for node in nodes if isinstance(node.get("@id"), str) and node["@id"]
     }
@@ -594,10 +596,11 @@ def _resolved(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def resolve(value: Any) -> Any:
         if isinstance(value, list):
             return [resolve(item) for item in value[:_MAX_VALUES_PER_PROPERTY]]
-        target = by_id.get(value.get("@id")) if isinstance(value, dict) else None
+        ref = value.get("@id") if isinstance(value, dict) else None
+        target = by_id.get(ref) if isinstance(ref, str) else None
         if target is None or set(value) != {"@id"}:
             return value
-        referred.add(value["@id"])
+        referred.add(ref)
         return target
 
     resolved = [
