@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 import structlog
 from fastmcp.server.dependencies import get_http_request
 from mcp_types import ImageContent, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 from starlette.datastructures import State
 
 from text_extraction.auth import Principal
@@ -29,6 +29,8 @@ from text_extraction.envelope import Envelope
 from text_extraction.job_models import BatchRequest, JobView
 from text_extraction.jobs import SCREENSHOT_ARTIFACT
 from text_extraction.jobs_api import (
+    MAX_PAGE_SIZE,
+    JobViewMode,
     batch_body_limit,
     check_jobs_enabled,
     delete_job,
@@ -122,12 +124,20 @@ class JobIdArguments(_JobArguments):
 
 class GetJobArguments(SlicedArguments):
     job_id: str = _job_id()
+    view: JobViewMode = Field(
+        default="full",
+        description="full: each item's whole result. summary: without content, metadata, "
+        "links, chunks and structured data, and without a site item's links: status, title, "
+        "word count, page type and the site's role and depth stay (a site map in few calls).",
+    )
     offset: int = Field(default=0, ge=0, description="Index of the first item of the page.")
     limit: int = Field(
         default=DEFAULT_PAGE_ITEMS,
         ge=1,
-        le=MAX_PAGE_ITEMS,
-        description="Items per page; they share max_chars of content.",
+        le=MAX_PAGE_SIZE,
+        description=f"Items per page, at most {MAX_PAGE_ITEMS} with view full (they share "
+        f"max_chars of content) and {MAX_PAGE_SIZE} with view summary; a page holds only as many "
+        "as fit MCP_MAX_ANSWER_CHARS (about 150 summary items), next_offset reads on.",
     )
     wait_seconds: float = Field(  # a number here, never None
         default=0,
@@ -137,8 +147,18 @@ class GetJobArguments(SlicedArguments):
         "the page is answered then, or when the time is up.",
     )
 
+    @field_validator("limit")
+    @classmethod
+    def _within_the_view(cls, value: int, info: ValidationInfo) -> int:
+        # An invalid view has its own error; no second one about the limit.
+        if info.data.get("view") == "full" and value > MAX_PAGE_ITEMS:
+            raise ValueError(f"limit is at most {MAX_PAGE_ITEMS} with view full")
+        return value
+
 
 class BatchExtractTool(ExtractionTool):
+    route = "POST /v1/batch"
+    rest_model = BatchRequest
     args_model = BatchExtractArguments
     waits = False
 
@@ -164,6 +184,8 @@ class BatchExtractTool(ExtractionTool):
 
 
 class SiteStructureTool(ExtractionTool):
+    route = "POST /v1/site-structure"
+    rest_model = SiteStructureRequest
     args_model = SiteStructureArguments
     waits = False
 
@@ -172,7 +194,8 @@ class SiteStructureTool(ExtractionTool):
             "site_structure",
             "Map a site as a job (POST /v1/site-structure): its pages by following links, its "
             "robots.txt and sitemaps. Poll get_job; each item's data.site has the role, depth "
-            "and links or sitemap entries.",
+            "and links or sitemap entries. get_job with view summary and limit 500 lists about "
+            "150 pages a call without their content and links.",
         )
 
     async def answer(
@@ -215,6 +238,24 @@ async def _wait_until_completed(
     return None
 
 
+def screenshot_hints(payload: dict[str, Any]) -> list[str]:
+    """One hint per item of the page whose result has a screenshot (package 24, gap 3): get_job
+    attaches no image, get_job_screenshot does."""
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    hints: list[str] = []
+    for item in data.get("items") or []:
+        result = item.get("result") if isinstance(item, dict) else None
+        found = result.get("data") if isinstance(result, dict) else None
+        if isinstance(found, dict) and isinstance(found.get("screenshot"), dict):
+            hints.append(
+                f"Item {item.get('index')} has a screenshot: get_job_screenshot with job_id "
+                f"{data.get('id')}."
+            )
+    return hints
+
+
 class GetJobTool(ModelTool):
     """Status, progress and one page of a job's items (``GET /v1/jobs/{id}``)."""
 
@@ -245,12 +286,14 @@ class GetJobTool(ModelTool):
         if gone is not None:
             _log.info("mcp_client_disconnected", tool=self.name, job_id=args.job_id)
             return payload_result(gone.model_dump(mode="json"), is_error=False)
-        envelope = await read_job(state, principal, args.job_id, args.offset, args.limit)
+        envelope = await read_job(
+            state, principal, args.job_id, args.offset, args.limit, view=args.view
+        )
         payload = envelope.model_dump(mode="json")
         max_chars = args.max_chars or settings.mcp_max_content_chars
         sliced = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
         cut = fit_answer(payload, max_chars=settings.mcp_max_answer_chars)
-        hints = [*kept_item_hints(payload, sliced), *cut]
+        hints = [*kept_item_hints(payload, sliced), *cut, *screenshot_hints(payload)]
         return payload_result(payload, is_error=False, hints=hints)
 
 
@@ -262,7 +305,8 @@ class GetJobScreenshotTool(ModelTool):
     def __init__(self) -> None:
         super().__init__(
             name="get_job_screenshot",
-            description="The screenshot of a screenshot job (PNG, JPEG or WebP, as its request "
+            description="The screenshot of a job (screenshot_url, or an extraction with "
+            "`screenshot: true` that continued as a job; PNG, JPEG or WebP, as its request "
             "asked; GET /v1/jobs/{id}/artifacts/screenshot.png, .jpg or .webp), attached as an "
             "image.",
             parameters=lean_schema(JobIdArguments),

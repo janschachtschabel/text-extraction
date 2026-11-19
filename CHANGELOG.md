@@ -11,6 +11,14 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Added
 
+- MCP agent usability (package 24). Each tool's `options` description lists the fields it takes
+  with a short hint, so an agent finds `pii`, `ocr`, `compliance`, `screenshot` and the others
+  without the API docs. `GET /v1/info` and `service_info` list the features the caller's key can
+  use (`features`) and the limits (`limits`). `extract_url`, `extract_structured` and `chunk`
+  attach their screenshot as `screenshot_url` does, and `get_job` points to
+  `get_job_screenshot`. `GET /v1/jobs/{id}` and `get_job` take `view=summary`: the items without
+  content, metadata and links, `get_job` about 150 site pages a call instead of 50; without `view`
+  nothing changes.
 - `text-extraction-init --new-key NAME [--role user|admin]` prints a new API key and the matching
   `API_KEYS` value, as a `.env` line, a shell `export` line and a Docker panel value, so nobody
   computes a SHA-256 or writes the JSON by hand. It reads and writes no secret and runs wherever the

@@ -140,7 +140,7 @@ def test_tools_list_job_tools(client: TestClient) -> None:
     assert tools["cancel_job"]["annotations"]["destructiveHint"] is True
     assert tools["cancel_job"]["annotations"]["readOnlyHint"] is False
     limit = tools["get_job"]["inputSchema"]["properties"]["limit"]
-    assert (limit["default"], limit["minimum"], limit["maximum"]) == (5, 1, 50)
+    assert (limit["default"], limit["minimum"], limit["maximum"]) == (5, 1, 500)
 
 
 def test_batch_and_get_job_paging(client: TestClient) -> None:
@@ -640,6 +640,20 @@ def test_get_job_screenshot_reads_the_name_from_the_result(
     }
 
 
+def test_get_job_hints_at_the_screenshot() -> None:
+    """Package 24, gap 3: get_job names get_job_screenshot for an item with a screenshot."""
+    case = BrowserCase(mcp_enabled=True)
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        started = call_tool(
+            client, "extract_url", {"url": PAGE, "options": {"screenshot": True}}, headers=AUTH
+        )
+        job_id = envelope_of(started)["data"]["screenshot"]["url"].split("/")[3]
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    assert result["isError"] is False
+    assert f"Item 0 has a screenshot: get_job_screenshot with job_id {job_id}." in hints_of(result)
+
+
 def test_get_job_screenshot_over_the_image_limit() -> None:
     with running(mcp_image_max_bytes=500) as client:
         job_id = start_batch(client)
@@ -699,3 +713,81 @@ def test_every_public_route_has_a_tool(client: TestClient) -> None:
 
     assert routes == set(TOOL_ROUTES)
     assert set(TOOL_ROUTES.values()) == tools
+
+
+def test_job_summary_view_drops_the_heavy_fields(client: TestClient) -> None:
+    """Package 24, gap 4: view=summary keeps status, title and word count, drops content."""
+    job_id = start_batch(client)
+    for index in range(3):
+        write(client, job_id, index, title=f"Page {index}")
+
+    full = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["data"]
+    explicit = client.get(f"/v1/jobs/{job_id}", params={"view": "full"}, headers=AUTH).json()
+    assert explicit["data"] == full  # without view nothing changes
+    summary = client.get(f"/v1/jobs/{job_id}", params={"view": "summary"}, headers=AUTH).json()
+
+    assert full["items"][0]["result"]["data"]["content"] == "Hello world"
+    assert summary["status"] == "success"
+    items = summary["data"]["items"]
+    assert [item["result"]["data"]["title"] for item in items] == ["Page 0", "Page 1", "Page 2"]
+    for item in items:
+        data = item["result"]["data"]
+        assert data["content"] is None
+        assert data["metadata"] is None
+        assert data["word_count"] == full["items"][0]["result"]["data"]["word_count"]
+
+    mcp = envelope_of(
+        call_tool(
+            client, "get_job", {"job_id": job_id, "view": "summary", "limit": 500}, headers=AUTH
+        )
+    )
+    assert mcp["data"]["items"] == items
+
+
+def test_get_job_full_view_keeps_its_cap(client: TestClient) -> None:
+    job_id = start_batch(client)
+
+    error = refusal(call_tool(client, "get_job", {"job_id": job_id, "limit": 51}, headers=AUTH))
+
+    assert error["code"] == "invalid_request"
+    assert "limit is at most 50 with view full" in json.dumps(error)
+
+
+def test_get_job_unknown_view_is_refused(client: TestClient) -> None:
+    job_id = start_batch(client)
+
+    response = client.get(f"/v1/jobs/{job_id}", params={"view": "tiny"}, headers=AUTH)
+
+    assert response.status_code == 422
+
+
+def test_get_job_summary_of_a_large_site_job() -> None:
+    """Package 24, gap 4: a summary page of realistic site items holds far more items than a
+    full page and stays within MCP_MAX_ANSWER_CHARS; next_offset reads on."""
+    from text_extraction.page_types import PageTypeInfo
+    from text_extraction.site.types import SiteInfo
+
+    urls = [f"{ORIGIN}/themen/biologie/zelle/seite-{n:04d}-photosynthese" for n in range(400)]
+    with running() as client:
+        job_id = start_batch(client, urls, mode="fast")
+        store = store_of(client)
+        for index, url in enumerate(urls):
+            envelope = success(url, "Body text " * 400)
+            assert envelope.data is not None
+            envelope.data.title = f"Photosynthese und Zellatmung, Teil {index} - Biologie"
+            envelope.data.site = SiteInfo(role="page", depth=2, parent=index // 10)
+            envelope.data.page_type = PageTypeInfo(type="content", signals=["schema_org", "h1"])
+            portal(client).call(store.write_result, job_id, index, envelope)
+
+        result = call_tool(
+            client, "get_job", {"job_id": job_id, "view": "summary", "limit": 500}, headers=AUTH
+        )
+
+    view = envelope_of(result)["data"]
+    shown = len(view["items"])
+    assert shown >= 120  # about 160 of these; a full page holds at most 50
+    assert view["next_offset"] == (shown if shown < 400 else None)
+    assert len(json.dumps(view, separators=(",", ":"))) < 200_000
+    first = view["items"][0]["result"]["data"]
+    assert first["page_type"] == {"type": "content", "signals": []}
+    assert first["quality"] is None

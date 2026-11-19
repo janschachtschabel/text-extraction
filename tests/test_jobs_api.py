@@ -1421,3 +1421,39 @@ def test_a_user_batch_keeps_no_llm_key_while_the_llm_is_for_admins(
     admin = api.batch([PAGE], headers={**ROOT, "X-LLM-Api-Key": LLM_KEY}, structured=auto)
     assert admin.status_code == 202, admin.text
     assert len(api.keys("job:*:llm_key")) == 1
+
+
+def test_summary_item_keeps_the_site_skeleton() -> None:
+    """Package 24, gap 4: a site item in view=summary keeps role, depth, parent and the
+    sitemap's entry count, without the links and the sitemap's entries."""
+    from text_extraction.job_models import JobItem
+    from text_extraction.jobs_api import summary_item
+    from text_extraction.site.types import SiteInfo, SiteLink, SitemapInfo
+
+    envelope = success("https://example.org/a", "Body text")
+    assert envelope.data is not None
+    link = SiteLink(
+        url="https://example.org/b",
+        text="B",
+        kind="internal",
+        source="a",
+        rel=[],
+        crawl="listed",
+    )
+    sitemap = SitemapInfo.model_validate(
+        {"format": "urlset", "entries": [{"loc": "https://example.org/c"}], "entry_count": 1}
+    )
+    envelope.data.site = SiteInfo(role="page", depth=1, parent=0, links=[link], sitemap=sitemap)
+    item = JobItem(index=1, url="https://example.org/a", state="done", result=envelope)
+
+    data = summary_item(item).result.data  # type: ignore[union-attr]
+
+    assert data is not None
+    assert data.content is None
+    assert data.site is not None
+    assert (data.site.role, data.site.depth, data.site.parent) == ("page", 1, 0)
+    assert data.site.links is None
+    assert data.site.sitemap is not None
+    assert data.site.sitemap.entries == []
+    assert data.site.sitemap.entry_count == 1
+    assert envelope.data.content == "Body text"  # the stored item is not changed

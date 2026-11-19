@@ -65,7 +65,7 @@ and a playground in English and German.
 | `POST /v1/site-structure` | The map of a site, as a job. |
 | `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | A job's state and results; cancel it. |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A file of a job, such as a screenshot. |
-| `GET /v1/info` | The service's version and the key's role. |
+| `GET /v1/info` | The service's version, the key's role, the features the key can use and the limits. |
 
 Every answer is the same result envelope (`status`, `error.code`, `error.retryable`,
 `upstream_status`, `mode_used`, timings): when the target fails, the API still answers 200 with
