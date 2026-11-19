@@ -687,6 +687,7 @@ one crawl. All are service defaults; the Helm chart sets them under `config` wit
 | `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
 | `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
 | `SITE_MAX_LINKS_PER_PAGE` | `1000` | Most links kept of one crawled page, in document order; the others are neither listed nor followed (warning `links_truncated`). 10 to 50000. |
+| `SITE_APIS_ENABLED` | `true` | Lets a crawl read the feeds, the WordPress REST API and the Drupal JSON:API its start page names, as sitemaps (request field `apis`); `false` ignores the field. |
 
 A crawl's items live in Valkey with its job, until `JOB_TTL_SECONDS`. Size Valkey for the crawls
 open at once: each page item holds up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about

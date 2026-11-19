@@ -384,6 +384,9 @@ class Settings(BaseSettings):
     # One sitemap file: the fetch cap and the cap of its gzip inflate (the protocol's 50 MiB).
     site_sitemap_max_bytes: int = Field(default=52_428_800, ge=1024, le=209_715_200)
     site_max_links_per_page: int = Field(default=1000, ge=10, le=50_000)  # more: links_truncated
+    # Package 26: a crawl's ``apis`` (feeds, WordPress REST API, Drupal JSON:API as sitemaps);
+    # false ignores the request field.
+    site_apis_enabled: bool = True
     # MCP endpoint (package 10, ruling P10-S9): FastMCP at /mcp on the public port, off by
     # default. Browser origins that may call it, as a comma list of ``scheme://host[:port]``
     # (empty: none; a client without a browser sends no Origin).

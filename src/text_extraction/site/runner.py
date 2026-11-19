@@ -11,7 +11,11 @@ only with its last item. ``ExtractRunner`` hands every item of a ``site`` job to
   ``site.links``: success, partial, or failed by a quality verdict) are judged
   (``follow.judge_links``) and sent to ``extend``, and the new items are queued. The start page
   (item 0) sets the crawl's scope from its ``final_url`` and first appends the robots item (when
-  ``sitemaps`` is asked), whatever its own outcome. Its answer keeps title, status, metadata and
+  ``sitemaps`` is asked), whatever its own outcome; then, with ``apis`` and
+  ``SITE_APIS_ENABLED``, the feeds and CMS APIs its head names (``site.apis``, kept in its
+  answer) as sitemap items at depth 0: each feed, the WordPress post types, the Drupal JSON:API
+  index (each counts against ``SITE_MAX_SITEMAP_FILES``; a refused one adds
+  ``sitemap_files_truncated``). Its answer keeps title, status, metadata and
   quality: ``content`` and ``links`` are null (D5 a), ``site`` has its depth, parent and typed
   links with ``crawl`` and ``target``. With ``discovery: sitemap_first`` the start page asks
   ``SitemapItems._sitemap_exists`` (before it extends); when the site has a sitemap, the links
@@ -84,6 +88,7 @@ from text_extraction.site.sitemap_items import (
 )
 from text_extraction.site.store import EXTEND_BATCH, Candidate, Finished, SiteContext, SiteStore
 from text_extraction.site.types import (
+    SiteApis,
     SiteInfo,
     SiteLink,
     SiteNode,
@@ -167,8 +172,27 @@ def _robots_url(url: str) -> str:
 
 def _with_warnings(result: ExtractResult, warnings: Sequence[str]) -> list[str]:
     merged = list(result.warnings)
-    merged += [warning for warning in warnings if warning not in merged]
+    for warning in warnings:
+        if warning not in merged:
+            merged.append(warning)
     return merged
+
+
+def _api_candidates(apis: SiteApis, *, add: bool) -> list[Candidate]:
+    """The sitemap items of the feeds and CMS APIs the start page names (package 26), in this
+    order: each feed, the WordPress post types, the Drupal JSON:API index."""
+    nodes: list[tuple[str, SiteNode]] = [
+        (feed, SiteNode(role="sitemap", depth=0, parent=0, source="feed")) for feed in apis.feeds
+    ]
+    if apis.wordpress is not None:
+        node = SiteNode(
+            role="sitemap", depth=0, parent=0, source="wordpress", api="wordpress_types"
+        )
+        nodes.append((f"{apis.wordpress}wp/v2/types", node))
+    if apis.drupal is not None:
+        node = SiteNode(role="sitemap", depth=0, parent=0, source="drupal", api="drupal_index")
+        nodes.append((apis.drupal, node))
+    return [Candidate(key=seen_key(url), url=url, node=node, add=add) for url, node in nodes]
 
 
 class SiteRunner(SitemapItems):
@@ -297,7 +321,13 @@ class SiteRunner(SitemapItems):
         else:
             data = data.model_copy(update={"content": None, "links": None})
         site = SiteInfo(
-            role="page", depth=node.depth, parent=node.parent, links=None, nofollow=nofollow
+            role="page",
+            depth=node.depth,
+            parent=node.parent,
+            links=None,
+            nofollow=nofollow,
+            # Only the start page reports the site's feeds and APIs (R26-6).
+            apis=found.apis if found is not None and item.index == 0 else None,
         )
         warnings: list[str] = []
         caps: set[str] = set()
@@ -325,6 +355,21 @@ class SiteRunner(SitemapItems):
                     add=not guard_high,
                 )
             )
+        if (
+            item.index == 0
+            and options.apis
+            and self._settings.site_apis_enabled
+            and found is not None
+            and found.apis is not None
+        ):
+            known = {candidate.key for candidate in candidates}
+            candidates += [
+                candidate
+                for candidate in unique_candidates(_api_candidates(found.apis, add=not guard_high))
+                if candidate.key not in known
+            ]
+        # The robots and API candidates of item 0 lead; the page's links follow them.
+        files_kept = len(candidates)
         judged: list[tuple[SiteLink, Candidate | None]] = []
         if links is not None:
             child_depth = node.depth + 1
@@ -377,14 +422,20 @@ class SiteRunner(SitemapItems):
                 max_pages=options.max_pages,
             )
             appended = len(extended.new)
-            robots_kept = 1 if item.index == 0 and options.sitemaps else 0
-            if robots_kept and extended.answer(0) == (None, True) and guard_high:
-                warnings.append(SITE_MEMORY_GUARD_WARNING)
-                caps.add("memory")
+            for position in range(files_kept):
+                if extended.answer(position) != (None, True):
+                    continue
+                # Refused: the memory guard, else (an API item) SITE_MAX_SITEMAP_FILES.
+                if guard_high:
+                    warnings.append(SITE_MEMORY_GUARD_WARNING)
+                    caps.add("memory")
+                elif candidates[position].node.role == "sitemap":
+                    warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
+                    caps.add("files")
             by_key = {
                 candidate.key: extended.answer(position)
                 for position, candidate in enumerate(candidates)
-                if position >= robots_kept
+                if position >= files_kept
             }
             decided: list[SiteLink] = []
             for link, candidate in judged:

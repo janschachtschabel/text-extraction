@@ -38,6 +38,17 @@ not the other way round:
   ``out_of_scope``. A children list that does not fit the item is cut (``sitemap_truncated``),
   and only the kept ones are followed. A child refused by ``SITE_MAX_SITEMAP_FILES`` says
   ``max_files``, with ``sitemap_files_truncated``.
+- **API lists** (package 26): a sitemap item with ``node.api`` (appended by the start page) is
+  fetched as a sitemap, skips the guess logic, fails on a status other than 2xx as a sitemap
+  does, and is parsed by ``site/apis.py`` on the same pool under the same deadline (a 200 that
+  is no JSON fails ``conversion_failed``); grants, parts and warnings are a sitemap's. A
+  WordPress types or Drupal index item lists one child per content type (``scope: path``: only
+  types whose name matches the path prefix), one level deeper; a list page's one child is its
+  next page at its own depth (``page`` + 1), so ``SITE_MAX_SITEMAP_FILES`` ends the chain.
+  Entries get their ``type_guess`` from URL, title and the list's content type.
+
+Every item's ``SitemapInfo`` (and its parts') carries the node's ``source``: ``robots`` (listed),
+``guess``, ``feed``, ``wordpress`` or ``drupal``; an index's children inherit it.
 
 Results of robots and sitemap items are built by ``site_result``: ``mode_used`` fast, ``format``
 text, ``content`` null.
@@ -45,8 +56,9 @@ text, ``content`` null.
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
 
@@ -62,6 +74,13 @@ from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
+from text_extraction.site.apis import (
+    api_type_hint,
+    parse_drupal_index,
+    parse_drupal_nodes,
+    parse_wordpress_posts,
+    parse_wordpress_types,
+)
 from text_extraction.site.follow import unique_candidates
 from text_extraction.site.sitemaps import (
     ParsedSitemap,
@@ -72,6 +91,7 @@ from text_extraction.site.sitemaps import (
 )
 from text_extraction.site.store import Candidate, Finished, SiteContext, SiteStore
 from text_extraction.site.types import (
+    ApiFormat,
     Crawl,
     SiteInfo,
     SiteLink,
@@ -328,6 +348,7 @@ class SitemapItems:
                     parent=item.index,
                     guessed=guessed,
                     guess=0 if guessed else None,
+                    source="guess" if guessed else "robots",
                 ),
                 add=not guard_high,
             )
@@ -400,12 +421,15 @@ class SitemapItems:
         # A guessed address that is no sitemap moves on: a 404 or 410, and a 2xx whose first bytes
         # are none (a CMS that answers every path with its page). ``_sitemap_exists`` reads the
         # same, so a probe's yes always meets a sitemap that is read.
-        not_there = fetched.status in (404, 410) or (
-            200 <= fetched.status < 300
-            and not looks_like_sitemap(fetched.content[:SITEMAP_PROBE_MAX_BYTES])
+        not_there = node.api is None and (
+            fetched.status in (404, 410)
+            or (
+                200 <= fetched.status < 300
+                and not looks_like_sitemap(fetched.content[:SITEMAP_PROBE_MAX_BYTES])
+            )
         )
         if not_there and node.guessed:
-            info = SitemapInfo(format="absent", guessed=True)
+            info = SitemapInfo(format="absent", source=node.source, guessed=True)
             more, outcome = await self._guess_next(job, item, url, node)
             absent = [SITEMAP_NOT_FOUND_WARNING, *more]
             return Envelope(status="success", data=result(info, absent)), outcome
@@ -419,22 +443,39 @@ class SitemapItems:
         # What this item may keep: its grant on a rerun, else what is left of the crawl's. With
         # nothing left a file is read only to its first entry (an index is read whole).
         left = await self._sites.entries_left(job.id, item.index)
-        type_hint = sitemap_type_hint(url)
         deadline = started + self._item_budget
+        read: Callable[[], tuple[ParsedSitemap, bool]]
+        if node.api is not None:
+            type_hint = api_type_hint(node.api, url)
+            read = partial(
+                _read_api,
+                node.api,
+                fetched.content,
+                url,
+                host=context.scope.host if context.scope is not None else site_host(url),
+                path_prefix=_type_prefix(context.scope),
+                total_pages=_total_pages(fetched.headers),
+                max_entries=left,
+                type_hint=type_hint,
+            )
+        else:
+            type_hint = sitemap_type_hint(url)
+            read = partial(
+                _read_sitemap,
+                fetched.content,
+                fetched.final_url,
+                settings.site_sitemap_max_bytes,
+                left,
+                deadline,
+                type_hint,
+            )
         try:
             # The parse stops itself at the deadline and answers what it read; this timeout,
-            # later by a grace, ends only a wait for the pool's thread that outlasts it.
+            # later by a grace, ends only a wait for the pool's thread that outlasts it (an API
+            # list is parsed whole: JSON has no partial read).
             seconds = max(deadline - time.monotonic(), 0.0) + _PARSE_GRACE_SECONDS
             async with asyncio.timeout(seconds):
-                parsed, inflate_cut = await self._pool.run(
-                    _read_sitemap,
-                    fetched.content,
-                    fetched.final_url,
-                    settings.site_sitemap_max_bytes,
-                    left,
-                    deadline,
-                    type_hint,
-                )
+                parsed, inflate_cut = await self._pool.run(read)
         except TimeoutError:
             return failed(ErrorCode.TIMEOUT, _SITEMAP_SLOT_MESSAGE, retryable=True), _Outcome(
                 links=[]
@@ -493,6 +534,7 @@ class SitemapItems:
                             parent=item.index,
                             sitemap=SitemapInfo(
                                 format=sitemap_format,
+                                source=node.source,
                                 guessed=node.guessed,
                                 type_hint=type_hint,
                                 entries=part,
@@ -514,6 +556,7 @@ class SitemapItems:
         ]
         info = SitemapInfo(
             format=sitemap_format,
+            source=node.source,
             guessed=node.guessed,
             type_hint=type_hint,
             entries=parts[0],
@@ -645,7 +688,12 @@ class SitemapItems:
             key=seen_key(target),
             url=target,
             node=SiteNode(
-                role="sitemap", depth=0, parent=item.index, guessed=True, guess=following
+                role="sitemap",
+                depth=0,
+                parent=item.index,
+                guessed=True,
+                guess=following,
+                source="guess",
             ),
             add=not guard_high,
         )
@@ -684,8 +732,17 @@ class SitemapItems:
     ) -> list[tuple[SitemapChild, Candidate | None]]:
         """An index's children with their preliminary ``crawl`` and candidates: one level
         deeper, on the index's host or the crawl's; deeper than ``MAX_SITEMAP_NESTING`` looked
-        up only."""
+        up only. They keep the index's ``source``. An API types or index item's children are the
+        first pages of its content lists (one level deeper); an API list page's one child is its
+        next page, at its own depth."""
+        api: ApiFormat | None = None
+        page: int | None = None
         depth = node.depth + 1
+        if node.api in ("wordpress_types", "drupal_index"):
+            api = "wordpress_posts" if node.api == "wordpress_types" else "drupal_nodes"
+            page = 1
+        elif node.api is not None:
+            api, page, depth = node.api, (node.page or 1) + 1, node.depth
         hosts = {site_host(url)}
         if scope is not None:
             hosts.add(scope.host)
@@ -700,7 +757,14 @@ class SitemapItems:
             candidate = Candidate(
                 key=seen_key(child.url),
                 url=child.url,
-                node=SiteNode(role="sitemap", depth=depth, parent=parent),
+                node=SiteNode(
+                    role="sitemap",
+                    depth=depth,
+                    parent=parent,
+                    source=node.source,
+                    api=api,
+                    page=page,
+                ),
                 add=not deep and not guard_high,
             )
             judged.append((child.model_copy(update={"crawl": crawl}), candidate))
@@ -727,6 +791,54 @@ def _with_site(
     else:
         data = data.model_copy(update={"site": site})
     return envelope.model_copy(update={"data": data})
+
+
+def _type_prefix(scope: SiteScope | None) -> str | None:
+    """The path prefix that the content types of an API must match (``scope: path``); None
+    for ``scope: host`` and for a prefix without a segment (``/``: the whole site)."""
+    prefix = scope.path_prefix if scope is not None else None
+    return prefix if prefix is not None and prefix.strip("/") else None
+
+
+def _total_pages(headers: Mapping[str, str]) -> int | None:
+    """WordPress's ``X-WP-TotalPages`` as a number, else None."""
+    value = headers.get("x-wp-totalpages", "").strip()
+    return int(value) if value.isascii() and value.isdigit() and len(value) <= 9 else None
+
+
+def _read_api(
+    api: ApiFormat,
+    body: bytes,
+    url: str,
+    *,
+    host: str,
+    path_prefix: str | None,
+    total_pages: int | None,
+    max_entries: int,
+    type_hint: PageType | None,
+) -> tuple[ParsedSitemap, bool]:
+    """Parse one page of a CMS API (``site/apis.py``) on a pool thread, with each entry's
+    ``type_guess`` from its URL, its title and the list's content type. The second value (a cut
+    inflate) is always False: an API answer is no gzip file."""
+    if api == "wordpress_types":
+        parsed = parse_wordpress_types(
+            body, url.removesuffix("wp/v2/types"), path_prefix=path_prefix
+        )
+    elif api == "drupal_index":
+        parsed = parse_drupal_index(body, _origin(url), path_prefix=path_prefix)
+    elif api == "wordpress_posts":
+        parsed = parse_wordpress_posts(
+            body, url, site_host=host, total_pages=total_pages, max_entries=max_entries
+        )
+    else:
+        parsed = parse_drupal_nodes(body, _origin(url), site_host=host, max_entries=max_entries)
+    for position, entry in enumerate(parsed.entries):
+        guess = guess_type(
+            entry.loc, link_text=entry.title or "", sitemap_hint=type_hint, hint_reason="api"
+        )
+        if guess is not None:
+            parsed.entries[position] = entry.model_copy(update={"type_guess": guess.type})
+    return parsed, False
 
 
 def _read_sitemap(
