@@ -4,9 +4,9 @@ Deutsch: [MCP](../de/mcp.md)
 
 With `MCP_ENABLED=true` (Helm `mcp.enabled=true`; Docker Compose switches it on for the API) the
 service is an MCP server at `https://<host>/mcp` (streamable HTTP, stateless, JSON answers). An
-AI assistant such as Claude then extracts pages, files, sites and structured data with the 11
-tools of the server. This page covers the setup, the authentication, the tools, the job pattern,
-long content, errors and example prompts.
+AI assistant such as Claude then extracts pages, files, sites and structured data with the 12
+tools of the server, and finds pages with its web search. This page covers the setup, the
+authentication, the tools, the job pattern, long content, errors and example prompts.
 
 ## Setup
 
@@ -65,7 +65,7 @@ Under `AUTH_MODE=none` leave the header out.
 A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and `X-ASR-Api-Key`
 (another `--header` each); it is never a tool argument.
 
-## The 11 tools
+## The 12 tools
 
 | Tool | Purpose | Route | Main arguments (besides `options`) |
 | --- | --- | --- | --- |
@@ -80,6 +80,7 @@ A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and 
 | `get_job_screenshot` | The image of a screenshot job, or of an extraction with `screenshot: true` that continued as a job (PNG, JPEG or WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; no `options` |
 | `cancel_job` | Cancel a job and delete it with its results. | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
 | `service_info` | The service's name and version, the key's name and role, the features the key can use and the limits. | `GET /v1/info` | none |
+| `web_search` | Search the web through the service's SearXNG; read the hits with `extract_url` or `batch_extract`. | `POST /v1/search` | `query` (required), `max_results` (10, at most `SEARCH_MAX_RESULTS`), `language`, `sources` (from `SEARCH_SOURCES`), `page` (1), `time_range`; no `options`; needs `SEARCH_ENABLED=true` |
 
 `options` takes any further field of the route's REST body (see [Parameters](parameters.md)),
 for example `{"pii": {"mode": "mask"}}` or `{"metadata": false}`; a field given both as an

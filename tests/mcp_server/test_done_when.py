@@ -54,7 +54,7 @@ TEXT = (
     "Unterricht verändert und weitergegeben werden."
 )
 SUBPAGES = ("a", "b", "c")
-# The tools of ruling P10-S5.
+# The tools of ruling P10-S5, and web_search (package 25).
 EXPECTED_TOOLS = {
     "extract_url",
     "extract_file",
@@ -67,6 +67,7 @@ EXPECTED_TOOLS = {
     "get_job_screenshot",
     "cancel_job",
     "service_info",
+    "web_search",
 }
 METADATA_SCHEMA = {
     "type": "object",

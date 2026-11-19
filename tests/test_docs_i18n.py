@@ -422,9 +422,9 @@ def test_use_case_pages_exist(language: Path) -> None:
 def test_mcp_guide_names_every_tool(language: Path) -> None:
     """The tools table of the MCP page has one row per tool of the server, with its route."""
     tools = sorted(TOOL_ROUTES.values())
-    assert len(set(tools)) == 11
+    assert len(set(tools)) == 12
     text = _read(language / "mcp.md")
-    rows = _TOOL_ROW.findall(_section(text, " 11 "))
+    rows = _TOOL_ROW.findall(_section(text, " 12 "))
     assert sorted(name for name, _, _ in rows) == tools
     routes = {tool: route for route, tool in TOOL_ROUTES.items()}
     wrong = [

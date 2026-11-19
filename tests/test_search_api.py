@@ -16,8 +16,9 @@ from prometheus_client import CollectorRegistry
 
 from text_extraction.app import create_public_app
 from text_extraction.auth import principal_for
+from text_extraction.errors import ServiceError
 from text_extraction.search.types import SearchRequest
-from text_extraction.search_api import run_search
+from text_extraction.search_api import SEARCH_DISABLED_MESSAGE, run_search
 from text_extraction.settings import Settings
 
 USER_KEY = "search-user-key-0123456789-secret"
@@ -280,3 +281,34 @@ def test_core_answers_like_the_route() -> None:
     rest.pop("trace_id")
     answer.pop("trace_id")
     assert answer == rest
+
+
+def test_empty_sources_is_422() -> None:
+    """``sources: []`` is refused, not read as every source (Task 2 review, ruling)."""
+    searx = serving(searx_answer("https://example.org/a"))
+    with running(searx) as client:
+        response = search(client, {"query": "plants", "sources": []})
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    (detail,) = error["details"]
+    assert detail["loc"] == ["body", "sources"]
+    assert "at least one source" in detail["msg"]
+    assert "leave sources out" in detail["msg"]
+    assert searx.requests == []
+
+
+def test_core_refuses_while_search_is_off() -> None:
+    """The core checks the switch itself: a caller that skips ``check_search_enabled`` gets the
+    400, not a 500 from the missing client (Task 2 review, ruling)."""
+    with running(search_enabled=False) as client:
+        state = cast(FastAPI, client.app).state
+        principal = principal_for(state.settings, f"Bearer {ADMIN_KEY}")
+        portal = client.portal
+        assert portal is not None
+        with pytest.raises(ServiceError) as raised:
+            portal.call(partial(run_search, state, principal, SearchRequest(query="plants")))
+
+    assert (raised.value.code, raised.value.http_status) == ("invalid_request", 400)
+    assert raised.value.message == SEARCH_DISABLED_MESSAGE

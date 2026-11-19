@@ -146,7 +146,7 @@ over a changed default: compare it with `.env.example` after an update.
 - A whole site with the metadata and licences of its pages:
   [A whole site and its metadata](docs/user-guide/en/whole-site-and-metadata.md).
 - Structured data and chunks: [Structured data](docs/user-guide/en/structured-data.md).
-- An AI assistant with the 11 tools of the MCP server: [MCP](docs/user-guide/en/mcp.md).
+- An AI assistant with the 12 tools of the MCP server: [MCP](docs/user-guide/en/mcp.md).
 - Respecting a site's rules, or maximum extraction for contract partners:
   [Site rules](docs/user-guide/en/site-rules.md).
 - Trying it out in the browser: [the playground](docs/user-guide/en/usage.md#the-playground).
@@ -167,7 +167,7 @@ extracts the pages you pick: see [Part of a site](docs/user-guide/en/part-of-a-s
 
 ## MCP
 
-With `MCP_ENABLED=true` (on in docker compose) the service is an MCP server at `https://<host>/mcp` with 11 tools, for
+With `MCP_ENABLED=true` (on in docker compose) the service is an MCP server at `https://<host>/mcp` with 12 tools, for
 Claude Code, Claude Desktop and other clients, authenticated with an API key of the service: see
 [MCP](docs/user-guide/en/mcp.md).
 

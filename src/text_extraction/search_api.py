@@ -88,15 +88,18 @@ def _invalid(field: str, message: str) -> RequestValidationError:
 
 
 def _check(body: SearchRequest, settings: Settings) -> None:
-    """422 for a ``max_results`` over ``SEARCH_MAX_RESULTS`` and for a source that is not in
-    ``SEARCH_SOURCES`` (compared in lower case, around blanks). A name with a comma or an empty
-    one is never in ``SEARCH_SOURCES``, so it cannot split SearXNG's comma list ``engines``."""
+    """422 for a ``max_results`` over ``SEARCH_MAX_RESULTS``, for an empty ``sources`` list (it
+    would read as every source) and for a source that is not in ``SEARCH_SOURCES`` (compared in
+    lower case, around blanks). A name with a comma or an empty one is never in
+    ``SEARCH_SOURCES``, so it cannot split SearXNG's comma list ``engines``."""
     if body.max_results > settings.search_max_results:
         raise _invalid(
             "max_results",
             f"max_results may be at most {settings.search_max_results} (SEARCH_MAX_RESULTS).",
         )
     allowed = settings.search_sources
+    if body.sources == []:
+        raise _invalid("sources", "Name at least one source in sources, or leave sources out.")
     if body.sources and any(name.strip().lower() not in allowed for name in body.sources):
         raise _invalid(
             "sources",
@@ -128,9 +131,10 @@ async def search_web(
     answered, the answer is 200 with `status: failed` and `search_failed` (retryable; not when
     SearXNG refuses JSON answers, a setting of the service).
 
-    4xx answers: an invalid body, a `max_results` over `SEARCH_MAX_RESULTS` or a source outside
-    `SEARCH_SOURCES` (422, the message lists the allowed names), a user key while
-    `SEARCH_ALLOW_USERS` is false (403), web search not enabled (400).
+    4xx answers: an invalid body, a `max_results` over `SEARCH_MAX_RESULTS`, an empty `sources`
+    list or a source outside `SEARCH_SOURCES` (422; for a source outside, the message lists the
+    allowed names), a user key while `SEARCH_ALLOW_USERS` is false (403), web search not enabled
+    (400).
     """
     return await run_search(request.app.state, principal, body)
 
@@ -138,12 +142,16 @@ async def search_web(
 async def run_search(
     state: State, principal: Principal, body: SearchRequest
 ) -> Envelope[SearchResult]:
-    """The core of ``POST /v1/search`` (ruling P10-S1): the feature access (403 for a user key
-    while ``SEARCH_ALLOW_USERS`` is false), the deployment's bounds (422), then the search.
+    """The core of ``POST /v1/search`` (ruling P10-S1): the switch (400 while
+    ``SEARCH_ENABLED`` is false, so a caller that skips its own check never reaches the missing
+    client), the feature access (403 for a user key while ``SEARCH_ALLOW_USERS`` is false), the
+    deployment's bounds (422), then the search.
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_search_enabled`` (400), then one ``check_rate`` hit."""
+    key has) and one ``check_rate`` hit. The REST route also runs ``check_search_enabled`` as a
+    dependency, so its 400 comes before the rate hit; the MCP call guard counts the hit first."""
     settings: Settings = state.settings
+    check_search_enabled(settings)
     check_feature_access(principal, settings, search=True)
     _check(body, settings)
     http: httpx.AsyncClient = state.search_http

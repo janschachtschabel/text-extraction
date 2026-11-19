@@ -28,6 +28,8 @@ SERVER_NAME = "text-extraction"
 SERVER_INSTRUCTIONS = (
     "Turns web pages, files, audio and video into clean text or Markdown. "
     "Use extract_url for pages and documents at a URL. "
+    "To find pages first, use web_search where the service offers it, then read the hits with "
+    "extract_url or batch_extract. "
     "A result whose data has a status_url is a job: poll get_job with its job_id and "
     "wait_seconds until it is completed. "
     "The options argument takes any further field of the REST body of the tool's route "
@@ -46,6 +48,7 @@ TOOL_ROUTES: Mapping[tuple[str, str], str] = {
     ("DELETE", "/v1/jobs/{job_id}"): "cancel_job",
     ("GET", "/v1/jobs/{job_id}/artifacts/{name}"): "get_job_screenshot",
     ("GET", "/v1/info"): "service_info",
+    ("POST", "/v1/search"): "web_search",
 }
 # FastMCP's import gives its logger a rich text handler on stderr that does not propagate; the
 # service logs JSON on stdout through the root logger. Below WARNING, FastMCP logs tool arguments
@@ -90,6 +93,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
     from text_extraction.mcp_server.tools_extract import extraction_tools
     from text_extraction.mcp_server.tools_info import ServiceInfoTool
     from text_extraction.mcp_server.tools_jobs import job_tools
+    from text_extraction.mcp_server.tools_search import WebSearchTool
 
     _log_through_root()
     metrics = ToolMetrics(registry)
@@ -100,7 +104,12 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
         mask_error_details=True,
         middleware=[CallGuard(state, metrics)],
     )
-    tools: list[ModelTool] = [*extraction_tools(settings), *job_tools(), ServiceInfoTool()]
+    tools: list[ModelTool] = [
+        *extraction_tools(settings),
+        *job_tools(),
+        ServiceInfoTool(),
+        WebSearchTool(settings),
+    ]
     for tool in tools:
         register(server, state, tool)
     metrics.export(tool.name for tool in tools)

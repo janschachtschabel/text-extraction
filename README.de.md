@@ -52,7 +52,7 @@ Englisch.
   Websites, die die Extraktion vertraglich erlaubt haben, kann ein Admin die Prüfungen ausschalten
   und den Entsperr-Browser nutzen (siehe unten).
 - **Schnittstellen.** Eine REST-API mit OpenAPI unter `/docs`, Jobs für lange Arbeiten, ein
-  MCP-Server mit 11 Tools und eine Spielwiese unter `/ui` auf Deutsch und Englisch.
+  MCP-Server mit 12 Tools und eine Spielwiese unter `/ui` auf Deutsch und Englisch.
 - **Betrieb.** Docker Compose und ein Helm-Chart; zustandslose Pods, der Zustand liegt in Valkey;
   API-Schlüssel mit den Rollen `user` und `admin` und einer Ratenbegrenzung pro Schlüssel; ein
   Ergebnis-Cache; ein SSRF-Schutz und Grenzen für Bytes und Zeit bei jedem Abruf; JSON-Logs,
@@ -160,7 +160,7 @@ und ein Wert darin geht einem geänderten Standard vor: Vergleichen Sie sie nach
 - Eine ganze Website mit den Metadaten und Lizenzen ihrer Seiten:
   [Eine ganze Website und ihre Metadaten](docs/user-guide/de/whole-site-and-metadata.md).
 - Strukturierte Daten und Chunks: [Strukturierte Daten](docs/user-guide/de/structured-data.md).
-- Ein KI-Assistent mit den 11 Tools des MCP-Servers: [MCP](docs/user-guide/de/mcp.md).
+- Ein KI-Assistent mit den 12 Tools des MCP-Servers: [MCP](docs/user-guide/de/mcp.md).
 - Die Regeln einer Website beachten oder die maximale Extraktion für Vertragspartner:
   [Website-Regeln](docs/user-guide/de/site-rules.md).
 - Ausprobieren im Browser: [die Spielwiese](docs/user-guide/de/usage.md#die-spielwiese).
@@ -182,7 +182,7 @@ ein Batch extrahiert dann die Seiten, die Sie auswählen: siehe
 
 ## MCP
 
-Mit `MCP_ENABLED=true` (in docker compose an) ist der Dienst ein MCP-Server unter `https://<host>/mcp` mit 11 Tools, für
+Mit `MCP_ENABLED=true` (in docker compose an) ist der Dienst ein MCP-Server unter `https://<host>/mcp` mit 12 Tools, für
 Claude Code, Claude Desktop und andere Clients, angemeldet mit einem API-Schlüssel des Dienstes:
 siehe [MCP](docs/user-guide/de/mcp.md).
 

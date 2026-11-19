@@ -423,7 +423,7 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500; `view=summary` drops the large result fields, package 24); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`, as `image/png`, `image/jpeg` or `image/webp`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 400 `invalid_request` while jobs are disabled, 503 while Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
-| `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
+| `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 12 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
 | `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
 
 Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI). `/ready` does not look at
@@ -3218,7 +3218,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   mask_error_details=True)` served by `http_app(path="/mcp", stateless_http=True,
   json_response=True)` as one Starlette route with the methods `GET`, `POST` and `DELETE`: `/mcp/`
   is 404, `GET /mcp` 405 (no stream). The public lifespan enters the MCP app's lifespan. The
-  server's instructions tell a model to use `extract_url` for pages and documents, to poll
+  server's instructions tell a model to use `extract_url` for pages and documents (and
+  `web_search` to find pages first, since package 25), to poll
   `get_job` with `wait_seconds` when an answer's `data` has a `status_url`, and that `options`
   takes any field of the REST body (`/docs`).
 - **Gate (P10-S3).** A pure ASGI gate in front of FastMCP runs for every HTTP request, after the
@@ -3237,7 +3238,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
 - **Tools (P10-S5).** Eleven tools, one per public capability: `extract_url`, `extract_file`,
   `screenshot_url`, `extract_structured`, `chunk`, `batch_extract`, `site_structure` (open world,
   each with `options`), `get_job`, `get_job_screenshot`, `service_info` (read only) and
-  `cancel_job` (destructive). A call validates its arguments, merges `options` under them (a key
+  `cancel_job` (destructive). Package 25 adds a twelfth, `web_search` (`POST /v1/search`, read
+  only and open world, no `options`: its arguments are the whole REST body; listed while search
+  is off, as the job tools are while jobs are off, and then answers the route's 400). A call validates its arguments, merges `options` under them (a key
   given in both is `invalid_request`, "<key> is given twice."), holds the merged body to the
   route's body limit and validates it with the REST model, so extra fields, a user's
   `compliance: ignore`, an `evaluate` action or an XPath rule are refused exactly as REST refuses

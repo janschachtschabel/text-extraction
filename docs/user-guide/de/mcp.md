@@ -5,8 +5,9 @@ English: [MCP](../en/mcp.md)
 Mit `MCP_ENABLED=true` (Helm `mcp.enabled=true`; Docker Compose schaltet es für die API ein) ist
 der Dienst ein MCP-Server unter `https://<host>/mcp` (Streamable HTTP, zustandslos,
 JSON-Antworten). Ein KI-Assistent wie Claude extrahiert dann Seiten, Dateien, Websites und
-strukturierte Daten mit den 11 Tools des Servers. Diese Seite beschreibt die Einrichtung, die
-Anmeldung, die Tools, den Umgang mit Jobs, langen Inhalt, Fehler und Beispiel-Prompts.
+strukturierte Daten mit den 12 Tools des Servers und findet Seiten mit seiner Websuche. Diese
+Seite beschreibt die Einrichtung, die Anmeldung, die Tools, den Umgang mit Jobs, langen Inhalt,
+Fehler und Beispiel-Prompts.
 
 ## Einrichtung
 
@@ -69,7 +70,7 @@ Aufruf mehr. Ein Schlüssel, der es wählen darf, kann außerdem `compliance: ig
 Ein eigener LLM- oder ASR-Schlüssel wird auf dieselbe Weise übergeben, als Header `X-LLM-Api-Key`
 und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines Tools.
 
-## Die 11 Tools
+## Die 12 Tools
 
 | Tool | Zweck | Route | Wichtige Argumente (neben `options`) |
 | --- | --- | --- | --- |
@@ -84,6 +85,7 @@ und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines 
 | `get_job_screenshot` | Das Bild eines Screenshot-Jobs oder einer Extraktion mit `screenshot: true`, die als Job weiterlief (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
 | `cancel_job` | Einen Job abbrechen und mit seinen Ergebnissen löschen. | `DELETE /v1/jobs/{id}` | `job_id`; keine `options` |
 | `service_info` | Name und Version des Dienstes, Name und Rolle des Schlüssels, die Funktionen, die der Schlüssel nutzen kann, und die Grenzen. | `GET /v1/info` | keine |
+| `web_search` | Das Web über das SearXNG des Dienstes durchsuchen; die Treffer mit `extract_url` oder `batch_extract` lesen. | `POST /v1/search` | `query` (Pflicht), `max_results` (10, höchstens `SEARCH_MAX_RESULTS`), `language`, `sources` (aus `SEARCH_SOURCES`), `page` (1), `time_range`; keine `options`; braucht `SEARCH_ENABLED=true` |
 
 `options` nimmt jedes weitere Feld des REST-Bodys der Route (siehe [Parameter](parameters.md)),
 zum Beispiel `{"pii": {"mode": "mask"}}` oder `{"metadata": false}`; ein Feld, das sowohl als
