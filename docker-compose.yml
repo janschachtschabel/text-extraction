@@ -103,7 +103,7 @@ services:
   # searxng:searxng (init's user owns it): harmless, the file is world-readable. The API does not
   # wait for it: while it is down a search answers search_failed.
   searxng:
-    image: searxng/searxng:2026.11.2-cccbc9e15
+    image: searxng/searxng:2026.11.6-ac11e14c5
     restart: unless-stopped
     networks:
       - backend
